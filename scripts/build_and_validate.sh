@@ -15,7 +15,7 @@ SCONS_BIN="${TICKSYNC_SCONS_BIN:-scons}"
 MODE="quick"
 EDITOR_DEV_BUILD="yes"
 TEST_FILTER="*TickSynchronizer*"
-MIN_TEST_CASES=98
+MIN_TEST_CASES=127
 RUN_SMOKE=1
 CLEAN_FIRST=0
 ALLOW_GODOT_MISMATCH=0
@@ -44,7 +44,7 @@ Opções:
   --scons-bin COMMAND         Executável SCons. Padrão: scons.
   --editor-dev-build yes|no   Define dev_build do editor. Padrão: yes.
   --test-filter FILTER        Filtro doctest. Padrão: *TickSynchronizer*.
-  --min-test-cases N          Quantidade mínima aceita. Padrão: 98.
+  --min-test-cases N          Quantidade mínima aceita. Padrão: 127.
   --clean-first               Limpa cada configuração antes de compilar.
   --no-smoke                  Não executa o smoke test GDScript.
   --scons-arg ARG             Argumento SCons adicional; pode ser repetido.

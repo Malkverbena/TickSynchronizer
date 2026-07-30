@@ -53,12 +53,14 @@ classDiagram
     class TickSynchronizerSchema
     class TickSynchronizerPacketCodec
     class ProtocolHandshakeEvaluator
+    class ProtocolHandshakeStateMachine
 
     TickSynchronizer --> TickSynchronizerSettings
     TickSynchronizer --> TickSynchronizerBuffer
     TickSynchronizerObject --> TickSynchronizerSchema
     TickSynchronizer --> TickSynchronizerPacketCodec
     TickSynchronizerPacketCodec --> ProtocolHandshakeEvaluator
+    ProtocolHandshakeEvaluator --> ProtocolHandshakeStateMachine
 ```
 
 `TickSynchronizer` também expõe magic, versão e modo de precisão do protocolo para diagnóstico.
@@ -76,6 +78,7 @@ TickSynchronizer
 ├── SyncTopologyManager
 ├── TickSynchronizerPacketCodec — envelope e payloads de controle
 ├── ProtocolHandshakeEvaluator — identidade, capabilities e decisões puras
+├── ProtocolHandshakeStateMachine — ordem legal e transições do handshake
 ├── SyncTransportEndpoint
 ├── SyncMetrics
 ├── SyncDebugger
@@ -120,9 +123,30 @@ flowchart LR
 - `HELLO`/`HELLO_ACK` v2 e `DISCONNECT_REASON`;
 - inspeção segura de header incompatível;
 - avaliador puro de compatibilidade e capabilities;
+- máquina de estados pura com ações declarativas e estados terminais;
 - limite validado antes de copiar payload;
 - saída atômica em falhas;
 - cabeçalho realtime compacto ainda não definido.
+
+## Fronteira da máquina de handshake
+
+```mermaid
+flowchart LR
+    Session[SyncSession futura] --> Machine[ProtocolHandshakeStateMachine]
+    Machine --> Evaluator[ProtocolHandshakeEvaluator]
+    Machine --> Action[Ação tipada]
+    Action --> Packet[ProtocolPacket]
+    Packet --> Codec[TickSynchronizerPacketCodec]
+    Codec --> Bytes[PackedByteArray]
+    Session --> Clock[Relógio e timeout externos]
+    Session --> Endpoint[Endpoint externo futuro]
+```
+
+A máquina não possui relógio, transporte ou serialização final. Timeouts e envio
+serão coordenados pela futura sessão, permitindo testar transições sem rede. O
+respondedor entra em `ESTABLISHED` ao produzir a ação `HELLO_ACK`; se o endpoint
+falhar ao transmitir essa ação, a futura sessão deverá fechar a negociação e não
+liberar gameplay.
 
 ## Pipeline futuro
 

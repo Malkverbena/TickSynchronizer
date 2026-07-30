@@ -215,9 +215,10 @@ Essa pendência não bloqueia a conclusão da fundação do buffer. O histórico
 - [x] Rejeições estruturadas de precisão, identidade, schema e capabilities.
 - [x] Golden vectors `control_hello_v1.bin` e `control_hello_v2.bin`.
 - [x] Testes de pacote desconhecido, truncado, trailing, oversized e padding.
-- [ ] Máquina de estados pura do handshake.
-- [ ] Política para HELLO duplicado e ACK inesperado.
-- [ ] Timeouts e cancelamento.
+- [x] Máquina de estados pura do handshake.
+- [x] Política estrita para HELLO duplicado e ACK inesperado.
+- [x] Cancelamento local sem relógio.
+- [ ] Timeouts e retransmissão orientados pela sessão.
 - [ ] `PING/PONG`.
 - [ ] `ACK` genérico.
 - [ ] `ECHO_REQUEST/RESPONSE`.
@@ -231,14 +232,16 @@ Essa pendência não bloqueia a conclusão da fundação do buffer. O histórico
 
 O protocolo 1.1, incluindo identidade estrita, capabilities e avaliador puro
 do handshake, foi validado e commitado com 98 testes e 25.723 assertions nas
-duas precisões. O próximo lote implementará a máquina de estados pura do
-handshake.
+duas precisões. A máquina de estados pura foi implementada com 29 novos casos,
+elevando a suíte esperada para 127 testes; a validação real no Godot está
+pendente.
 
 ## Critério de conclusão funcional da fase
 
 A máquina de estados do handshake completa round-trip, rejeita mensagens fora de
 ordem e fornece decisões puras para a futura sessão. Pacotes inválidos ou acima
-dos limites não alteram estado parcialmente.
+dos limites não alteram estado parcialmente. Este critério depende da aprovação
+dos 127 testes em `single` e `double`.
 
 ---
 

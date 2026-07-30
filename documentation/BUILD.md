@@ -51,7 +51,7 @@ fontes de outra revisão.
 Resultado esperado:
 
 ```text
-TICKSYNCHRONIZER_SOURCE_CONSISTENCY_OK methods=41 tests=98
+TICKSYNCHRONIZER_SOURCE_CONSISTENCY_OK methods=41 tests=127
 TICKSYNCHRONIZER_MERMAID_OK diagrams=<N> files=<N> renderer=static
 ```
 

@@ -10,6 +10,7 @@ Arquivos principais:
 ```text
 src/protocol/tick_synchronizer_packet_codec.h/.cpp
 src/protocol/tick_synchronizer_handshake.h/.cpp
+src/protocol/tick_synchronizer_handshake_state_machine.h/.cpp
 ```
 
 ## Política v0.x
@@ -217,7 +218,8 @@ global. Ele:
 - produz ACK ou disconnect de forma atômica;
 - valida correlação e conteúdo do ACK.
 
-A futura sessão será responsável pela máquina de estados e pelos timeouts.
+A futura sessão continuará responsável por relógio, timeout e envio, mas a ordem
+legal das mensagens agora pertence a `ProtocolHandshakeStateMachine`.
 
 ```mermaid
 flowchart TB
@@ -230,6 +232,48 @@ flowchart TB
     Capabilities -->|não| CapabilityReject[CAPABILITY_MISMATCH]
     Capabilities -->|sim| Accepted[ACCEPTED]
 ```
+
+## Máquina de estados do handshake
+
+A máquina é interna, determinística e independente de transporte. Ela recebe um
+`ProtocolPacket` já decodificado e produz uma ação tipada. Nenhuma operação
+envia bytes ou consulta relógio, singleton ou `Node`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> WAITING_FOR_HELLO_ACK: initiator.start / HELLO
+    IDLE --> WAITING_FOR_HELLO: responder.start
+    WAITING_FOR_HELLO --> ESTABLISHED: HELLO válido / HELLO_ACK
+    WAITING_FOR_HELLO --> REJECTED: HELLO incompatível / DISCONNECT
+    WAITING_FOR_HELLO_ACK --> ESTABLISHED: HELLO_ACK válido
+    WAITING_FOR_HELLO_ACK --> REJECTED: ACK inválido ou DISCONNECT
+    ESTABLISHED --> REJECTED: HELLO ou ACK duplicado
+    ESTABLISHED --> REJECTED: DISCONNECT remoto
+    WAITING_FOR_HELLO --> REJECTED: cancel
+    WAITING_FOR_HELLO_ACK --> REJECTED: cancel / DISCONNECT
+    IDLE --> CLOSED: close
+    ESTABLISHED --> CLOSED: close
+    REJECTED --> CLOSED: close
+```
+
+Regras desta revisão:
+
+- o iniciador fornece `session_id` e nonce não zero;
+- o respondedor aprende o `session_id` do primeiro `HELLO` válido;
+- `sequence` e `tick` precisam ser zero durante o handshake;
+- `HELLO` ou `HELLO_ACK` duplicado é fatal;
+- packet fora de ordem gera `MALFORMED_HANDSHAKE`;
+- disconnect remoto válido encerra sem resposta;
+- disconnect remoto malformado encerra sem responder, evitando loops;
+- outputs e estado permanecem inalterados quando a API é chamada em estado inválido;
+- o resultado estabelecido preserva sessão, peer remoto, perfil e capabilities;
+- o respondedor entra em `ESTABLISHED` ao produzir o ACK; falha posterior de envio
+  deve ser tratada pela sessão como fechamento, sem liberar gameplay.
+
+A ação declarativa transporta o payload tipado. `build_outbound_packet()` cria
+um `ProtocolPacket` canônico com `sequence=0` e `tick=0`; o packet codec continua
+responsável pela serialização final.
 
 ## Limites e canonicalidade
 
@@ -248,8 +292,7 @@ flowchart TB
 
 ## Itens adiados
 
-- máquina de estados da sessão;
-- timeouts e retransmissão;
+- timeouts, retransmissão e idempotência;
 - PING/PONG e ECHO;
 - janela de sequência/replay;
 - cabeçalho realtime compacto;

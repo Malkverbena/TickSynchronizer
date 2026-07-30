@@ -157,6 +157,8 @@ Ao concluir uma alteração completa:
 - `HELLO`/`HELLO_ACK` transportam commit do Godot, module build ID, game build ID, schema compatibility ID e capabilities suportadas/obrigatórias.
 - IDs de compatibilidade totalmente zerados são inválidos.
 - O avaliador de handshake deve permanecer puro, interno e independente de transporte.
+- A máquina de estados do handshake deve permanecer pura, sem relógio, endpoint, Node ou singleton.
+- Timeouts e retransmissão pertencem à futura sessão, não à máquina de estados.
 - Use `inspect_control_header()` apenas para diagnóstico; ele não transforma um pacote incompatível em pacote aceito.
 - Inteiros do protocolo são little-endian e nunca são dumps de structs.
 - Flags e campos reservados desconhecidos devem ser rejeitados, não ignorados.

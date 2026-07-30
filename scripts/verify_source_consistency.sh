@@ -103,8 +103,8 @@ if missing_markers:
 test_cases = 0
 for test_path in sorted((module / "tests").glob("test_tick_synchronizer*.h")):
     test_cases += test_path.read_text(encoding="utf-8").count("TEST_CASE(")
-if test_cases < 98:
-    errors.append(f"somente {test_cases} TEST_CASE encontrados; mínimo esperado: 98")
+if test_cases < 127:
+    errors.append(f"somente {test_cases} TEST_CASE encontrados; mínimo esperado: 127")
 
 for constant in ("DEFAULT_MAX_SIZE_BYTES", "MAX_CONFIGURABLE_SIZE_BYTES"):
     if constant not in header or constant not in source:
@@ -144,11 +144,15 @@ protocol_test_path = module / "tests/test_tick_synchronizer_packet_codec.h"
 handshake_header_path = module / "src/protocol/tick_synchronizer_handshake.h"
 handshake_source_path = module / "src/protocol/tick_synchronizer_handshake.cpp"
 handshake_test_path = module / "tests/test_tick_synchronizer_handshake.h"
+state_machine_header_path = module / "src/protocol/tick_synchronizer_handshake_state_machine.h"
+state_machine_source_path = module / "src/protocol/tick_synchronizer_handshake_state_machine.cpp"
+state_machine_test_path = module / "tests/test_tick_synchronizer_handshake_state_machine.h"
 protocol_golden_path = module / "tests/golden/control_hello_v2.bin"
 module_id_script_path = module / "scripts/compute_module_build_id.py"
 for path in (
     protocol_header_path, protocol_source_path, protocol_test_path, protocol_golden_path,
     handshake_header_path, handshake_source_path, handshake_test_path, module_id_script_path,
+    state_machine_header_path, state_machine_source_path, state_machine_test_path,
 ):
     if not path.is_file():
         errors.append(f"arquivo de protocolo obrigatório ausente: {path.relative_to(module)}")
@@ -206,6 +210,24 @@ if handshake_test_path.is_file():
     if handshake_test_cases < 23:
         errors.append(
             f"somente {handshake_test_cases} testes de handshake; mínimo esperado: 23"
+        )
+
+if state_machine_header_path.is_file():
+    state_machine_header = state_machine_header_path.read_text(encoding="utf-8")
+    for token in (
+        "ProtocolHandshakeStateMachine", "ProtocolHandshakeState",
+        "ProtocolHandshakeRole", "ProtocolHandshakeAction",
+        "start", "receive_packet", "cancel", "close",
+        "build_outbound_packet",
+    ):
+        if token not in state_machine_header:
+            errors.append(f"contrato da máquina de handshake ausente: {token}")
+
+if state_machine_test_path.is_file():
+    state_machine_test_cases = state_machine_test_path.read_text(encoding="utf-8").count("TEST_CASE(")
+    if state_machine_test_cases < 29:
+        errors.append(
+            f"somente {state_machine_test_cases} testes da máquina de handshake; mínimo esperado: 29"
         )
 
 if module_id_script_path.is_file():

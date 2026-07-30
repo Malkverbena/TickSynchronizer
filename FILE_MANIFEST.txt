@@ -52,6 +52,7 @@ documentation/adr/0023-strict-handshake-identity-and-capabilities.md
 documentation/adr/0024-safe-header-inspection-and-pure-handshake-evaluator.md
 documentation/adr/0025-source-code-under-src.md
 documentation/adr/0026-mermaid-documentation-and-vscode-preview.md
+documentation/adr/0027-pure-handshake-state-machine.md
 register_types.cpp
 register_types.h
 scripts/build_and_validate.sh
@@ -66,6 +67,8 @@ src/README.md
 src/internal/tick_synchronizer_build_config.h
 src/protocol/tick_synchronizer_handshake.cpp
 src/protocol/tick_synchronizer_handshake.h
+src/protocol/tick_synchronizer_handshake_state_machine.cpp
+src/protocol/tick_synchronizer_handshake_state_machine.h
 src/protocol/tick_synchronizer_packet_codec.cpp
 src/protocol/tick_synchronizer_packet_codec.h
 src/public/tick_synchronizer.cpp
@@ -98,6 +101,7 @@ tests/test_tick_synchronizer_buffer_robustness.h
 tests/test_tick_synchronizer_build_config.h
 tests/test_tick_synchronizer_float_codec.h
 tests/test_tick_synchronizer_handshake.h
+tests/test_tick_synchronizer_handshake_state_machine.h
 tests/test_tick_synchronizer_integer_codec.h
 tests/test_tick_synchronizer_packet_codec.h
 tests/test_tick_synchronizer_varint.h

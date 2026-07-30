@@ -27,7 +27,7 @@ revisão. O pipeline principal executa esse preflight antes do SCons.
 ./scripts/build_and_validate.sh --mode quick --precision double
 ```
 
-O filtro padrão é `*TickSynchronizer*`. O pipeline exige pelo menos 98 casos.
+O filtro padrão é `*TickSynchronizer*`. O pipeline exige pelo menos 127 casos.
 
 Distribuição atual:
 
@@ -39,7 +39,8 @@ Distribuição atual:
 - 7 de floats;
 - 10 de limites, identidade e estresse;
 - 28 do packet codec;
-- 23 da negociação de handshake.
+- 23 da negociação de compatibilidade;
+- 29 da máquina de estados do handshake.
 
 ## 3. Smoke test GDScript
 
@@ -137,7 +138,8 @@ Os vetores em `tests/golden/` cobrem:
 O protocolo já adiciona `control_hello_v1.bin` e `control_hello_v2.bin`. Truncamentos e entradas
 malformadas são gerados diretamente nos testes para preservar a causa de cada falha.
 A suíte distingue payloads parciais canônicos de declarações físicas não
-canônicas e cobre identidade, nonce, capabilities e ACK negociado.
+canônicas e cobre identidade, nonce, capabilities, ACK negociado, ordem de
+mensagens, duplicatas, cancelamento e estados terminais.
 
 ## 9. Política de falhas
 

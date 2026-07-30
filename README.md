@@ -117,9 +117,9 @@ A estrutura contém as classes públicas fundamentais:
 
 Todas são registradas no `ClassDB` em `MODULE_INITIALIZATION_LEVEL_SCENE`. `TickSynchronizer` expõe precisão, magic e versão do protocolo; `TickSynchronizerBuffer` fornece o bitstream e os codecs escalares.
 
-A suíte C++ contém 98 casos: 47 da fundação, 28 do packet codec e 23 da negociação de handshake. O script exige ao menos 98 casos descobertos, evitando aceitar uma compilação que não incluiu os componentes de protocolo.
+A suíte C++ espera 127 casos: 47 da fundação, 28 do packet codec, 23 da negociação de compatibilidade e 29 da máquina de estados do handshake. O script exige ao menos 127 casos descobertos, evitando aceitar uma compilação que omitiu componentes de protocolo.
 
-O smoke test exercita o buffer e valida os diagnósticos públicos `TSYN`, protocolo `1.1` e modo de precisão. O protocolo interno já possui envelope de controle, identidade estrita, capabilities e avaliador puro do handshake; prediction, rollback, transporte, métricas e ferramentas de editor ainda não foram implementados.
+O smoke test exercita o buffer e valida os diagnósticos públicos `TSYN`, protocolo `1.1` e modo de precisão. O protocolo interno já possui envelope de controle, identidade estrita, capabilities, avaliador puro e máquina de estados do handshake; prediction, rollback, transporte, métricas e ferramentas de editor ainda não foram implementados.
 
 O código C++ próprio está organizado em `src/public`, `src/protocol` e
 `src/internal`. O glue convencional do módulo Godot (`register_types.*`,
@@ -139,6 +139,28 @@ A normalização de compatibilidade com o Godot foi aplicada:
 - a política do projeto proíbe alterações no código da engine.
 
 Consulte [`documentation/GODOT_COMPATIBILITY.md`](documentation/GODOT_COMPATIBILITY.md).
+
+### Máquina de estados do handshake
+
+O componente interno `ProtocolHandshakeStateMachine` separa ordem de mensagens,
+transições e terminalidade do transporte. Iniciador e respondedor produzem ações
+tipadas, enquanto a futura sessão permanece responsável por relógio, timeout e
+envio. Duplicatas são fatais nesta revisão, até existir uma política explícita
+de retransmissão.
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> WAITING_FOR_HELLO_ACK: initiator.start / HELLO
+    IDLE --> WAITING_FOR_HELLO: responder.start
+    WAITING_FOR_HELLO --> ESTABLISHED: HELLO válido / HELLO_ACK
+    WAITING_FOR_HELLO_ACK --> ESTABLISHED: HELLO_ACK válido
+    WAITING_FOR_HELLO --> REJECTED: erro ou cancel
+    WAITING_FOR_HELLO_ACK --> REJECTED: erro, disconnect ou cancel
+    ESTABLISHED --> REJECTED: duplicata ou disconnect
+    REJECTED --> CLOSED: close
+    ESTABLISHED --> CLOSED: close
+```
 
 ## Sanitizers
 
@@ -236,7 +258,7 @@ bindings, XML, smoke test e suíte pertencem à mesma revisão:
 Resultado esperado:
 
 ```text
-TICKSYNCHRONIZER_SOURCE_CONSISTENCY_OK methods=41 tests=98
+TICKSYNCHRONIZER_SOURCE_CONSISTENCY_OK methods=41 tests=127
 ```
 
 ## Fundação do buffer binário

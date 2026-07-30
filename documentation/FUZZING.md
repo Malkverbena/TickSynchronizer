@@ -32,7 +32,7 @@ flowchart LR
 ```
 
 
-O packet decoder e o avaliador puro de handshake agora existem. Um fuzz-smoke
+O packet decoder, o avaliador e a máquina de estados pura do handshake agora existem. Um fuzz-smoke
 local auxilia a revisão, mas o fuzz target versionado torna-se obrigatório no
 Gate P1, antes de bytes fornecidos por outro processo ou máquina chegarem ao
 protocolo.
@@ -48,7 +48,7 @@ O harness deverá:
 
 1. receber bytes arbitrários e tamanho lógico em bits;
 2. aplicar limite pequeno e fixo antes de iniciar a leitura;
-3. decodificar header, HELLO, HELLO_ACK e payload length sem rede ou relógio;
+3. decodificar header, HELLO, HELLO_ACK e alimentar a máquina sem rede ou relógio;
 4. nunca alocar proporcionalmente a valor ainda não validado;
 5. tratar entrada inválida como resultado normal;
 6. falhar apenas em crash, OOB, UB, leak ou violação de invariantes;
@@ -81,7 +81,8 @@ O harness deverá:
 - nenhuma alocação ocorre antes da validação de tamanho;
 - formas varint inválidas não são aceitas;
 - bytes canônicos são estáveis;
-- pacote rejeitado não altera estado da sessão;
+- chamada inválida não altera estado nem action parcialmente;
+- pacote rejeitado produz apenas uma transição terminal válida;
 - buffers iguais possuem o mesmo hash;
 - hash igual não substitui comparação completa.
 

@@ -6,7 +6,7 @@ documentação e integração de build.
 ```text
 src/
 ├── internal/   # configuração interna de compilação
-├── protocol/   # wire format, codec e handshake independentes de transporte
+├── protocol/   # wire format, avaliação e máquina de handshake sem transporte
 └── public/     # classes registradas no ClassDB e API exposta ao Godot
 ```
 
