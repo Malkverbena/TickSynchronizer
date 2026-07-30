@@ -1,0 +1,12 @@
+; TickSynchronizer runtime smoke test.
+; Executed by scripts/build_and_validate.sh from this directory.
+
+config_version=5
+
+[application]
+config/name="TickSynchronizer Smoke Test"
+run/main_scene="res://smoke_test.tscn"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"

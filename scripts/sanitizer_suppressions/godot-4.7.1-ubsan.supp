@@ -1,0 +1,6 @@
+# Godot 4.7.1 test_setup() creates ProjectSettings without loading a project.
+# project_data_dir_name is therefore empty. String::append_utf32_unchecked()
+# reaches memcpy(dst, nullptr, 0), which GCC UBSAN reports as nonnull-attribute.
+# Suppress only this check in this engine source file. Reports in the
+# TickSynchronizer module and all other source files remain fatal.
+nonnull-attribute:core/string/ustring.cpp

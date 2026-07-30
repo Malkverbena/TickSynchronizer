@@ -1,3 +1,13 @@
+# Python / SCons caches
+__pycache__/
+*.py[cod]
+
+# Godot project cache
+.godot/
+
+# TickSynchronizer generated reports
+build_reports/
+
 # Prerequisites
 *.d
 
@@ -16,13 +26,14 @@
 
 # Debugger Files
 *.pdb
+*.dwo
+*.dSYM/
 
 # Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
 *.so.*
-
 
 # Fortran module files
 *.mod
@@ -34,7 +45,7 @@
 *.a
 *.lib
 
-# Executables
+# Executables and application bundles
 *.exe
 *.out
 *.app
@@ -44,7 +55,7 @@ build/
 Build/
 build-*/
 
-# CMake generated files
+# CMake generated files (CMake is not used by this project)
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -57,13 +68,12 @@ compile_commands.json
 *.log
 *.bak
 *.swp
+*~
 
 # vcpkg
 vcpkg_installed/
 
-# debug information files
-*.dwo
+# OS metadata
+.DS_Store
+Thumbs.db
 
-# test output & cache
-Testing/
-.cache/

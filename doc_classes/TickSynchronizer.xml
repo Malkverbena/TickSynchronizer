@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickSynchronizer" inherits="Node" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/4.7.1-stable/doc/class.xsd">
+	<brief_description>
+		Coordinates one logical TickSynchronizer multiplayer session.
+	</brief_description>
+	<description>
+		Exposes immutable build and protocol compatibility information. Transport, snapshots, prediction, rollback, and reconciliation are implemented in later phases.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_build_precision" qualifiers="const">
+			<return type="String" />
+			<description>
+				Returns [code]"single"[/code] or [code]"double"[/code] according to the precision used to compile the Godot binary. Every peer in a session must use the same precision.
+			</description>
+		</method>
+		<method name="get_protocol_magic" qualifiers="const">
+			<return type="String" />
+			<description>
+				Returns the four-byte protocol identifier [code]"TSYN"[/code].
+			</description>
+		</method>
+		<method name="get_protocol_major" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the current protocol major version. The first experimental wire format uses major version [code]1[/code].
+			</description>
+		</method>
+		<method name="get_protocol_minor" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the current protocol minor version. The first experimental wire format uses minor version [code]1[/code].
+			</description>
+		</method>
+		<method name="get_protocol_precision_mode" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns [code]1[/code] for a [code]precision=single[/code] build and [code]2[/code] for a [code]precision=double[/code] build. This value is encoded in [code]HELLO[/code].
+			</description>
+		</method>
+		<method name="is_double_precision" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] when the Godot binary was compiled with [code]precision=double[/code].
+			</description>
+		</method>
+	</methods>
+</class>

@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickSynchronizerBuffer" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/4.7.1-stable/doc/class.xsd">
+	<brief_description>
+		Reads and writes deterministic bit fields and explicit numeric codecs over a PackedByteArray.
+	</brief_description>
+	<description>
+		Provides the binary foundation used by the TickSynchronizer protocol. Bit fields are processed least-significant bit first. Fixed-width integers therefore use little-endian byte order when aligned.
+		Variable-length integers require byte alignment and use a canonical representation. Float codecs use explicit IEEE 754 binary32 or binary64 widths and never serialize real_t directly. Storage growth is limited by [method set_max_size_bytes], and read inputs are copied into a canonical logical representation. Equality and hashing use only canonical bytes and bit size. The first operation error is persistent until [method clear], [method begin_write], or [method begin_read] is called. This class is not internally synchronized for concurrent access.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="align_read_to_byte">
+			<return type="Error" />
+			<description>
+				Advances the read cursor to the next byte boundary. Skipped padding must be zero. Nonzero padding returns [constant @GlobalScope.ERR_INVALID_DATA], and truncated padding returns [constant @GlobalScope.ERR_FILE_EOF].
+			</description>
+		</method>
+		<method name="align_write_to_byte">
+			<return type="Error" />
+			<description>
+				Writes zero padding until the write cursor reaches the next byte boundary.
+			</description>
+		</method>
+		<method name="begin_read">
+			<return type="Error" />
+			<param index="0" name="data" type="PackedByteArray" />
+			<param index="1" name="bit_size" type="int" default="-1" />
+			<description>
+				Starts reading from [param data]. When [param bit_size] is [code]-1[/code], every bit in the array is readable. A smaller logical size can exclude padding bits in the final byte.
+			</description>
+		</method>
+		<method name="can_write_bits" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="bit_count" type="int" />
+			<description>
+				Returns whether [param bit_count] positive bits can be written without exceeding the configured limit. Returns [code]false[/code] outside write mode or after an operation error.
+			</description>
+		</method>
+		<method name="begin_write">
+			<return type="Error" />
+			<param index="0" name="initial_capacity_bytes" type="int" default="0" />
+			<description>
+				Starts a new write operation and optionally reserves byte capacity without changing the logical size.
+			</description>
+		</method>
+		<method name="clear">
+			<return type="void" />
+			<description>
+				Clears data, cursor, mode, and error state.
+			</description>
+		</method>
+		<method name="get_bit_position" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the current read or write cursor in bits.
+			</description>
+		</method>
+		<method name="get_bit_size" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the logical number of valid bits.
+			</description>
+		</method>
+		<method name="get_byte_size" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of stored data bytes currently exposed by [method get_data].
+			</description>
+		</method>
+		<method name="get_data" qualifiers="const">
+			<return type="PackedByteArray" />
+			<description>
+				Returns the backing bytes. Use [method get_bit_size] to preserve the logical size of a partial final byte.
+			</description>
+		</method>
+		<method name="get_last_error" qualifiers="const">
+			<return type="Error" />
+			<description>
+				Returns the first persistent error, or [constant @GlobalScope.OK].
+			</description>
+		</method>
+		<method name="get_content_hash" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns a non-cryptographic 32-bit hash of canonical bytes and logical bit size. Hash equality does not replace [method is_equal_to], and the value is not part of the wire format.
+			</description>
+		</method>
+		<method name="get_max_size_bits" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the configured maximum size in bits.
+			</description>
+		</method>
+		<method name="get_max_size_bytes" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the configured maximum storage size in bytes.
+			</description>
+		</method>
+		<method name="get_mode" qualifiers="const">
+			<return type="int" enum="TickSynchronizerBuffer.Mode" />
+			<description>
+				Returns the current buffer mode.
+			</description>
+		</method>
+		<method name="get_remaining_write_bits" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of bits still available under the configured limit in write mode, otherwise [code]0[/code].
+			</description>
+		</method>
+		<method name="get_remaining_bits" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns unread logical bits in read mode, otherwise [code]0[/code].
+			</description>
+		</method>
+		<method name="has_error" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns whether a persistent error has been recorded.
+			</description>
+		</method>
+		<method name="is_byte_aligned" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns whether the current cursor is on a byte boundary.
+			</description>
+		</method>
+		<method name="is_equal_to" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="other" type="TickSynchronizerBuffer" />
+			<description>
+				Returns whether [param other] has the same logical bit size and canonical bytes. Cursor, mode, errors, limits and reserved capacity are ignored.
+			</description>
+		</method>
+		<method name="is_reading" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns whether the buffer is in read mode.
+			</description>
+		</method>
+		<method name="is_writing" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns whether the buffer is in write mode.
+			</description>
+		</method>
+		<method name="read_bits">
+			<return type="int" />
+			<param index="0" name="bit_count" type="int" />
+			<description>
+				Reads 1 to 64 bits. Returns [code]0[/code] when an error occurs; inspect [method has_error] and [method get_last_error]. A 64-bit pattern whose highest bit is set is represented as a negative GDScript integer.
+			</description>
+		</method>
+		<method name="read_float32">
+			<return type="float" />
+			<description>
+				Reads an IEEE 754 binary32 pattern at the current bit position and promotes it to the 64-bit GDScript float type.
+			</description>
+		</method>
+		<method name="read_float64">
+			<return type="float" />
+			<description>
+				Reads an IEEE 754 binary64 pattern at the current bit position.
+			</description>
+		</method>
+		<method name="read_u16">
+			<return type="int" />
+			<description>
+				Reads an unsigned 16-bit integer at the current bit position.
+			</description>
+		</method>
+		<method name="read_u32">
+			<return type="int" />
+			<description>
+				Reads an unsigned 32-bit integer at the current bit position.
+			</description>
+		</method>
+		<method name="read_u64">
+			<return type="int" />
+			<description>
+				Reads a 64-bit pattern at the current bit position. Values with bit 63 set appear negative in GDScript.
+			</description>
+		</method>
+		<method name="read_u8">
+			<return type="int" />
+			<description>
+				Reads an unsigned 8-bit integer at the current bit position.
+			</description>
+		</method>
+		<method name="read_varint">
+			<return type="int" />
+			<description>
+				Reads a byte-aligned canonical ZigZag variable-length signed integer.
+			</description>
+		</method>
+		<method name="read_varuint">
+			<return type="int" />
+			<description>
+				Reads a byte-aligned canonical variable-length unsigned integer. The GDScript API supports values up to [code]9223372036854775807[/code]; the C++ API supports the full [code]uint64_t[/code] range.
+			</description>
+		</method>
+		<method name="set_max_size_bytes">
+			<return type="Error" />
+			<param index="0" name="max_size_bytes" type="int" />
+			<description>
+				Sets the maximum storage size. The value must be positive and cannot be lower than currently allocated storage. Configuration failures do not set the persistent codec error.
+			</description>
+		</method>
+		<method name="write_bits">
+			<return type="Error" />
+			<param index="0" name="value" type="int" />
+			<param index="1" name="bit_count" type="int" />
+			<description>
+				Writes the lowest 1 to 64 bits of [param value] in LSB-first order.
+			</description>
+		</method>
+		<method name="write_float32">
+			<return type="Error" />
+			<param index="0" name="value" type="float" />
+			<description>
+				Converts [param value] to IEEE 754 binary32 and writes its 32-bit pattern. Finite GDScript values outside the binary32 range return [constant @GlobalScope.ERR_INVALID_PARAMETER].
+			</description>
+		</method>
+		<method name="write_float64">
+			<return type="Error" />
+			<param index="0" name="value" type="float" />
+			<description>
+				Writes the IEEE 754 binary64 pattern of [param value].
+			</description>
+		</method>
+		<method name="write_u16">
+			<return type="Error" />
+			<param index="0" name="value" type="int" />
+			<description>
+				Writes an unsigned 16-bit integer at the current bit position.
+			</description>
+		</method>
+		<method name="write_u32">
+			<return type="Error" />
+			<param index="0" name="value" type="int" />
+			<description>
+				Writes an unsigned 32-bit integer at the current bit position.
+			</description>
+		</method>
+		<method name="write_u64">
+			<return type="Error" />
+			<param index="0" name="value" type="int" />
+			<description>
+				Writes the 64-bit pattern of [param value] at the current bit position.
+			</description>
+		</method>
+		<method name="write_u8">
+			<return type="Error" />
+			<param index="0" name="value" type="int" />
+			<description>
+				Writes an unsigned 8-bit integer at the current bit position.
+			</description>
+		</method>
+		<method name="write_varint">
+			<return type="Error" />
+			<param index="0" name="value" type="int" />
+			<description>
+				Writes [param value] as a byte-aligned canonical ZigZag variable-length signed integer.
+			</description>
+		</method>
+		<method name="write_varuint">
+			<return type="Error" />
+			<param index="0" name="value" type="int" />
+			<description>
+				Writes a nonnegative GDScript integer as a byte-aligned canonical variable-length unsigned integer. The C++ API supports the full [code]uint64_t[/code] range.
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="DEFAULT_MAX_SIZE_BYTES" value="1048576">
+			Default defensive storage limit of 1 MiB. Protocol and transport layers should normally configure smaller limits.
+		</constant>
+		<constant name="MAX_CONFIGURABLE_SIZE_BYTES" value="1152921504606846975">
+			Largest accepted configured byte limit, chosen so conversion to bits cannot overflow a signed 64-bit integer.
+		</constant>
+		<constant name="MODE_NONE" value="0" enum="Mode">
+			No read or write operation has been started.
+		</constant>
+		<constant name="MODE_READ" value="1" enum="Mode">
+			The buffer is reading existing data.
+		</constant>
+		<constant name="MODE_WRITE" value="2" enum="Mode">
+			The buffer is writing new data.
+		</constant>
+	</constants>
+</class>
