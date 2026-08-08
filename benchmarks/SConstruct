@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+
+import os
+import pathlib
+import platform as host_platform
+import shutil
+import subprocess
+
+from SCons.Script import ARGUMENTS, Default, Dir, Environment, SConsignFile, Value
+
+
+benchmark_dir = pathlib.Path(Dir("#").abspath)
+module_dir = benchmark_dir.parent
+
+
+def argument_choice(name, default, choices):
+    value = ARGUMENTS.get(name, default)
+    if value not in choices:
+        raise ValueError(f"{name} must be one of: {', '.join(choices)}")
+    return value
+
+
+def argument_switch(name, default="no"):
+    return argument_choice(name, default, ("yes", "no"))
+
+
+target_platform = argument_choice("platform", "linuxbsd", ("linuxbsd", "windows", "android"))
+precision = argument_choice("precision", "double", ("single", "double"))
+optimize = argument_switch("optimize", "yes")
+lto = argument_switch("lto", "no")
+
+default_arch = "arm64" if target_platform == "android" else "x86_64"
+architecture = argument_choice("arch", default_arch, ("x86_64", "arm64"))
+if target_platform in ("linuxbsd", "windows") and architecture != "x86_64":
+    raise ValueError(f"{target_platform} currently supports only arch=x86_64")
+if target_platform == "android" and architecture != "arm64":
+    raise ValueError("android currently supports only arch=arm64")
+
+default_toolchain = {
+    "linuxbsd": "native",
+    "windows": "mingw-gcc",
+    "android": "android-ndk",
+}[target_platform]
+toolchain = argument_choice(
+    "toolchain",
+    default_toolchain,
+    ("native", "mingw-gcc", "llvm-mingw", "android-ndk"),
+)
+allowed_toolchains = {
+    "linuxbsd": {"native"},
+    "windows": {"mingw-gcc", "llvm-mingw"},
+    "android": {"android-ndk"},
+}
+if toolchain not in allowed_toolchains[target_platform]:
+    raise ValueError(f"toolchain={toolchain} is invalid for platform={target_platform}")
+
+
+def resolve_command(command):
+    path = pathlib.Path(command)
+    if path.is_absolute() or path.parent != pathlib.Path("."):
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file() or not os.access(resolved, os.X_OK):
+            raise ValueError(f"compiler is missing or not executable: {resolved}")
+        return str(resolved)
+    resolved_command = shutil.which(command)
+    if resolved_command is None:
+        raise ValueError(f"compiler not found: {command}")
+    return resolved_command
+
+
+def resolve_android_toolchain():
+    ndk_value = ARGUMENTS.get(
+        "android_ndk_root",
+        os.environ.get("ANDROID_NDK_HOME", os.environ.get("ANDROID_NDK_ROOT", "")),
+    )
+    if not ndk_value:
+        raise ValueError("android_ndk_root, ANDROID_NDK_HOME, or ANDROID_NDK_ROOT is required")
+
+    ndk_root = pathlib.Path(ndk_value).expanduser().resolve()
+    host_tag = ARGUMENTS.get("android_host_tag", "linux-x86_64")
+    prebuilt = ndk_root / "toolchains" / "llvm" / "prebuilt" / host_tag
+    if not prebuilt.is_dir():
+        raise ValueError(f"Android NDK host toolchain not found: {prebuilt}")
+
+    api_text = ARGUMENTS.get("android_api", "24")
+    if not api_text.isdigit() or int(api_text) < 21:
+        raise ValueError("android_api must be an integer greater than or equal to 21")
+    abi = ARGUMENTS.get("android_abi", "arm64-v8a")
+    if abi != "arm64-v8a":
+        raise ValueError("android_abi currently supports only arm64-v8a")
+
+    compiler = prebuilt / "bin" / f"aarch64-linux-android{api_text}-clang++"
+    if not compiler.is_file() or not os.access(compiler, os.X_OK):
+        raise ValueError(f"Android NDK compiler not found: {compiler}")
+    return str(compiler), prebuilt
+
+
+android_prebuilt = None
+if target_platform == "android":
+    compiler_command, android_prebuilt = resolve_android_toolchain()
+elif "cxx" in ARGUMENTS:
+    compiler_command = ARGUMENTS["cxx"]
+elif target_platform == "windows" and toolchain == "mingw-gcc":
+    compiler_command = "x86_64-w64-mingw32-g++-posix"
+elif target_platform == "windows":
+    compiler_command = "x86_64-w64-mingw32-clang++"
+else:
+    compiler_command = os.environ.get("CXX", "c++")
+
+compiler_path = resolve_command(compiler_command)
+if target_platform == "linuxbsd":
+    if os.name != "posix" or host_platform.system() != "Linux":
+        raise ValueError("platform=linuxbsd requires a native Linux host")
+    host_machine = host_platform.machine().lower()
+    if host_machine not in ("x86_64", "amd64"):
+        raise ValueError(f"platform=linuxbsd arch=x86_64 cannot run on host architecture {host_machine}")
+
+
+def run_git(*args):
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(module_dir), *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+module_commit = run_git("rev-parse", "HEAD")
+git_status = run_git("status", "--porcelain", "--untracked-files=all")
+source_state = "unknown" if git_status == "unknown" else ("dirty" if git_status else "clean")
+godot_commit_path = module_dir / "GODOT_COMMIT"
+godot_commit = godot_commit_path.read_text(encoding="utf-8").strip() if godot_commit_path.is_file() else "unknown"
+
+build_dir = benchmark_dir / ".build" / target_platform / architecture / toolchain / precision
+generated_dir = build_dir / "generated"
+object_dir = build_dir / "obj"
+generated_dir.mkdir(parents=True, exist_ok=True)
+object_dir.mkdir(parents=True, exist_ok=True)
+SConsignFile(str(build_dir / ".sconsign.dblite"))
+
+
+def cpp_string(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+common_flags = ["-std=c++17", "-Wall", "-Wextra", "-Wpedantic", "-Werror"]
+optimization_flags = ["-O3", "-DNDEBUG"] if optimize == "yes" else ["-O0", "-g3"]
+platform_compile_flags = []
+platform_link_flags = []
+platform_defines = []
+
+if target_platform == "windows":
+    platform_defines.extend([("_WIN32_WINNT", "0x0601"), ("WINVER", "0x0601")])
+    platform_link_flags.append("-static")
+    if toolchain == "mingw-gcc":
+        platform_link_flags.extend(["-static-libgcc", "-static-libstdc++"])
+elif target_platform == "android":
+    platform_compile_flags.extend(["-fPIE", "-stdlib=libc++"])
+    platform_link_flags.extend(["-pie", "-stdlib=libc++", "-static-libstdc++"])
+
+lto_flags = ["-flto"] if lto == "yes" else []
+precision_define = (
+    "TICKSYNC_BENCHMARK_PRECISION_DOUBLE"
+    if precision == "double"
+    else "TICKSYNC_BENCHMARK_PRECISION_SINGLE"
+)
+reported_flags = (
+    common_flags
+    + optimization_flags
+    + platform_compile_flags
+    + lto_flags
+    + [f"-D{precision_define}"]
+    + [f"-D{name}={value}" for name, value in platform_defines]
+    + platform_link_flags
+)
+
+build_info_content = (
+    "#pragma once\n\n"
+    f'#define TICKSYNC_BENCHMARK_MODULE_COMMIT "{cpp_string(module_commit)}"\n'
+    f'#define TICKSYNC_BENCHMARK_GODOT_COMMIT "{cpp_string(godot_commit)}"\n'
+    f'#define TICKSYNC_BENCHMARK_SOURCE_STATE "{cpp_string(source_state)}"\n'
+    f'#define TICKSYNC_BENCHMARK_COMPILER_COMMAND "{cpp_string(compiler_command)}"\n'
+    f'#define TICKSYNC_BENCHMARK_COMPILER_PATH "{cpp_string(compiler_path)}"\n'
+    f'#define TICKSYNC_BENCHMARK_COMPILER_FLAGS "{cpp_string(" ".join(reported_flags))}"\n'
+    f'#define TICKSYNC_BENCHMARK_OPTIMIZE "{cpp_string(optimize)}"\n'
+    f'#define TICKSYNC_BENCHMARK_LTO "{cpp_string(lto)}"\n'
+)
+
+
+def write_generated_header(target, source, env):
+    del env
+    content = source[0].get_contents()
+    if isinstance(content, bytes):
+        content = content.decode("utf-8")
+    path = pathlib.Path(str(target[0]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_file() or path.read_text(encoding="utf-8") != content:
+        path.write_text(content, encoding="utf-8")
+    return 0
+
+
+environment_options = {
+    "CXX": compiler_path,
+    "LINK": compiler_path,
+    "ENV": os.environ.copy(),
+}
+if android_prebuilt is not None:
+    environment_options.update(
+        {
+            "AR": str(android_prebuilt / "bin" / "llvm-ar"),
+            "RANLIB": str(android_prebuilt / "bin" / "llvm-ranlib"),
+        }
+    )
+
+env = Environment(**environment_options)
+env.Append(CXXFLAGS=common_flags + optimization_flags + platform_compile_flags + lto_flags)
+env.Append(LINKFLAGS=platform_link_flags + lto_flags)
+env.Append(CPPDEFINES=platform_defines + [precision_define])
+env.Append(CPPPATH=[str(module_dir), str(benchmark_dir), str(generated_dir)])
+if target_platform == "windows":
+    env["OBJSUFFIX"] = ".obj"
+
+build_info = env.Command(
+    target=str(generated_dir / "benchmark_build_info.h"),
+    source=Value(build_info_content),
+    action=write_generated_header,
+)
+
+sources = [
+    "protocol_benchmark_main.cpp",
+    "benchmark_allocation_counter.cpp",
+    "benchmark_dataset.cpp",
+    "benchmark_platform.cpp",
+    "benchmark_result_writer.cpp",
+    "benchmark_statistics.cpp",
+    "candidates/reference_fixed_width_candidate.cpp",
+]
+object_suffix = ".obj" if target_platform == "windows" else ".o"
+objects = []
+for source in sources:
+    source_path = benchmark_dir / source
+    object_path = object_dir / pathlib.Path(source).with_suffix(object_suffix)
+    object_path.parent.mkdir(parents=True, exist_ok=True)
+    objects.append(env.Object(target=str(object_path), source=str(source_path)))
+env.Depends(objects, build_info)
+
+if target_platform == "windows":
+    output_dir = benchmark_dir / "bin" / "windows" / "x86_64"
+elif target_platform == "android":
+    output_dir = benchmark_dir / "bin" / "android" / "arm64-v8a"
+else:
+    output_dir = benchmark_dir / "bin"
+output_dir.mkdir(parents=True, exist_ok=True)
+
+program_filename = f"tick_synchronizer_protocol_benchmark.{precision}"
+if target_platform == "windows":
+    program_filename += ".exe"
+
+program = env.Program(
+    target=str(output_dir / program_filename),
+    source=objects,
+)
+Default(program)

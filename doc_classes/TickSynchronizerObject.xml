@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickSynchronizerObject" inherits="Node" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/4.7.1-stable/doc/class.xsd">
+	<brief_description>
+		Base node for objects managed by a TickSynchronizer session.
+	</brief_description>
+	<description>
+		Synchronization registration, authority, schema, and simulation callbacks have not been implemented yet.
+	</description>
+	<tutorials>
+	</tutorials>
+</class>

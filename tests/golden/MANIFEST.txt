@@ -1,0 +1,61 @@
+# TickSynchronizer golden vectors
+
+All vectors are protocol bytes, not host-native memory dumps.
+
+bit_fields_3_5.bin
+  Operations: write_bits(0b101, 3), write_bits(0b11011, 5)
+  Hex: DD
+
+unaligned_1_8.bin
+  Operations: write_bits(1, 1), write_bits(0xA5, 8)
+  Hex: 4B 01
+
+uint64_little_endian.bin
+  Operation: write_bits(0x0123456789ABCDEF, 64)
+  Hex: EF CD AB 89 67 45 23 01
+
+fixed_unsigned_little_endian.bin
+  Operations: write_u8(0x5A), write_u16(0x1234),
+              write_u32(0x12345678), write_u64(0x0123456789ABCDEF)
+  Hex: 5A 34 12 78 56 34 12 EF CD AB 89 67 45 23 01
+
+varuint_boundaries.bin
+  Values: 0, 1, 127, 128, 255, 300, 16383, 16384,
+          UINT32_MAX, UINT64_MAX
+  Hex: 00 01 7F 80 01 FF 01 AC 02 FF 7F 80 80 01 FF FF FF FF 0F FF FF FF FF FF FF FF FF FF 01
+
+zigzag_boundaries.bin
+  Values: 0, -1, 1, -2, 2, -1000, 1000, INT64_MIN, INT64_MAX
+  Hex: 00 01 02 03 04 CF 0F D0 0F FF FF FF FF FF FF FF FF FF 01 FE FF FF FF FF FF FF FF FF 01
+
+float32_ieee754.bin
+  00000000 80000000 3F800000 C0200000 7F800000 FF800000 7FC00001 00000001
+  IEEE 754 binary32 patterns encoded little-endian: +0, -0, 1, -2.5, +inf, -inf, quiet NaN payload, minimum subnormal.
+
+float64_ieee754.bin
+  0000000000000000 8000000000000000 3FF0000000000000 C004000000000000
+  7FF0000000000000 FFF0000000000000 7FF8000000000001 0000000000000001
+  IEEE 754 binary64 patterns encoded little-endian: +0, -0, 1, -2.5, +inf, -inf, quiet NaN payload, minimum subnormal.
+
+control_hello_v1.bin
+  Legacy control header + minimal HELLO payload from protocol 1.0.
+  Retained to verify strict rejection and safe header inspection.
+  Size: 52 bytes.
+
+control_hello_v2.bin
+  Legacy protocol 1.1 control header + identity-aware HELLO payload version 2.
+  Retained to document the pre-version-contract handshake layout.
+  Size: 140 bytes.
+
+control_hello_v3.bin
+  Legacy control envelope 1.1 + HELLO payload version 3.
+  Carries API 4, experimental wire version 0/revision 1, exact build identity,
+  precision, Godot/game/schema identities, capabilities and nonce 0x8877665544332211.
+  Size: 152 bytes.
+
+control_hello_v4.bin
+  Current control envelope 1.1 + HELLO payload version 4.
+  Carries API 4, experimental wire version 0/revision 2, exact Godot version,
+  diagnostic Godot commit, exact module/game/schema identities, precision,
+  capabilities and nonce 0x8877665544332211.
+  Size: 184 bytes.

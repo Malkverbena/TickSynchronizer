@@ -1,3 +1,13 @@
+# Python / SCons caches
+__pycache__/
+*.py[cod]
+
+# Godot project cache
+.godot/
+
+# TickSynchronizer generated reports
+build_reports/
+
 # Prerequisites
 *.d
 
@@ -16,13 +26,14 @@
 
 # Debugger Files
 *.pdb
+*.dwo
+*.dSYM/
 
 # Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
 *.so.*
-
 
 # Fortran module files
 *.mod
@@ -34,7 +45,7 @@
 *.a
 *.lib
 
-# Executables
+# Executables and application bundles
 *.exe
 *.out
 *.app
@@ -44,26 +55,22 @@ build/
 Build/
 build-*/
 
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
-
 # Temporary files
 *.tmp
 *.log
 *.bak
 *.swp
+*~
 
 # vcpkg
 vcpkg_installed/
 
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
-.cache/
+# OS metadata
+.DS_Store
+Thumbs.db
+# Generated benchmark artifacts.
+benchmarks/.build/
+benchmarks/bin/
+benchmark_reports/*
+!benchmark_reports/.gitignore
+benchmark_dist/
