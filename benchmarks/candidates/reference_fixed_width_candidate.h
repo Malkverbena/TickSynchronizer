@@ -36,6 +36,9 @@ public:
 
 	// Hashes the canonical semantics used by round-trip validation.
 	static std::uint64_t semantic_hash_for_wire(const BenchmarkMessage &message) noexcept;
+
+	// Adds fixed-width-specific malformed packets with exact expected errors.
+	static void append_invalid_packets(std::vector<CandidateInvalidPacket> &packets);
 };
 
 } // namespace tick_synchronizer::benchmarks

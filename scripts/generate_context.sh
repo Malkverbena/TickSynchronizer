@@ -121,7 +121,7 @@ fi
 	printf '\n## Local engine state\n\n'
 	godot_git
 	printf '\n## Current project state\n\n'
-	cat "$MODULE_DIR/documentation/PROJECT_STATE.md"
+	cat "$MODULE_DIR/documentation/development/PROJECT_STATE.md"
 	printf '\n## Accepted ADRs\n\n'
 	for adr in "$MODULE_DIR"/documentation/adr/*.md; do
 		[[ -f "$adr" ]] || continue
@@ -140,7 +140,7 @@ fi
 	printf -- '- `documentation/ARCHITECTURE.md`\n'
 	printf -- '- `documentation/TESTING.md`\n'
 	printf -- '- ADR relevant to the task\n'
-	printf -- '- `documentation/ROADMAP.md`\n'
+	printf -- '- `documentation/development/ROADMAP.md`\n'
 } >"$OUTPUT"
 
 printf 'Context generated: %s\n' "$OUTPUT"

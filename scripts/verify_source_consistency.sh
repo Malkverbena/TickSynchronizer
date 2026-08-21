@@ -45,9 +45,12 @@ required_files = {
     "doc_classes/TickSynchronizer.xml",
     "doc_classes/TickSynchronizerBuffer.xml",
     "tests/smoke_project/smoke_test.gd",
+    "tests/smoke_project/smoke_test.gd.uid",
     "tests/golden/control_hello_v4.bin",
     "scripts/build_and_validate.sh",
     "scripts/run_sanitized_tests.sh",
+    "scripts/verify_lsan_suppressions.sh",
+    "scripts/verify_sanitizer_suppressions.sh",
     "scripts/compute_module_build_id.py",
     "scripts/verify_mermaid_diagrams.py",
     "scripts/build_protocol_benchmarks.sh",
@@ -56,11 +59,16 @@ required_files = {
     "scripts/run_protocol_benchmarks_android.sh",
     "scripts/build_protocol_benchmarks_windows_cross.sh",
     "scripts/run_protocol_benchmarks_windows.ps1",
+    "scripts/build_protocol_benchmarks_macos.sh",
+    "scripts/run_protocol_benchmarks_macos.sh",
     "scripts/export_protocol_benchmarks.sh",
     "scripts/verify_benchmark_results.py",
     "scripts/compare_protocol_benchmarks.py",
+    "scripts/analyze_protocol_candidates.py",
+    "scripts/sanitizer_suppressions/godot-4.7.1-lsan.supp",
     "scripts/sanitizer_suppressions/godot-4.7.1-ubsan.supp",
     "benchmarks/SConstruct",
+    "benchmarks/benchmark_compiler_contract.h",
     "benchmarks/benchmark_platform.h",
     "benchmarks/benchmark_platform.cpp",
     "benchmarks/protocol_benchmark_main.cpp",
@@ -69,33 +77,41 @@ required_files = {
     "benchmarks/benchmark_runner.h",
     "benchmarks/benchmark_result.h",
     "benchmarks/benchmark_result_writer.cpp",
+    "benchmarks/candidates/protocol_candidate.h",
+    "benchmarks/candidates/protocol_candidate.cpp",
     "benchmarks/candidates/reference_fixed_width_candidate.h",
     "benchmarks/candidates/reference_fixed_width_candidate.cpp",
+    "benchmarks/candidates/varint_zigzag_fixed_float_candidate.h",
+    "benchmarks/candidates/varint_zigzag_fixed_float_candidate.cpp",
     "benchmark_reports/.gitignore",
+    "documentation/README.md",
     "documentation/ARCHITECTURE.md",
     "documentation/BENCHMARKS.md",
     "documentation/BENCHMARK_DECISIONS.md",
     "documentation/BUILD.md",
-    "documentation/PROJECT_STATE.md",
     "documentation/PROTOCOL.md",
-    "documentation/ROADMAP.md",
     "documentation/TESTING.md",
-    "documentation/VALIDATION.md",
+    "documentation/development/README.md",
+    "documentation/development/PROJECT_STATE.md",
+    "documentation/development/ROADMAP.md",
+    "documentation/development/VALIDATION.md",
     "documentation/adr/0002-external-module-layout.md",
-    "documentation/adr/0026-mermaid-documentation-and-vscode-preview.md",
     "documentation/adr/0028-deterministic-protocol-benchmark-suite.md",
     "documentation/adr/0029-cross-platform-benchmark-backends.md",
     "documentation/adr/0030-godot-version-handshake-compatibility.md",
+    "documentation/adr/0031-restore-sanitized-smoke-with-source-scoped-godot-suppressions.md",
+    "documentation/adr/0032-add-local-macos-universal2-benchmark-backend.md",
+    "documentation/adr/0033-enforce-godot-cpp-policy-boundary.md",
+    "documentation/adr/0034-publish-macos-source-with-local-apple-toolchain.md",
+    "documentation/adr/0035-separate-repository-project-and-wiki-responsibilities.md",
+    "documentation/adr/0036-separate-candidate-selection-from-final-macos-qualification.md",
+    "documentation/adr/0037-adopt-suite2-and-screen-canonical-varint-integers.md",
+    "documentation/adr/0038-keep-lsan-enabled-with-a-godot-joypad-suppression.md",
 }
 
 for relative in sorted(required_files):
     if not (module / relative).is_file():
         errors.append(f"missing required file: {relative}")
-
-obsolete_mermaid = module / "documentation/MERMAID.md"
-if obsolete_mermaid.exists():
-    errors.append("documentation/MERMAID.md is outside project scope and must be removed")
-
 
 def read(relative: str) -> str:
     path = module / relative
@@ -107,8 +123,6 @@ manifest_entries = set(read("FILE_MANIFEST.txt").splitlines())
 for relative in sorted(required_files):
     if relative not in manifest_entries:
         errors.append(f"FILE_MANIFEST.txt does not contain: {relative}")
-if "documentation/MERMAID.md" in manifest_entries:
-    errors.append("FILE_MANIFEST.txt still contains documentation/MERMAID.md")
 
 # Ensure the manifest describes the complete source tree and excludes only
 # repository-owned generated locations.
@@ -129,6 +143,8 @@ def is_generated_artifact(path: pathlib.Path) -> bool:
     relative = relative_path.as_posix()
     if relative == "benchmark_reports/.gitignore":
         return False
+    if ".godot" in relative_path.parts[:-1]:
+        return True
     if "__pycache__" in relative_path.parts:
         return True
     return relative.startswith(generated_prefixes)
@@ -258,9 +274,13 @@ if test_cases < 140:
 # Script interface and sanitizer contracts.
 build_script = read("scripts/build_and_validate.sh")
 sanitizer_script = read("scripts/run_sanitized_tests.sh")
+lsan_guard = read("scripts/verify_lsan_suppressions.sh")
+sanitizer_guard = read("scripts/verify_sanitizer_suppressions.sh")
 mermaid_script = read("scripts/verify_mermaid_diagrams.py")
 export_script = read("scripts/export_protocol_benchmarks.sh")
+lsan_suppression = read("scripts/sanitizer_suppressions/godot-4.7.1-lsan.supp")
 ubsan_suppression = read("scripts/sanitizer_suppressions/godot-4.7.1-ubsan.supp")
+lsan_adr = read("documentation/adr/0038-keep-lsan-enabled-with-a-godot-joypad-suppression.md")
 build_api_match = re.search(r'readonly SCRIPT_API_VERSION="([0-9]+)"', build_script)
 wrapper_api_match = re.search(r'readonly EXPECTED_BUILD_SCRIPT_API="([0-9]+)"', sanitizer_script)
 if not build_api_match or not wrapper_api_match:
@@ -276,14 +296,85 @@ if 'ASAN_OPTIONS+=\":detect_invalid_pointer_pairs=0\"' not in sanitizer_script:
     errors.append("ASAN profile does not disable engine-level invalid-pointer-pair checking by default")
 if "--invalid-pointer-pairs" not in sanitizer_script:
     errors.append("diagnostic option --invalid-pointer-pairs is missing")
-if "nonnull-attribute:core/string/ustring.cpp" not in ubsan_suppression:
-    errors.append("strict Godot 4.7.1 test-setup UBSAN suppression is missing")
+expected_lsan_rules = ["leak:JoypadSDL::initialize"]
+actual_lsan_rules = [
+    line.strip()
+    for line in lsan_suppression.splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+if actual_lsan_rules != expected_lsan_rules:
+    errors.append("Godot 4.7.1 LSAN suppressions differ from the reviewed exact policy")
+if 'ASAN_OPTIONS+=\":detect_leaks=1\"' not in sanitizer_script:
+    errors.append("ASAN profile does not force LeakSanitizer to remain enabled")
+if "suppressions=${LSAN_SUPPRESSION_FILE}" not in sanitizer_script:
+    errors.append("sanitizer wrapper does not apply the LSAN suppression file")
+if "--no-godot-lsan-suppressions" not in sanitizer_script:
+    errors.append("diagnostic option --no-godot-lsan-suppressions is missing")
+if "verify_lsan_suppressions.sh" not in sanitizer_script:
+    errors.append("sanitizer wrapper does not invoke the LSAN suppression guard")
+for token in (
+    "single|double|all",
+    'PRECISIONS=("double" "single")',
+    "LSAN_NEGATIVE_CONTROL_COMPLETED",
+    "--policy-only",
+):
+    if token not in sanitizer_script:
+        errors.append(f"sanitizer batch contract is missing: {token}")
+for token in (
+    "TICKSYNCHRONIZER_LSAN_SUPPRESSION_POLICY_OK",
+    "TICKSYNCHRONIZER_LSAN_SUPPRESSION_POLICY_ONLY_OK",
+    "TICKSYNCHRONIZER_LSAN_UNRELATED_LEAK_NEGATIVE_CONTROL_OK",
+    "TICKSYNCHRONIZER_LSAN_SUPPRESSION_GUARD_OK",
+    "lsan_unrelated_leak_probe.cpp",
+    "-fsanitize=address",
+    "exitcode=23",
+    "--kill-after=5s",
+    "--policy-only",
+):
+    if token not in lsan_guard:
+        errors.append(f"LSAN suppression guard contract is missing: {token}")
+for token in (
+    "6,991 leaked bytes in 172 allocations",
+    "leak:JoypadSDL::initialize",
+    "detect_leaks=1",
+    "status 23",
+    "uninterrupted sanitizer acceptance batch",
+    "every later ASAN or combined pass",
+    "Do not patch Godot or SDL",
+):
+    if token not in lsan_adr:
+        errors.append(f"incomplete LSAN policy decision: {token}")
+expected_ubsan_rules = [
+    "nonnull-attribute:core/string/ustring.cpp",
+    "bounds:thirdparty/sdl/thread/SDL_thread.c",
+    "alignment:modules/gdscript/gdscript_vm.cpp",
+]
+actual_ubsan_rules = [
+    line.strip()
+    for line in ubsan_suppression.splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+if actual_ubsan_rules != expected_ubsan_rules:
+    errors.append("Godot 4.7.1 UBSAN suppressions differ from the reviewed exact policy")
 if "suppressions=${UBSAN_SUPPRESSION_FILE}" not in sanitizer_script:
     errors.append("sanitizer wrapper does not apply the UBSAN suppression file")
 if "--no-godot-ubsan-suppressions" not in sanitizer_script:
     errors.append("diagnostic option --no-godot-ubsan-suppressions is missing")
+if "verify_sanitizer_suppressions.sh" not in sanitizer_script:
+    errors.append("sanitizer wrapper does not invoke the UBSAN suppression guard")
+for token in (
+    "TICKSYNCHRONIZER_UBSAN_SUPPRESSION_POLICY_OK",
+    "TICKSYNCHRONIZER_UBSAN_SUPPRESSION_GUARD_OK",
+    "ubsan_bounds_probe.cpp",
+    "ubsan_alignment_probe.cpp",
+    "-fsanitize=undefined",
+):
+    if token not in sanitizer_guard:
+        errors.append(f"UBSAN suppression guard contract is missing: {token}")
 for relative, script_text in (
     ("scripts/run_sanitized_tests.sh", sanitizer_script),
+    ("scripts/verify_lsan_suppressions.sh", lsan_guard),
+    ("scripts/verify_sanitizer_suppressions.sh", sanitizer_guard),
     ("scripts/verify_mermaid_diagrams.py", mermaid_script),
     ("scripts/export_protocol_benchmarks.sh", export_script),
 ):
@@ -293,6 +384,12 @@ for relative, script_text in (
 for line_number, line in enumerate(sanitizer_script.splitlines(), start=1):
     if "mktemp" in line and "-d" in line and "$TEMP_ROOT/" not in line:
         errors.append(f"unscoped host temporary directory in scripts/run_sanitized_tests.sh:{line_number}")
+for line_number, line in enumerate(lsan_guard.splitlines(), start=1):
+    if "mktemp" in line and "-d" in line and "$temp_root/" not in line:
+        errors.append(f"unscoped host temporary directory in scripts/verify_lsan_suppressions.sh:{line_number}")
+for line_number, line in enumerate(sanitizer_guard.splitlines(), start=1):
+    if "mktemp" in line and "-d" in line and "$temp_root/" not in line:
+        errors.append(f"unscoped host temporary directory in scripts/verify_sanitizer_suppressions.sh:{line_number}")
 for line_number, line in enumerate(export_script.splitlines(), start=1):
     if "mktemp" in line and "-d" in line and "$TEMP_ROOT/" not in line:
         errors.append(f"unscoped host temporary directory in scripts/export_protocol_benchmarks.sh:{line_number}")
@@ -336,7 +433,7 @@ expected_versions = {
     "API_VERSION": (api_version, 4),
     "WIRE_PROTOCOL_VERSION": (wire_version, 0),
     "WIRE_PROTOCOL_REVISION": (wire_revision, 2),
-    "BENCHMARK_SUITE_VERSION": (benchmark_version, 1),
+    "BENCHMARK_SUITE_VERSION": (benchmark_version, 2),
 }
 for name, (actual, expected) in expected_versions.items():
     if actual is not None and actual != expected:
@@ -353,10 +450,17 @@ benchmark_runner = read("benchmarks/benchmark_runner.h")
 benchmark_main = read("benchmarks/protocol_benchmark_main.cpp")
 benchmark_result = read("benchmarks/benchmark_result.h")
 benchmark_writer = read("benchmarks/benchmark_result_writer.cpp")
-benchmark_candidate = read("benchmarks/candidates/reference_fixed_width_candidate.h") + read(
+benchmark_candidate_shared = read("benchmarks/candidates/protocol_candidate.h") + read(
+    "benchmarks/candidates/protocol_candidate.cpp"
+)
+benchmark_reference_candidate = read("benchmarks/candidates/reference_fixed_width_candidate.h") + read(
     "benchmarks/candidates/reference_fixed_width_candidate.cpp"
 )
+benchmark_varint_candidate = read("benchmarks/candidates/varint_zigzag_fixed_float_candidate.h") + read(
+    "benchmarks/candidates/varint_zigzag_fixed_float_candidate.cpp"
+)
 benchmark_sconstruct = read("benchmarks/SConstruct")
+benchmark_compiler_contract = read("benchmarks/benchmark_compiler_contract.h")
 benchmark_platform = read("benchmarks/benchmark_platform.h") + read("benchmarks/benchmark_platform.cpp")
 benchmark_allocation = read("benchmarks/benchmark_allocation_counter.cpp")
 benchmark_build_script = read("scripts/build_protocol_benchmarks.sh")
@@ -365,31 +469,62 @@ benchmark_android_build = read("scripts/build_protocol_benchmarks_android.sh")
 benchmark_android_run = read("scripts/run_protocol_benchmarks_android.sh")
 benchmark_windows_build = read("scripts/build_protocol_benchmarks_windows_cross.sh")
 benchmark_windows_run = read("scripts/run_protocol_benchmarks_windows.ps1")
+benchmark_macos_build = read("scripts/build_protocol_benchmarks_macos.sh")
+benchmark_macos_run = read("scripts/run_protocol_benchmarks_macos.sh")
 benchmark_export_script = read("scripts/export_protocol_benchmarks.sh")
 benchmark_verify_script = read("scripts/verify_benchmark_results.py")
 benchmark_compare_script = read("scripts/compare_protocol_benchmarks.py")
+benchmark_analyze_script = read("scripts/analyze_protocol_candidates.py")
 benchmark_doc = read("documentation/BENCHMARKS.md")
 benchmark_decisions = read("documentation/BENCHMARK_DECISIONS.md")
 benchmark_adr = read("documentation/adr/0028-deterministic-protocol-benchmark-suite.md") + read(
     "documentation/adr/0029-cross-platform-benchmark-backends.md"
+) + read("documentation/adr/0032-add-local-macos-universal2-benchmark-backend.md") + read(
+    "documentation/adr/0036-separate-candidate-selection-from-final-macos-qualification.md"
+) + read("documentation/adr/0037-adopt-suite2-and-screen-canonical-varint-integers.md")
+cpp_policy_adr = read("documentation/adr/0033-enforce-godot-cpp-policy-boundary.md")
+macos_distribution_adr = read(
+    "documentation/adr/0034-publish-macos-source-with-local-apple-toolchain.md"
+)
+documentation_governance_adr = read(
+    "documentation/adr/0035-separate-repository-project-and-wiki-responsibilities.md"
+)
+candidate_gate_adr = read(
+    "documentation/adr/0036-separate-candidate-selection-from-final-macos-qualification.md"
+)
+suite2_adr = read(
+    "documentation/adr/0037-adopt-suite2-and-screen-canonical-varint-integers.md"
 )
 
-if re.findall(r"suite_version\s*=\s*([0-9]+)", benchmark_config) != ["1"]:
-    errors.append("benchmark_config.h must declare exactly suite_version=1")
+if re.findall(r"suite_version\s*=\s*([0-9]+)", benchmark_config) != ["2"]:
+    errors.append("benchmark_config.h must declare exactly suite_version=2")
 required_datasets = {
     "control_minimal", "player_input", "snapshot_sparse", "snapshot_medium",
-    "snapshot_dense", "numeric_extremes", "sequential_flow",
+    "snapshot_dense", "numeric_extremes", "integer_boundaries", "sequential_flow",
 }
 missing_datasets = sorted(name for name in required_datasets if f'"{name}"' not in benchmark_dataset)
 if missing_datasets:
     errors.append("missing benchmark datasets: " + ", ".join(missing_datasets))
 for token in ("reference_fixed_width", "CANDIDATE_ID = 1", "MAX_ENTITIES = 1024", "MAX_BLOB_SIZE = 4096"):
-    if token not in benchmark_candidate:
+    if token not in benchmark_reference_candidate:
         errors.append(f"incomplete reference candidate: {token}")
-for token in ("round_trip_failures", "determinism_failures", "AllocationCounter", "minimum_sample_duration_ns", "measured_rounds", "combine_diagnostic_checksum"):
+for token in (
+    "varint_zigzag_fixed_float", "CANDIDATE_ID = 2", "append_uleb128",
+    "zigzag_encode", "read_uleb128", "MAX_ENTITIES = 1024", "MAX_BLOB_SIZE = 4096",
+):
+    if token not in benchmark_varint_candidate:
+        errors.append(f"incomplete canonical-varint candidate: {token}")
+for token in (
+    "CANONICAL_NAN_BITS", "binary32_bits_from_double", "round_right_to_even",
+    "benchmark_wire_scalar_contract_self_test", "CandidateDecodeError read_benchmark_wire_scalar",
+    "benchmark_message_kind_semantics_are_valid", "std::numeric_limits<double>::is_iec559",
+):
+    if token not in benchmark_candidate_shared:
+        errors.append(f"incomplete canonical scalar contract: {token}")
+for token in ("round_trip_failures", "determinism_failures", "AllocationCounter", "minimum_sample_duration_ns", "measured_rounds", "combine_diagnostic_checksum", "expected_error", "append_invalid_packets"):
     if token not in benchmark_runner:
         errors.append(f"incomplete benchmark runner: {token}")
-for token in ("version::BENCHMARK_SUITE_VERSION", "--self-test", "--list-cpus", "--quick", "--json", "--csv", "--cpu", "TICKSYNCHRONIZER_PROTOCOL_BENCHMARK_OK"):
+for token in ("version::BENCHMARK_SUITE_VERSION", "--self-test", "--list-cpus", "--list-candidates", "--candidate", "--quick", "--json", "--csv", "--cpu", "TICKSYNCHRONIZER_PROTOCOL_BENCHMARK_OK"):
     if token not in benchmark_main:
         errors.append(f"incomplete benchmark executable: {token}")
 if "is_official_benchmark_config" not in benchmark_config + benchmark_main or "options.only_dataset.empty()" not in benchmark_main:
@@ -398,17 +533,36 @@ for token in ("QUALIFICATION_GODOT_COMMIT", "is_lower_hex_sha1"):
     if token not in benchmark_config + benchmark_main:
         errors.append(f"official benchmark provenance guard is missing: {token}")
 for token in (
-    "platform", "linuxbsd", "windows", "android", "precision", "-std=c++17",
-    "reference_fixed_width_candidate.cpp", "benchmark_platform.cpp", "SConsignFile",
+    "platform", "linuxbsd", "windows", "android", "macos", "precision", "-std=c++17",
+    "protocol_candidate.cpp", "reference_fixed_width_candidate.cpp",
+    "varint_zigzag_fixed_float_candidate.cpp", "benchmark_platform.cpp", "SConsignFile",
     "mingw-gcc", "llvm-mingw", "android-ndk", "aarch64-linux-android",
-    "-static-libstdc++",
+    "-static-libstdc++", "apple-clang", "-mmacosx-version-min",
+    "-fno-exceptions", "-fno-rtti", "benchmark_compiler_contract.h",
 ):
     if token not in benchmark_sconstruct:
         errors.append(f"incomplete benchmark SConstruct: {token}")
 for token in (
+    "reported_compiler_command", "reported_compiler_path", "macos_sdk",
+    "os.path.abspath(os.path.expanduser(command))", '"LINK": compiler_path',
+):
+    if token not in benchmark_sconstruct:
+        errors.append(f"incomplete privacy-safe benchmark build provenance: {token}")
+if "path.expanduser().resolve()" in benchmark_sconstruct:
+    errors.append(
+        "benchmark compiler resolution must preserve the C++ driver symlink basename"
+    )
+for token in (
+    "__cpp_exceptions", "__EXCEPTIONS", "_CPPUNWIND",
+    "__GXX_RTTI", "_CPPRTTI",
+):
+    if token not in benchmark_compiler_contract:
+        errors.append(f"incomplete benchmark compiler-feature guard: {token}")
+for token in (
     "sched_setaffinity", "SetThreadGroupAffinity", "affinity verification expected CPU",
     "affinity_actual_cpu", "GetLogicalProcessorInformationEx", "RelationCache",
     "list_benchmark_logical_cpus",
+    "unsupported-by-platform-policy",
 ):
     if token not in benchmark_platform + benchmark_result:
         errors.append(f"incomplete native benchmark affinity support: {token}")
@@ -446,8 +600,41 @@ for forbidden in ("scons", "build_protocol_benchmarks_windows.ps1", "Python-Comm
     if forbidden in benchmark_windows_run:
         errors.append(f"Windows execution host must not require development tooling: {forbidden}")
 for token in (
-    "--platform", "linuxbsd", "windows", "android", "execution-only",
+    "platform=macos", "apple-clang", "x86_64", "arm64", "lipo", "otool",
+    "Universal 2", "--deployment-target", "LC_BUILD_VERSION",
+    "verify_source_consistency.sh", "source state changed during the Universal 2 build",
+    "Apple clang version", "unless both --cxx and --sdk are supplied",
+    "normalize_version",
+):
+    if token not in benchmark_macos_build:
+        errors.append(f"incomplete local macOS Universal 2 build backend: {token}")
+for required_command in (
+    '/usr/bin/lipo "$binary" -verify_arch "$selected_architecture"',
+    '/usr/bin/lipo "$universal_binary" -verify_arch x86_64 arm64',
+    '/usr/bin/lipo "$binary" -verify_arch "$host_architecture"',
+):
+    if required_command not in benchmark_macos_build:
+        errors.append(
+            "macOS lipo architecture verification must place the input file "
+            f"before -verify_arch: {required_command}"
+        )
+if "/usr/bin/lipo -verify_arch" in benchmark_macos_build:
+    errors.append("macOS lipo architecture verification uses an incompatible argument order")
+for token in (
+    "macos-native", "unsupported-by-platform-policy", "scheduler-managed",
+    "PACKAGE_INTEGRITY_OK", "shasum", "plutil", "--quick", "--allow-dirty",
+    "sysctl.proc_translated", "com.apple.quarantine",
+    '"source_state": "dirty"', "--quick and --allow-dirty are mutually exclusive",
+):
+    if token not in benchmark_macos_run:
+        errors.append(f"incomplete execution-only macOS benchmark backend: {token}")
+for forbidden in ("scons ", "xcrun", "clang++", "python3", "git -C", "lipo", "otool"):
+    if forbidden.lower() in benchmark_macos_run.lower():
+        errors.append(f"macOS execution host must not require development tooling: {forbidden}")
+for token in (
+    "--platform", "linuxbsd", "windows", "android", "macos", "execution-only",
     "TICKSYNC_TEMP_DIR", "tick_synchronizer_tmp", "SHA256SUMS.txt",
+    "verify_benchmark_package_privacy", "write_archive_hash_sidecar", '${archive##*/}',
 ):
     if token not in benchmark_export_script:
         errors.append(f"incomplete benchmark deployment exporter: {token}")
@@ -458,35 +645,91 @@ for runner_name, runner_text in (
     for token in ("--execution-only", "--binary-dir", "PACKAGE_INTEGRITY_OK"):
         if token not in runner_text:
             errors.append(f"incomplete {runner_name} execution-only benchmark runner: {token}")
-for token in ("benchmark_suite_version", "round_trip_failures", "accepted", "schema_version", "official_eligible", "binary_sha256"):
+for token in ("PACKAGE_INTEGRITY_OK", "--binary-dir", "macos-native"):
+    if token not in benchmark_macos_run:
+        errors.append(f"incomplete macOS execution-only benchmark runner: {token}")
+for token in ("benchmark_suite_version", "round_trip_failures", "accepted", "schema_version", "official_eligible", "binary_sha256", "EXPECTED_CANDIDATES", "invalid packet accounting mismatch"):
     if token not in benchmark_verify_script:
         errors.append(f"incomplete benchmark report verifier: {token}")
 for token in ("OFFICIAL_CONFIG", "EXPECTED_DATASETS", "QUALIFICATION_GODOT_COMMIT"):
     if token not in benchmark_verify_script:
         errors.append(f"incomplete official benchmark report verification: {token}")
+if "is_scheduler_managed_macos" not in benchmark_verify_script:
+    errors.append("benchmark report verifier does not enforce the exact macOS scheduling policy")
+if "verify_provenance_privacy" not in benchmark_verify_script:
+    errors.append("benchmark report verifier does not reject host-specific provenance paths")
+if 'TICKSYNC_BENCHMARK_EXECUTABLE_PATH=${binary_name}' not in benchmark_run_script:
+    errors.append("Linux benchmark reports must use a privacy-safe executable basename")
+if "[System.IO.Path]::GetFileName($Binary)" not in benchmark_windows_run:
+    errors.append("Windows benchmark reports must use a privacy-safe executable basename")
 for token in (
     "official_eligible", "benchmark_suite_version", "group_by_precision",
     "report_folder", "--self-test",
 ):
     if token not in benchmark_compare_script:
         errors.append(f"incomplete benchmark comparator: {token}")
+for token in (
+    "REFERENCE_CANDIDATE", "VARINT_CANDIDATE", "COVERAGE_ONLY_DATASETS",
+    "MAX_WORKLOAD_SIZE_RATIO = 0.95", "MAX_WEIGHTED_LATENCY_RATIO = 1.50",
+    "MAX_DATASET_LATENCY_RATIO = 2.00", "MAX_PAIR_TIME_DELTA_SECONDS = 3_600",
+    "paired benchmark configuration differs", "semantic_hash", "--self-test",
+):
+    if token not in benchmark_analyze_script:
+        errors.append(f"incomplete paired candidate analyzer: {token}")
 if "std::uint32_t schema_version = 3;" not in benchmark_result:
     errors.append("benchmark report schema must be 3")
 for token in ("binary_sha256", "compiler_flags", "logical_cpu", "runtime_backend", "device_model", "affinity_applied", "official_eligible"):
     if token not in benchmark_result + benchmark_writer:
         errors.append(f"incomplete benchmark provenance: {token}")
 benchmark_documentation_text = (benchmark_doc + benchmark_decisions).lower()
-for token in ("clean Git tree", "Linux x86_64", "Windows x86_64", "Android ARM64", "schema 3"):
+for token in (
+    "clean Git tree", "Linux x86_64", "Windows x86_64", "Android ARM64",
+    "macOS Universal 2", "schema 3", "16 matched", "36 reports", "suite 2",
+):
     if token.lower() not in benchmark_documentation_text:
         errors.append(f"benchmark documentation is missing required decision context: {token}")
 if "reference_fixed_width" not in benchmark_adr:
     errors.append("ADR 0028 does not record the reference candidate")
+for token in (
+    "Godot policy", "ProtocolFixedBytes", "-fno-exceptions", "-fno-rtti",
+    "explicit status values", "benchmark suite version remains 1",
+):
+    if token not in cpp_policy_adr:
+        errors.append(f"incomplete Godot C++ policy decision: {token}")
+for token in (
+    "source-only", "Apple-branded hardware", "copied Apple SDK",
+    "must remain outside Git and public releases",
+):
+    if token not in macos_distribution_adr:
+        errors.append(f"incomplete macOS source-distribution decision: {token}")
+for token in (
+    "versioned repository remains authoritative",
+    "GitHub Project is the canonical operational planning surface",
+    "GitHub Wiki publication begins only after",
+    "18 matched candidate pairs",
+    "Wiki must never be the sole source of truth",
+):
+    if token not in documentation_governance_adr:
+        errors.append(f"incomplete documentation-governance decision: {token}")
+for token in (
+    "16 matched pairs", "32 reports", "final development portability gate",
+    "18 matched pairs", "36 candidate reports", "reopens the affected decision",
+):
+    if token not in candidate_gate_adr:
+        errors.append(f"incomplete candidate-selection gate decision: {token}")
+for token in (
+    "benchmark suite 2", "varint_zigzag_fixed_float", "round-to-nearest, ties-to-even",
+    "0.718x", "0.602x", "selected as the integer primitive", "wire version 0 revision 2",
+):
+    if token not in suite2_adr:
+        errors.append(f"incomplete suite 2 candidate decision: {token}")
 if godot_commit not in benchmark_config:
     errors.append("benchmark qualification commit does not match GODOT_COMMIT")
 for script_name, script_text in (
     ("Linux", benchmark_build_script),
     ("Android", benchmark_android_build),
     ("Windows", benchmark_windows_build),
+    ("macOS", benchmark_macos_build),
 ):
     if "verify_source_consistency.sh" not in script_text:
         errors.append(f"{script_name} benchmark build must run source consistency before SCons")
@@ -604,6 +847,77 @@ for path in cpp_files:
     if len(lines) < 2 or not lines[0].startswith("// ") or not lines[1].startswith("// "):
         errors.append(f"missing two-line file purpose comment: {path.relative_to(module)}")
 
+
+def strip_cpp_comments_and_literals(text: str) -> str:
+    pattern = re.compile(
+        r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
+        re.DOTALL,
+    )
+    return pattern.sub(lambda match: "\n" * match.group(0).count("\n"), text)
+
+
+def find_cpp_policy_violations(
+    paths: list[pathlib.Path],
+    rules: tuple[tuple[str, re.Pattern[str]], ...],
+) -> None:
+    for path in paths:
+        source = strip_cpp_comments_and_literals(path.read_text(encoding="utf-8"))
+        for feature, pattern in rules:
+            match = pattern.search(source)
+            if match is None:
+                continue
+            line = source.count("\n", 0, match.start()) + 1
+            errors.append(
+                f"C++ policy violation ({feature}) in {path.relative_to(module)}:{line}"
+            )
+
+
+exception_and_rtti_rules = (
+    ("try block", re.compile(r"\btry\b")),
+    ("catch block", re.compile(r"\bcatch\s*\(")),
+    ("throw expression", re.compile(r"\bthrow\b")),
+    ("dynamic cast", re.compile(r"\bdynamic_cast\s*<")),
+    ("type identification", re.compile(r"\btypeid\s*\(")),
+)
+module_cpp_files = sorted(
+    path
+    for root in (module / "src", module / "tests")
+    for path in root.rglob("*")
+    if path.is_file() and path.suffix in {".h", ".cpp"}
+)
+module_cpp_files.extend(
+    path
+    for path in (module / "register_types.h", module / "register_types.cpp")
+    if path.is_file()
+)
+module_only_rules = exception_and_rtti_rules + (
+    ("auto type inference", re.compile(r"\bauto\b")),
+    (
+        "avoidable lambda",
+        re.compile(
+            r"(?<![A-Za-z0-9_\]])\[[^\]\n]*\]\s*(?:\([^;{}]*\))?\s*(?:mutable\s*)?"
+            r"(?:noexcept\s*)?(?:->\s*[^{}]+)?\s*\{"
+        ),
+    ),
+    (
+        "STL container",
+        re.compile(
+            r"\bstd::(?:any|array|basic_string|deque|forward_list|function|list|map|"
+            r"optional|pair|set|shared_ptr|span|string|string_view|tuple|unique_ptr|"
+            r"unordered_map|unordered_set|variant|vector|weak_ptr)\b"
+        ),
+    ),
+)
+find_cpp_policy_violations(module_cpp_files, module_only_rules)
+
+benchmark_cpp_files = sorted(
+    path
+    for path in (module / "benchmarks").rglob("*")
+    if path.is_file() and path.suffix in {".h", ".cpp"}
+    and not is_generated_artifact(path)
+)
+find_cpp_policy_violations(benchmark_cpp_files, exception_and_rtti_rules)
+
 # Public/protocol/benchmark method declarations require an immediately preceding concise comment.
 comment_headers = sorted(
     list((module / "src/public").glob("*.h"))
@@ -698,15 +1012,22 @@ print(
 print(
     "TICKSYNCHRONIZER_BENCHMARK_SUITE_OK "
     f"suite={benchmark_version} datasets={len(required_datasets)} "
-    "candidate=reference_fixed_width backends=linux,windows,android schema=3"
+    "candidates=reference_fixed_width,varint_zigzag_fixed_float "
+    "backends=linux,windows,android,macos schema=3"
 )
 print(
     "TICKSYNCHRONIZER_DOCUMENTATION_POLICY_OK "
     f"language=english cpp_file_headers={len(cpp_files)} benchmark_decisions=yes "
-    "module_layouts=external,in-tree mermaid_tutorial=absent"
+    "module_layouts=external,in-tree records=separated"
+)
+print(
+    "TICKSYNCHRONIZER_CPP_POLICY_OK "
+    "module=godot-subset benchmark=exception-free,rtti-free"
 )
 print(f"TICKSYNCHRONIZER_SOURCE_CONSISTENCY_OK methods={len(documented)} tests={test_cases}")
 PY
 
 "$MODULE_DIR/scripts/compare_protocol_benchmarks.py" --self-test
+"$MODULE_DIR/scripts/analyze_protocol_candidates.py" --self-test
+"$MODULE_DIR/scripts/verify_benchmark_results.py" --self-test
 "$MODULE_DIR/scripts/verify_mermaid_diagrams.py" --root "$MODULE_DIR" --min-diagrams 19

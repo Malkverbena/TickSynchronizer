@@ -1,8 +1,10 @@
 # Fuzzing and sanitizers
 
-## Current state
+## Coverage boundary
 
-The binary buffer and control packet decoder have deterministic unit tests, malformed-input tests, golden vectors, ASAN coverage, and UBSAN coverage for module code. A dedicated fuzz target is still pending.
+The binary buffer and control packet decoder require deterministic unit tests,
+malformed-input tests, golden vectors, ASAN coverage, and UBSAN coverage. A
+dedicated fuzz target becomes mandatory at the external-traffic boundary.
 
 ```mermaid
 flowchart LR
@@ -18,7 +20,7 @@ flowchart LR
 
 The packet-security gate must be complete before an external transport can deliver untrusted bytes to gameplay logic. Fuzzing becomes mandatory at that boundary.
 
-## Future fuzz target requirements
+## Fuzz target requirements
 
 - run without `SceneTree`, rendering, SDL, or network initialization;
 - decode bounded byte spans directly;
@@ -38,6 +40,8 @@ The corpus should include:
 - non-zero reserved fields;
 - invalid precision and packet types;
 - non-canonical varints;
+- noncanonical quiet/signaling NaN payloads in both scalar widths;
+- ULEB128 overflow, truncated continuation, and narrow-field overflow;
 - invalid padding;
 - capability and identity mismatches;
 - previously discovered regressions.
@@ -50,3 +54,14 @@ The corpus should include:
 - no partial output mutation on error;
 - no acceptance of non-canonical encodings;
 - deterministic result for identical input.
+
+Suite 2 candidate self-tests currently exercise these invariants under combined
+ASAN and UBSAN in both precisions. They reduce risk before the dedicated fuzzer
+exists, but they do not replace the packet-security fuzz gate.
+
+The integrated Godot ASAN gate keeps LeakSanitizer enabled. One exact
+Godot 4.7.1 SDL joypad function rule is allowed only because the same allocation
+set was reproduced with an exact-commit binary that did not contain
+TickSynchronizer. A SCons-built unrelated leak must remain fatal before the
+rule can be used. This external engine rule does not apply to standalone
+candidate code, and no suppression may match module or benchmark sources.

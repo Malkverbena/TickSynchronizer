@@ -101,29 +101,30 @@ scons platform=linuxbsd \
     -j45
 ```
 
-## Current validated baseline
+## Acceptance evidence
 
-The wire revision 2 baseline passes in both `single` and `double`:
-
-- 140 C++ test cases;
-- 66,999 assertions;
-- normal editor smoke test;
-- `template_debug`;
-- `template_release`.
-
-The module-focused ASAN and UBSAN suites also pass all 140 tests and 66,999
-assertions in both precisions with the accepted `--no-smoke` profile.
+Build procedures and gates in this document are stable contracts. Results tied
+to a particular source state are recorded separately in
+[`development/VALIDATION.md`](development/VALIDATION.md).
 
 ## Sanitizers
 
 Use the wrapper to keep the accepted Clang/LLD and suppression contracts consistent:
 
 ```bash
-./scripts/run_sanitized_tests.sh double --jobs 45 --no-smoke
-./scripts/run_sanitized_tests.sh single --jobs 45 --no-smoke
+./scripts/run_sanitized_tests.sh all --jobs 45
 ```
 
-The module C++ suites pass. The sanitized full editor smoke remains blocked by a known UBSAN diagnostic in Godot 4.7.1 bundled SDL/HIDAPI startup. The diagnostic occurs outside TickSynchronizer and does not permit broad suppressions.
+The ASAN wrapper forces LeakSanitizer to remain enabled. Its exact Godot 4.7.1
+SDL joypad function rule is verified by a SCons-built unrelated leak control
+before use. The separate exact source-scoped UBSAN policy is verified by
+unrelated bounds and alignment controls. Accepted validation requires the full
+editor smoke in both precisions; `--no-smoke` and suppression-disable options
+are diagnostic only.
+
+The `all` batch runs `double` and `single` serially. It executes the full
+unrelated LSAN control once and rechecks the exact rule before every later ASAN
+pass in that uninterrupted batch.
 
 ## Module build ID
 
@@ -148,7 +149,16 @@ Official runs require a clean tree:
 
 ## Cross-platform benchmark builds
 
-`benchmarks/SConstruct` is the only standalone benchmark compilation graph. Its explicit platform and toolchain arguments keep Linux, Windows, and Android outputs isolated while compiling the same sources, datasets, candidate, and methodology.
+`benchmarks/SConstruct` is the only standalone benchmark compilation graph. Its
+explicit platform and toolchain arguments keep Linux, Windows, Android, and
+macOS outputs isolated while compiling the same sources, datasets, candidates,
+and methodology.
+
+Every standalone benchmark target uses `-fno-exceptions` and `-fno-rtti` and
+forces `benchmark_compiler_contract.h` into every translation unit. Candidate,
+command, and measurement failures propagate through explicit status values. The
+module itself follows the stricter Godot subset and does not use STL containers,
+`auto`, avoidable lambdas, exceptions, or RTTI.
 
 Windows x86_64 cross-build on Linux:
 
@@ -187,12 +197,51 @@ export PATH="$ANDROID_SDK_ROOT/platform-tools:$PATH"
 ./scripts/run_protocol_benchmarks_android.sh --serial SERIAL --list-cpus
 ```
 
+macOS Universal 2 must be built locally on a Mac. The build host requires Apple
+Clang and a macOS SDK from Xcode or Apple Command Line Tools, Python, SCons,
+and Git.
+
+ADR 0036 defers this native build and execution to the final development
+portability gate. The commands remain documented for that reproducible gate;
+they are not part of the current Linux/Windows/Android selection phase.
+
+At the final gate:
+
+```bash
+./scripts/build_protocol_benchmarks_macos.sh \
+    --precision all \
+    --deployment-target 12.0 \
+    --clean-first
+```
+
+The wrapper builds separate `x86_64` and `arm64` SCons targets, merges the
+linked executables with `lipo`, rejects non-system dynamic-library dependencies,
+runs the native host slice self-test, and exports a private execution-only ZIP.
+After copying and extracting that qualification package, the target Mac needs no
+compiler, Homebrew, SDK, SCons, Python, Git, or project source:
+
+```bash
+./run_protocol_benchmarks_macos.sh --precision all --quick
+```
+
+The runner rejects Rosetta execution and uses the scheduler-managed
+representative policy defined in ADR 0032. It records quarantine presence but
+does not modify it; signing and notarization remain uncommitted until actual
+Gatekeeper behavior is observed.
+
+GitHub distribution is source-only. macOS users provide their own locally
+licensed Apple toolchain and SDK on Apple-branded hardware running macOS. Build
+scripts may discover those local components, but the repository must not vendor,
+download, copy, or publish them. Linux cross-compilation with a copied Apple SDK
+is unsupported. Generated macOS binaries and packages must remain outside Git
+and public releases.
+
 The pinned Ubuntu SDK and NDK bootstrap procedure is documented in
 `BENCHMARKS.md`. The Android build uses the target-specific NDK Clang driver
 for `arm64-v8a`, produces a PIE executable, and links static libc++. The
 Windows build uses MinGW-w64 or LLVM-MinGW and links compiler runtimes
-statically. Binary inspection rejects incorrect architectures and shared
-compiler runtimes.
+statically. The macOS build links only system libraries. Binary inspection
+rejects incorrect architectures and unexpected compiler runtimes.
 
 Native Linux packages can be exported at build time:
 
@@ -203,7 +252,14 @@ Native Linux packages can be exported at build time:
     --export-package
 ```
 
-Linux and Android packages contain the execution-only shell runner and report verifier. The Windows package contains prebuilt PE executables and its PowerShell runner. Each runner verifies the package SHA-256 manifest before execution. Test machines never need a compiler, SCons, target SDK/NDK, Git checkout, or project source. An Android controller still requires ADB, but the Android device receives only the native executable and generated launcher.
+Private Linux and Android packages contain the execution-only shell runner and report
+verifier. The Windows package contains prebuilt PE executables and its
+PowerShell runner. The macOS package contains Universal 2 executables and a
+standard-system-tools runner. Each runner verifies the package SHA-256 manifest
+before execution. Test machines never need a compiler, SCons, target SDK/NDK,
+Git checkout, or project source. An Android controller still requires ADB, but
+the Android device receives only the native executable and generated launcher.
+No generated package is a public GitHub deliverable.
 
 ## Host temporary directories
 
@@ -219,6 +275,10 @@ provenance and cannot produce an official benchmark report by itself.
 ## Reports
 
 Build reports are written under `build_reports/`; benchmark reports are written under `benchmark_reports/`. Generated reports and binaries are not source files and must remain ignored.
+
+Benchmark metadata records privacy-safe compiler and executable identifiers.
+Report verification and deployment-package export reject private user,
+mounted-volume, and drive-qualified paths before evidence is archived.
 
 ## Cleanup
 

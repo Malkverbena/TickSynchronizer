@@ -18,7 +18,7 @@ inline constexpr std::uint32_t WIRE_PROTOCOL_REVISION = 2;
 
 // Increment only when benchmark methodology changes in a way that makes
 // previous results no longer directly comparable.
-inline constexpr std::uint32_t BENCHMARK_SUITE_VERSION = 1;
+inline constexpr std::uint32_t BENCHMARK_SUITE_VERSION = 2;
 
 // The current project policy requires peers to use the same module build.
 inline constexpr bool EXACT_BUILD_MATCH_REQUIRED = true;

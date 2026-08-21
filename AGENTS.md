@@ -7,13 +7,28 @@ This file is the mandatory entry point for every person or automated agent that 
 Read the following files before changing code:
 
 1. `AGENTS.md`;
-2. `documentation/PROJECT_STATE.md`;
-3. `documentation/ARCHITECTURE.md`;
-4. the relevant ADRs in `documentation/adr/`;
-5. `documentation/ROADMAP.md`;
-6. task-specific documentation.
+2. `documentation/README.md`;
+3. `documentation/development/PROJECT_STATE.md`;
+4. `documentation/ARCHITECTURE.md`;
+5. the relevant ADRs in `documentation/adr/`;
+6. `documentation/development/ROADMAP.md`;
+7. task-specific documentation.
 
 Conversations, old messages, and agent memory are not authoritative. Versioned files and executable tests take precedence when information conflicts.
+
+## Documentation surfaces
+
+- The versioned repository is authoritative for technical contracts, ADRs,
+  source-specific state, validation evidence, and the strategic phase roadmap.
+- The GitHub Project is authoritative for actionable backlog items, status,
+  priority, assignment, scheduling, milestones, and board or timeline views.
+- The GitHub Wiki is a derived user-facing publication. It starts only after
+  the current source acceptance gate and official benchmark matrix are complete,
+  and it never replaces versioned normative documents or ADRs.
+- Public Project and Wiki content must not expose credentials, private local
+  paths, host names, operator identity, serial identifiers, or unpublished
+  artifact names and hashes.
+- ADR 0035 defines the complete ownership and publication policy.
 
 ## Language policy
 
@@ -44,19 +59,38 @@ Both supported layouts must remain functional. Do not introduce path assumptions
 ## Build and precision
 
 - SCons is the only compilation system for the Godot module and every standalone benchmark target.
-- `benchmarks/SConstruct` is the single benchmark compilation graph for Linux, Windows, and Android.
+- `benchmarks/SConstruct` is the single benchmark compilation graph for Linux, Windows, Android, and macOS.
 - Windows executables are cross-compiled on Linux with MinGW-w64 or LLVM-MinGW.
 - Android executables are cross-compiled with the Android NDK Clang driver.
+- macOS Universal 2 executables are built locally from Apple Clang `x86_64`
+  and `arm64` thin targets, then merged with `lipo`.
 - Default precision: `double`.
 - Supported precisions: `single` and `double`.
 - Every peer in one session must use the same build precision.
 - The wire format must never serialize `real_t` directly.
-- Initial target platforms: Linux, Windows, and Android.
-- Web is unsupported; macOS and iOS are deferred.
+- Initial target platforms: Linux, Windows, Android, and macOS.
+- Web and iOS are unsupported.
 
 Host temporary directories must default to the sibling `../tick_synchronizer_tmp` directory. `TICKSYNC_TEMP_DIR` may select another safe host location, but `/tmp` and its descendants are forbidden. `/data/local/tmp` is allowed only as the remote ADB deployment directory on an Android device.
 
-Benchmark deployment packages must remain execution-only. Test machines receive prebuilt binaries, runners, hashes, and instructions; they must not require a compiler, SCons, an SDK/NDK, Git checkout, or project sources.
+Benchmark deployment packages are private qualification artifacts and must
+remain execution-only. Test machines receive prebuilt binaries, runners, hashes,
+and instructions; they must not require a compiler, SCons, an SDK/NDK, Git
+checkout, or project sources. The macOS target additionally must not require
+Homebrew or Python. Platform-standard runtime utilities and the documented Linux
+or Android controller tools remain allowed. Public GitHub distribution is
+source-only: do not commit or release generated benchmark binaries or deployment
+packages.
+
+Generated benchmark provenance must use privacy-safe compiler identifiers and
+binary basenames instead of build-host user directories, mounted-volume paths,
+drive-qualified paths, host names, or device serial identifiers. Package export
+and report validation must reject host-specific path leakage.
+
+Never vendor, upload, host, or redistribute Xcode, Apple developer tools, an
+Apple SDK, or extracted Apple headers and libraries. macOS builds must use a
+locally supplied Apple toolchain and SDK on Apple-branded hardware running
+macOS. Linux cross-compilation with a copied Apple SDK is unsupported.
 
 ## Build-storage integrity
 
@@ -74,8 +108,13 @@ benchmark report by itself.
 - Use exactly one blank line between consecutive function declarations or definitions in project-owned `.h` files.
 - Use exactly two blank lines between consecutive namespace-scope or class-method definitions in project-owned `.cpp` files.
 - Keep method comments attached to the declaration or definition they describe; spacing belongs before the comment block.
-- Prefer Godot runtime types where appropriate: `PackedByteArray`, `Vector`, `LocalVector`, `HashMap`, `StringName`, `ObjectID`, `Ref<T>`, and `Variant`.
-- Do not use exceptions or RTTI in module runtime code.
+- Module-linked source and tests must not use STL containers, `auto`, avoidable
+  lambdas, exceptions, or RTTI. Prefer Godot runtime types where appropriate:
+  `PackedByteArray`, `Vector`, `LocalVector`, `HashMap`, `StringName`, `ObjectID`,
+  `Ref<T>`, and `Variant`.
+- Standalone benchmark sources may use STL containers and measurement lambdas,
+  but must remain exception-free and RTTI-free. Every benchmark target compiles
+  with `-fno-exceptions` and `-fno-rtti` through SCons.
 - Use `Error`, `ERR_FAIL_*`, `WARN_PRINT`, and `ERR_PRINT` according to engine conventions.
 - Never serialize C++ structs by copying their memory representation.
 - Wire integers use explicit little-endian encoding and documented bit order.
@@ -114,7 +153,8 @@ A complete functional change must:
 3. pass the automated GDScript smoke test;
 4. compile `template_debug`;
 5. compile `template_release`;
-6. update documentation, ADRs, and `PROJECT_STATE.md` when applicable.
+6. update documentation, ADRs, and
+   `documentation/development/PROJECT_STATE.md` when applicable.
 
 Primary command:
 
@@ -128,18 +168,31 @@ Fast development cycle:
 ./scripts/build_and_validate.sh --mode quick --precision double
 ```
 
-The benchmark harness has its own build and execution scripts. Official benchmark reports require a clean Git tree and explicit CPU affinity.
+The benchmark harness has its own build and execution scripts. Official
+benchmark reports require a clean Git tree and verified hard CPU affinity on
+Linux, Windows, and Android. macOS accepts only the exact scheduler-managed
+representative policy in ADR 0032 because public hard logical-CPU pinning is
+unavailable there.
 
-## Temporary sanitized gate
+## Sanitized gate
 
-Run the module C++ sanitizer suites in both precisions. While the known Godot 4.7.1 UBSAN diagnostic remains isolated to bundled SDL/HIDAPI initialization, use:
+Run the module sanitizer suites and the real GDScript smoke in both precisions:
 
 ```bash
-./scripts/run_sanitized_tests.sh double --no-smoke
-./scripts/run_sanitized_tests.sh single --no-smoke
+./scripts/run_sanitized_tests.sh all
 ```
 
-Normal smoke tests remain mandatory in both precisions. The external diagnostic does not justify broad suppressions and never permits ignoring reports that enter TickSynchronizer code.
+The Godot 4.7.1 LSAN file contains exactly one reviewed function rule for an
+SDL joypad/UDEV leak reproduced without TickSynchronizer. Leak detection must
+remain enabled, and a SCons-built negative control must prove that an unrelated
+leak remains fatal. The UBSAN file contains exactly three reviewed
+category-and-source pairs, protected by unrelated bounds and alignment negative
+controls. `--no-smoke` is diagnostic only and cannot satisfy the accepted gate.
+No sanitizer suppression may match TickSynchronizer.
+
+The `all` batch runs both precisions serially. It executes the full LSAN
+unrelated-leak control once per uninterrupted batch and rechecks the exact
+static LSAN rule before every later applicable pass.
 
 ## Git policy
 
@@ -185,8 +238,14 @@ Code that the responsible developer cannot fully explain or maintain must not be
 
 After completing a logical change:
 
-- update `documentation/PROJECT_STATE.md`;
-- update the relevant `documentation/ROADMAP.md` checklist;
+- update `documentation/development/PROJECT_STATE.md` when capabilities change;
+- update `documentation/development/VALIDATION.md` when acceptance evidence changes;
+- update `documentation/development/ROADMAP.md` only when the high-level phase
+  structure changes;
 - create or revise an ADR when an architectural decision changes;
+- keep task assignment, scheduling, priorities, and Kanban status in the GitHub
+  Project rather than the module manual;
+- keep normative and version-bound documentation in the repository; publish
+  only derived user-facing material to the Wiki under ADR 0035;
 - run `./scripts/generate_context.sh` to verify the compact project summary;
 - do not place extensive logs or full source listings in generated context.

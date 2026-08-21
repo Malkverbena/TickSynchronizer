@@ -15,11 +15,36 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace tick_synchronizer::benchmarks {
+
+enum class BenchmarkRunError : std::uint8_t {
+	OK = 0,
+	EMPTY_DATASET,
+	ENCODE_FAILED,
+	DECODE_FAILED,
+	INVALID_PACKET_ERROR_MISMATCH,
+};
+
+// Returns a stable description for explicit benchmark failures.
+inline const char *benchmark_run_error_message(BenchmarkRunError error) noexcept {
+	switch (error) {
+		case BenchmarkRunError::OK:
+			return "ok";
+		case BenchmarkRunError::EMPTY_DATASET:
+			return "benchmark dataset is empty";
+		case BenchmarkRunError::ENCODE_FAILED:
+			return "candidate encode failed";
+		case BenchmarkRunError::DECODE_FAILED:
+			return "candidate decode failed";
+		case BenchmarkRunError::INVALID_PACKET_ERROR_MISMATCH:
+			return "candidate returned an unexpected malformed-packet error";
+	}
+	return "unknown benchmark failure";
+}
+
 namespace detail {
 
 inline volatile std::uint64_t benchmark_sink = 0;
@@ -51,6 +76,7 @@ inline std::uint64_t combine_diagnostic_checksum(
 }
 
 struct TimedSample {
+	BenchmarkRunError error = BenchmarkRunError::OK;
 	double elapsed_ns = 0.0;
 	std::uint64_t iterations = 0;
 	std::uint64_t bytes = 0;
@@ -120,7 +146,12 @@ TimedSample run_encode_sample(
 	for (std::uint64_t iteration = 0; iteration < iterations; ++iteration) {
 		const BenchmarkMessage &message = dataset.messages[iteration % dataset.messages.size()];
 		if (!Candidate::encode(message, output)) {
-			throw std::runtime_error("candidate encode failed during benchmark");
+			if (count_allocations) {
+				(void)AllocationCounter::end();
+			}
+			TimedSample failed_sample;
+			failed_sample.error = BenchmarkRunError::ENCODE_FAILED;
+			return failed_sample;
 		}
 		bytes += output.size();
 		checksum ^= hash_bytes(make_byte_view(output)) + iteration;
@@ -131,13 +162,13 @@ TimedSample run_encode_sample(
 		allocations = AllocationCounter::end();
 	}
 	benchmark_sink ^= checksum;
-	return TimedSample{
-		std::chrono::duration<double, std::nano>(end - start).count(),
-		iterations,
-		bytes,
-		allocations,
-		checksum,
-	};
+	TimedSample sample;
+	sample.elapsed_ns = std::chrono::duration<double, std::nano>(end - start).count();
+	sample.iterations = iterations;
+	sample.bytes = bytes;
+	sample.allocations = allocations;
+	sample.checksum = checksum;
+	return sample;
 }
 
 template <typename Candidate>
@@ -157,7 +188,12 @@ TimedSample run_decode_sample(
 	for (std::uint64_t iteration = 0; iteration < iterations; ++iteration) {
 		const std::vector<std::uint8_t> &packet = encoded[iteration % encoded.size()];
 		if (Candidate::decode(make_byte_view(packet), output) != CandidateDecodeError::OK) {
-			throw std::runtime_error("candidate decode failed during benchmark");
+			if (count_allocations) {
+				(void)AllocationCounter::end();
+			}
+			TimedSample failed_sample;
+			failed_sample.error = BenchmarkRunError::DECODE_FAILED;
+			return failed_sample;
 		}
 		bytes += packet.size();
 		checksum ^= Candidate::semantic_hash_for_wire(output) + iteration;
@@ -168,41 +204,56 @@ TimedSample run_decode_sample(
 		allocations = AllocationCounter::end();
 	}
 	benchmark_sink ^= checksum;
-	return TimedSample{
-		std::chrono::duration<double, std::nano>(end - start).count(),
-		iterations,
-		bytes,
-		allocations,
-		checksum,
-	};
+	TimedSample sample;
+	sample.elapsed_ns = std::chrono::duration<double, std::nano>(end - start).count();
+	sample.iterations = iterations;
+	sample.bytes = bytes;
+	sample.allocations = allocations;
+	sample.checksum = checksum;
+	return sample;
 }
 
 template <typename SampleFunction>
 // Calibrates iterations until the configured minimum sample duration is reached.
-std::uint64_t calibrate_iterations(const BenchmarkConfig &config, SampleFunction sample_function) {
-	std::uint64_t iterations = std::max<std::uint64_t>(config.minimum_iterations, 1);
-	while (iterations < config.maximum_iterations) {
-		const TimedSample sample = sample_function(iterations, false);
+BenchmarkRunError calibrate_iterations(
+		const BenchmarkConfig &config,
+		SampleFunction sample_function,
+		std::uint64_t &r_iterations) {
+	r_iterations = std::max<std::uint64_t>(config.minimum_iterations, 1);
+	while (r_iterations < config.maximum_iterations) {
+		const TimedSample sample = sample_function(r_iterations, false);
+		if (sample.error != BenchmarkRunError::OK) {
+			return sample.error;
+		}
 		if (sample.elapsed_ns >= static_cast<double>(config.minimum_sample_duration_ns)) {
 			break;
 		}
-		if (iterations > config.maximum_iterations / 2) {
-			iterations = config.maximum_iterations;
+		if (r_iterations > config.maximum_iterations / 2) {
+			r_iterations = config.maximum_iterations;
 			break;
 		}
-		iterations *= 2;
+		r_iterations *= 2;
 	}
-	return iterations;
+	return BenchmarkRunError::OK;
 }
 
 template <typename SampleFunction>
 // Executes warmup and measured rounds for one benchmark operation.
-OperationBenchmarkResult benchmark_operation(
+BenchmarkRunError benchmark_operation(
 		const BenchmarkConfig &config,
-		SampleFunction sample_function) {
-	const std::uint64_t iterations = calibrate_iterations(config, sample_function);
+		SampleFunction sample_function,
+		OperationBenchmarkResult &r_result) {
+	std::uint64_t iterations = 0;
+	const BenchmarkRunError calibration_error = calibrate_iterations(
+			config, sample_function, iterations);
+	if (calibration_error != BenchmarkRunError::OK) {
+		return calibration_error;
+	}
 	for (std::uint32_t round = 0; round < config.warmup_rounds; ++round) {
-		(void)sample_function(iterations, false);
+		const TimedSample sample = sample_function(iterations, false);
+		if (sample.error != BenchmarkRunError::OK) {
+			return sample.error;
+		}
 	}
 	std::vector<double> ns;
 	std::vector<double> messages;
@@ -217,10 +268,13 @@ OperationBenchmarkResult benchmark_operation(
 	std::uint64_t checksum = UINT64_C(1469598103934665603);
 	for (std::uint32_t round = 0; round < config.measured_rounds; ++round) {
 		const TimedSample sample = sample_function(iterations, true);
+		if (sample.error != BenchmarkRunError::OK) {
+			return sample.error;
+		}
 		checksum = combine_diagnostic_checksum(checksum, sample.checksum, round);
 		append_sample_metrics(sample, ns, messages, mib, allocations, allocated_bytes);
 	}
-	return make_operation_result(
+	r_result = make_operation_result(
 			iterations,
 			checksum,
 			std::move(ns),
@@ -228,21 +282,25 @@ OperationBenchmarkResult benchmark_operation(
 			std::move(mib),
 			std::move(allocations),
 			std::move(allocated_bytes));
+	return BenchmarkRunError::OK;
 }
 
 template <typename Candidate>
 // Encodes a deterministic dataset once for decode and integrity measurements.
-std::vector<std::vector<std::uint8_t>> encode_corpus(const BenchmarkDataset &dataset) {
+BenchmarkRunError encode_corpus(
+		const BenchmarkDataset &dataset,
+		std::vector<std::vector<std::uint8_t>> &r_encoded) {
 	std::vector<std::vector<std::uint8_t>> encoded;
 	encoded.reserve(dataset.messages.size());
 	for (const BenchmarkMessage &message : dataset.messages) {
 		std::vector<std::uint8_t> packet;
 		if (!Candidate::encode(message, packet)) {
-			throw std::runtime_error("candidate failed to encode deterministic corpus");
+			return BenchmarkRunError::ENCODE_FAILED;
 		}
 		encoded.push_back(std::move(packet));
 	}
-	return encoded;
+	r_encoded = std::move(encoded);
+	return BenchmarkRunError::OK;
 }
 
 template <typename Candidate>
@@ -287,33 +345,43 @@ inline SizeBenchmarkResult calculate_size_result(
 	return result;
 }
 
-// Derives a deterministic malformed-packet corpus from valid packets.
-inline std::vector<std::vector<std::uint8_t>> make_invalid_packets(
-		const std::vector<std::vector<std::uint8_t>> &valid_packets) {
-	std::vector<std::vector<std::uint8_t>> invalid;
-	invalid.push_back({});
-	for (std::size_t index = 0; index < std::min<std::size_t>(valid_packets.size(), 12); ++index) {
+template <typename Candidate>
+// Derives common corruptions and candidate-specific attacks from valid packets.
+std::vector<CandidateInvalidPacket> make_invalid_packets(
+			const std::vector<std::vector<std::uint8_t>> &valid_packets) {
+	std::vector<CandidateInvalidPacket> invalid;
+	invalid.push_back(CandidateInvalidPacket{
+		"empty",
+		{},
+		CandidateDecodeError::TRUNCATED,
+	});
+	for (std::size_t index = 0; index < valid_packets.size(); ++index) {
 		const std::vector<std::uint8_t> &valid = valid_packets[index];
 		if (!valid.empty()) {
-			invalid.emplace_back(valid.begin(), valid.end() - 1);
+			invalid.push_back(CandidateInvalidPacket{
+				"truncated-valid-packet",
+				std::vector<std::uint8_t>(valid.begin(), valid.end() - 1),
+				CandidateDecodeError::TRUNCATED,
+			});
 			std::vector<std::uint8_t> trailing = valid;
 			trailing.push_back(0xA5);
-			invalid.push_back(std::move(trailing));
+			invalid.push_back(CandidateInvalidPacket{
+				"trailing-data",
+				std::move(trailing),
+				CandidateDecodeError::TRAILING_DATA,
+			});
 		}
 	}
 	if (!valid_packets.empty() && !valid_packets.front().empty()) {
 		std::vector<std::uint8_t> unknown_kind = valid_packets.front();
 		unknown_kind[0] = 0xFF;
-		invalid.push_back(std::move(unknown_kind));
+		invalid.push_back(CandidateInvalidPacket{
+			"unknown-kind",
+			std::move(unknown_kind),
+			CandidateDecodeError::UNKNOWN_KIND,
+		});
 	}
-	// Snapshot prefix with entity count and blob length above the fixed limits.
-	std::vector<std::uint8_t> excessive(32, 0);
-	excessive[0] = static_cast<std::uint8_t>(BenchmarkMessageKind::SNAPSHOT);
-	excessive[24] = 0xFF;
-	excessive[25] = 0xFF;
-	excessive[26] = 0xFF;
-	excessive[27] = 0x7F;
-	invalid.push_back(std::move(excessive));
+	Candidate::append_invalid_packets(invalid);
 	return invalid;
 }
 
@@ -321,57 +389,79 @@ inline std::vector<std::vector<std::uint8_t>> make_invalid_packets(
 
 template <typename Candidate>
 // Runs size, integrity, encode, and decode measurements for one dataset.
-DatasetBenchmarkResult run_dataset_benchmark(
+BenchmarkRunError run_dataset_benchmark(
 		const BenchmarkDataset &dataset,
-		const BenchmarkConfig &config) {
+		const BenchmarkConfig &config,
+		DatasetBenchmarkResult &r_result) {
 	if (dataset.messages.empty()) {
-		throw std::runtime_error("benchmark dataset is empty: " + dataset.name);
+		return BenchmarkRunError::EMPTY_DATASET;
 	}
-	const std::vector<std::vector<std::uint8_t>> encoded = detail::encode_corpus<Candidate>(dataset);
+	std::vector<std::vector<std::uint8_t>> encoded;
+	const BenchmarkRunError corpus_error = detail::encode_corpus<Candidate>(dataset, encoded);
+	if (corpus_error != BenchmarkRunError::OK) {
+		return corpus_error;
+	}
 	DatasetBenchmarkResult result;
 	result.name = dataset.name;
 	result.description = dataset.description;
 	result.source_message_count = dataset.messages.size();
 	result.size = detail::calculate_size_result(encoded);
 	result.integrity = detail::verify_integrity<Candidate>(dataset, encoded);
-	result.encode = detail::benchmark_operation(
+	const BenchmarkRunError encode_error = detail::benchmark_operation(
 			config,
 			[&dataset](std::uint64_t iterations, bool allocations) {
 				return detail::run_encode_sample<Candidate>(dataset, iterations, allocations);
-			});
-	result.decode = detail::benchmark_operation(
+			},
+			result.encode);
+	if (encode_error != BenchmarkRunError::OK) {
+		return encode_error;
+	}
+	const BenchmarkRunError decode_error = detail::benchmark_operation(
 			config,
 			[&encoded](std::uint64_t iterations, bool allocations) {
 				return detail::run_decode_sample<Candidate>(encoded, iterations, allocations);
-			});
-	return result;
+			},
+			result.decode);
+	if (decode_error != BenchmarkRunError::OK) {
+		return decode_error;
+	}
+	r_result = std::move(result);
+	return BenchmarkRunError::OK;
 }
 
 template <typename Candidate>
 // Measures malformed-packet rejection and decode cost for one candidate.
-InvalidPacketBenchmarkResult run_invalid_packet_benchmark(
+BenchmarkRunError run_invalid_packet_benchmark(
 		const std::vector<BenchmarkDataset> &datasets,
-		const BenchmarkConfig &config) {
+		const BenchmarkConfig &config,
+		InvalidPacketBenchmarkResult &r_result) {
 	std::vector<std::vector<std::uint8_t>> valid_packets;
 	for (const BenchmarkDataset &dataset : datasets) {
-		const auto encoded = detail::encode_corpus<Candidate>(dataset);
-		valid_packets.insert(valid_packets.end(), encoded.begin(), encoded.end());
-		if (valid_packets.size() >= 32) {
-			break;
+		if (dataset.messages.empty()) {
+			continue;
 		}
+		std::vector<std::uint8_t> encoded;
+		if (!Candidate::encode(dataset.messages.front(), encoded)) {
+			return BenchmarkRunError::ENCODE_FAILED;
+		}
+		valid_packets.push_back(std::move(encoded));
 	}
-	const std::vector<std::vector<std::uint8_t>> invalid = detail::make_invalid_packets(valid_packets);
+	const std::vector<CandidateInvalidPacket> invalid = detail::make_invalid_packets<Candidate>(valid_packets);
 	InvalidPacketBenchmarkResult result;
 	result.packet_count = invalid.size();
 	BenchmarkMessage output;
-	for (const std::vector<std::uint8_t> &packet : invalid) {
-		if (Candidate::decode(make_byte_view(packet), output) == CandidateDecodeError::OK) {
+	for (const CandidateInvalidPacket &packet : invalid) {
+		const CandidateDecodeError error = Candidate::decode(make_byte_view(packet.bytes), output);
+		if (error == CandidateDecodeError::OK) {
 			++result.accepted;
 		} else {
 			++result.rejected;
 		}
+		if (error != packet.expected_error) {
+			return BenchmarkRunError::INVALID_PACKET_ERROR_MISMATCH;
+		}
 	}
-	result.decode = detail::benchmark_operation(
+	const BenchmarkRunError decode_error = detail::benchmark_operation(
 			config,
 			[&invalid](std::uint64_t iterations, bool count_allocations) {
 				BenchmarkMessage decoded;
@@ -383,10 +473,10 @@ InvalidPacketBenchmarkResult run_invalid_packet_benchmark(
 				std::uint64_t checksum = 0;
 				std::uint64_t bytes = 0;
 				for (std::uint64_t iteration = 0; iteration < iterations; ++iteration) {
-					const std::vector<std::uint8_t> &packet = invalid[iteration % invalid.size()];
-					const CandidateDecodeError error = Candidate::decode(make_byte_view(packet), decoded);
-					checksum ^= static_cast<std::uint64_t>(error) + iteration;
-					bytes += packet.size();
+						const CandidateInvalidPacket &packet = invalid[iteration % invalid.size()];
+						const CandidateDecodeError error = Candidate::decode(make_byte_view(packet.bytes), decoded);
+						checksum ^= static_cast<std::uint64_t>(error) + iteration;
+						bytes += packet.bytes.size();
 				}
 				const auto end = std::chrono::steady_clock::now();
 				AllocationSnapshot allocation_snapshot;
@@ -394,15 +484,20 @@ InvalidPacketBenchmarkResult run_invalid_packet_benchmark(
 					allocation_snapshot = AllocationCounter::end();
 				}
 				detail::benchmark_sink ^= checksum;
-				return detail::TimedSample{
-					std::chrono::duration<double, std::nano>(end - start).count(),
-					iterations,
-					bytes,
-					allocation_snapshot,
-					checksum,
-				};
-			});
-	return result;
+				detail::TimedSample sample;
+				sample.elapsed_ns = std::chrono::duration<double, std::nano>(end - start).count();
+				sample.iterations = iterations;
+				sample.bytes = bytes;
+				sample.allocations = allocation_snapshot;
+				sample.checksum = checksum;
+				return sample;
+			},
+			result.decode);
+	if (decode_error != BenchmarkRunError::OK) {
+		return decode_error;
+	}
+	r_result = std::move(result);
+	return BenchmarkRunError::OK;
 }
 
 } // namespace tick_synchronizer::benchmarks

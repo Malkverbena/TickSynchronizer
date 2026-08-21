@@ -14,69 +14,64 @@ Current contract:
 public API: 4
 wire protocol: 0 (experimental)
 wire revision: 2
-benchmark suite: 1
+benchmark suite: 2
 reference candidate: reference_fixed_width
+screened integer candidate: varint_zigzag_fixed_float
 ```
 
-The fixed-width candidate is a control baseline. It provides predictable CPU cost and a transparent wire-size floor for uncompressed fixed fields; it is not a default winner.
+The fixed-width candidate remains the control baseline. Canonical ULEB128 and
+ZigZag have passed the suite 2 Linux screen and are selected as the integer
+primitive to carry into cross-platform qualification. This bounded decision is
+not selection of framing, state references, change masks, quantization,
+transport behavior, or the complete production packet format.
 
-## Evidence already obtained
+## Evidence boundary
 
-Initial Linux x86_64 measurements showed:
-
-- deterministic output and successful semantic round-trips;
-- rejection of the complete malformed-packet corpus;
-- low run-to-run dispersion under CPU affinity;
-- encode paths with no per-message allocation after reservation;
-- throughput that scales approximately with bytes processed;
-- materially smaller snapshots in `single` builds when the reference format carries 32-bit instead of 64-bit floating-point fields.
-
-These observations validate the harness and characterize the reference candidate. They do not establish a final wire format.
-
-The current source completed quick qualification on Linux and Windows x86_64
-and on Android ARM64 across recent and older devices. Across all selected
-runs, the reference candidate preserved deterministic output, completed all
-seven datasets, and rejected all 27 malformed packets while accepting zero.
-
-The preliminary comparisons also establish that Android core class materially
-changes measured latency, while the tested desktop L3 domains are much closer
-for this workload. Only runs with confirmed environmental controls enter
-performance comparisons. These observations characterize the harness and
-platform sensitivity; they do not select the production wire protocol.
-
-All current reports were built from a dirty source tree and record
-`official=no`. A second Windows machine is unavailable. Therefore the current
-reports remain infrastructure and characterization evidence rather than
-official candidate-selection evidence.
+Source-specific measurements and preliminary observations belong in
+[`development/VALIDATION.md`](development/VALIDATION.md). They may reject a
+candidate, qualify methodology, or support a bounded design screen, but they do
+not stabilize the production wire. Candidate selection requires the clean-tree
+Linux, Windows, and Android matrix; stabilization additionally requires the
+deferred final macOS gate in ADR 0036.
 
 ## Methodological decisions
 
 1. Official reports require a clean Git tree.
-2. Official reports require explicit CPU affinity.
-3. Quick reports qualify infrastructure only and are not selection evidence.
+2. Official reports require verified hard CPU affinity, except for the exact
+   scheduler-managed macOS policy in ADR 0032.
+3. Preliminary reports may screen a primitive but cannot close the official
+   candidate-selection or stabilization gates.
 4. Encode and decode are measured independently.
 5. Candidate correctness is evaluated before performance.
 6. All candidates receive identical semantic datasets and seeds.
 7. Results must include absolute measurements; weighted scores may not hide regressions.
 8. The benchmark suite version changes when methodology or dataset semantics change, not when a candidate is added.
+9. Candidate reports are evaluated as matched reference/contender pairs with
+   the same executable, precision, hardware identity, and execution policy.
+10. Coverage-only boundary datasets cannot dominate workload-weighted gates.
 
 ## Cross-platform requirement
 
-No protocol may be stabilized using results from only one architecture or operating system.
+No protocol may be stabilized using results from only one architecture or
+operating system. ADR 0036 defines two gates:
 
-The initial evidence matrix is:
-
-- Linux x86_64 across distinct L3 domains;
-- Windows x86_64 across distinct L3 domains;
-- Android ARM64 on a recent device across exposed core classes;
-- Android ARM64 on an older device across exposed core classes;
-- Windows x86_64 on a second machine when one becomes available.
+- candidate selection: 16 matched pairs, or 32 reports, across Linux x86_64,
+  Windows x86_64, and two Android ARM64 generations;
+- final portability: two additional macOS x86_64 pairs, or four reports, for a
+  complete total of 18 matched pairs and 36 reports.
 
 The Android devices represent different performance generations. Windows adds
 scheduler, allocator, timer, compiler, and CPU diversity even though it remains
 x86_64.
 
-The Android build/run backend and the Linux-to-Windows cross-build plus execution backend are implemented under one SCons graph and report schema 3. Execution-only packages carry prebuilt binaries and runners to machines without development environments. The first official Windows baseline uses MinGW-w64 GCC explicitly; LLVM-MinGW is reserved for a later compiler-sensitivity comparison so compiler choice does not vary silently between runs. Quick execution has now validated these paths on the available target machines, but only clean-tree reports archived with hashes may enter the protocol decision.
+Android, Linux-to-Windows cross-build, and local macOS Universal 2 targets share
+one SCons graph and report schema 3. Private execution-only packages carry
+prebuilt binaries and runners to qualification machines without development
+environments. Public GitHub distribution remains source-only. The first
+official Windows baseline uses MinGW-w64 GCC explicitly; LLVM-MinGW is reserved
+for a later compiler-sensitivity comparison so compiler choice does not vary
+silently between runs. Only clean-tree reports archived with hashes may enter
+the protocol decision.
 
 Multi-domain hosts must not be represented by an unidentified logical CPU.
 Linux and Windows qualification records the L3 domain and runs one primary
@@ -84,32 +79,29 @@ hardware thread from each relevant domain. Reports without complete topology
 remain execution diagnostics only. The comparator maintains independent
 `single` and `double` baselines and never computes a ratio across precisions.
 
-## Deferred next candidate
+## Current bounded decision
 
-Do not implement an additional candidate until the current qualification gate
-is explicitly closed. The available Linux, Windows, and Android quick matrix is
-complete, but clean-tree official reports and the deferred second Windows
-machine are still outstanding.
+ADR 0037 accepts benchmark suite 2 and candidate 2. The final available Linux
+diagnostic produced these workload results:
 
-When that gate is complete, the next candidate should isolate one variable:
+| Precision | Byte reduction | Weighted encode | Weighted decode | Verdict |
+|---|---:|---:|---:|---|
+| `double` | 28.2% | 0.825x | 0.974x | pass |
+| `single` | 39.8% | 0.806x | 0.985x | pass |
 
-```text
-varint_zigzag_fixed_float
-```
+Every workload became smaller. The largest measured workload latency regression
+was 1.090x for dense-snapshot decode in `single`; all other final workload
+ratios were at or below 1.005x. All remain below the predeclared limits.
+Correctness, exact error, bounds, canonicality, and sanitizer gates passed.
 
-It should use:
-
-- ULEB128 for unsigned integers;
-- ZigZag plus ULEB128 for signed integers;
-- the same framing as the reference candidate;
-- the same floating-point representation as the reference candidate;
-- identical validation limits and semantic outputs.
-
-Do not combine varints, delta encoding, bit packing, and quantization in the same first comparison. A mixed candidate would make it impossible to attribute a gain or regression to one technique.
+This evidence selects canonical ULEB128/ZigZag for further qualification. The
+clean-tree 16-pair Linux/Windows/Android matrix remains necessary before the
+complete candidate decision can close. macOS is not inferred; it remains the
+final blocking portability gate.
 
 ## Candidate progression
 
-After fixed-width versus varint evidence exists on all initial platforms, later candidates may evaluate:
+Later candidates may evaluate:
 
 1. delta plus varint;
 2. change masks and bit packing;
@@ -119,12 +111,18 @@ After fixed-width versus varint evidence exists on all initial platforms, later 
 
 Each candidate must state which independent variable it introduces.
 
+The list is intentionally blocked until representative ordered snapshot
+captures, loss/reorder scenarios, baseline recovery policy, and numeric error
+budgets exist. Additional synthetic distributions would not resolve those
+stateful and lossy decisions.
+
 ## Elimination criteria
 
 A candidate is eliminated regardless of speed if it:
 
 - fails a round-trip or deterministic-output test;
 - accepts a malformed input that the contract rejects;
+- reports the wrong error category or mutates output on failure;
 - permits attacker-controlled unbounded allocation;
 - depends on host endianness, padding, ABI, or `real_t` layout;
 - cannot provide canonical encoding;
@@ -139,7 +137,8 @@ The final decision will consider:
 - encode latency;
 - decode latency, weighted more heavily for server fan-in;
 - allocation count and temporary memory;
-- malformed-input rejection cost;
+- malformed-input rejection cost on an identical, separately identified common
+  corpus (candidate-specific attack corpora remain correctness-only evidence);
 - implementation complexity and auditability;
 - extensibility and compatibility strategy;
 - consistency across CPU architectures, core classes, and thermal regimes.
@@ -155,13 +154,17 @@ A candidate that wins narrowly on one desktop but regresses severely on older AR
 - Desktop peak throughput does not represent mobile sustained performance.
 - `single` and `double` benchmark results must not be merged into one aggregate.
 - Preliminary or dirty-tree reports must not be used as official baselines.
+- Passing the integer screen does not select the full realtime packet format.
+- macOS is deferred, not waived; a final Mac failure reopens the decision.
 
 ## Decision record procedure
 
 When evidence supports a protocol path:
 
-1. archive official reports and their hashes;
-2. update this document with the comparison and trade-offs;
-3. create or revise an ADR for the selected wire decision;
-4. increment `WIRE_PROTOCOL_VERSION` only when a stable incompatible contract is declared;
-5. add golden packets and compatibility tests before accepting external gameplay traffic.
+1. archive every matched official report pair and its hashes;
+2. run the predeclared candidate analyzer without preliminary overrides;
+3. update this document with the comparison and trade-offs;
+4. create or revise an ADR for the selected wire decision;
+5. complete the final macOS portability gate before stabilization or release;
+6. increment `WIRE_PROTOCOL_VERSION` only when a stable incompatible contract is declared;
+7. add golden packets and compatibility tests before accepting external gameplay traffic.

@@ -3,6 +3,7 @@
 import os
 import pathlib
 import platform as host_platform
+import re
 import shutil
 import subprocess
 
@@ -24,12 +25,26 @@ def argument_switch(name, default="no"):
     return argument_choice(name, default, ("yes", "no"))
 
 
-target_platform = argument_choice("platform", "linuxbsd", ("linuxbsd", "windows", "android"))
+target_platform = argument_choice(
+    "platform",
+    "linuxbsd",
+    ("linuxbsd", "windows", "android", "macos"),
+)
 precision = argument_choice("precision", "double", ("single", "double"))
 optimize = argument_switch("optimize", "yes")
 lto = argument_switch("lto", "no")
+sanitizer = argument_choice(
+    "sanitizer",
+    "none",
+    ("none", "address", "undefined", "address-undefined"),
+)
 
-default_arch = "arm64" if target_platform == "android" else "x86_64"
+if target_platform == "android":
+    default_arch = "arm64"
+elif target_platform == "macos" and host_platform.machine().lower() in ("arm64", "aarch64"):
+    default_arch = "arm64"
+else:
+    default_arch = "x86_64"
 architecture = argument_choice("arch", default_arch, ("x86_64", "arm64"))
 if target_platform in ("linuxbsd", "windows") and architecture != "x86_64":
     raise ValueError(f"{target_platform} currently supports only arch=x86_64")
@@ -40,25 +55,33 @@ default_toolchain = {
     "linuxbsd": "native",
     "windows": "mingw-gcc",
     "android": "android-ndk",
+    "macos": "apple-clang",
 }[target_platform]
 toolchain = argument_choice(
     "toolchain",
     default_toolchain,
-    ("native", "mingw-gcc", "llvm-mingw", "android-ndk"),
+    ("native", "mingw-gcc", "llvm-mingw", "android-ndk", "apple-clang"),
 )
 allowed_toolchains = {
     "linuxbsd": {"native"},
     "windows": {"mingw-gcc", "llvm-mingw"},
     "android": {"android-ndk"},
+    "macos": {"apple-clang"},
 }
 if toolchain not in allowed_toolchains[target_platform]:
     raise ValueError(f"toolchain={toolchain} is invalid for platform={target_platform}")
+if sanitizer != "none" and target_platform != "linuxbsd":
+    raise ValueError("standalone benchmark sanitizers currently require platform=linuxbsd")
+if sanitizer != "none" and lto == "yes":
+    raise ValueError("sanitizer builds do not combine with lto=yes")
 
 
 def resolve_command(command):
     path = pathlib.Path(command)
     if path.is_absolute() or path.parent != pathlib.Path("."):
-        resolved = path.expanduser().resolve()
+        # Preserve a C++ driver symlink basename such as clang++. Following the
+        # final symlink can change argv[0] to clang and omit libc++ at link time.
+        resolved = pathlib.Path(os.path.abspath(os.path.expanduser(command)))
         if not resolved.is_file() or not os.access(resolved, os.X_OK):
             raise ValueError(f"compiler is missing or not executable: {resolved}")
         return str(resolved)
@@ -95,9 +118,38 @@ def resolve_android_toolchain():
     return str(compiler), prebuilt
 
 
+def xcrun_output(*arguments):
+    try:
+        return subprocess.check_output(
+            ["xcrun", "--sdk", "macosx", *arguments],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError("xcrun could not resolve the macOS Apple Clang toolchain") from error
+
+
+def resolve_macos_toolchain():
+    if host_platform.system() != "Darwin":
+        raise ValueError("platform=macos requires a native macOS build host")
+    deployment_target = ARGUMENTS.get("macos_deployment_target", "12.0")
+    if re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", deployment_target) is None:
+        raise ValueError("macos_deployment_target must be a dotted numeric version")
+    sdk_value = ARGUMENTS.get("macos_sdk", "") or xcrun_output("--show-sdk-path")
+    sdk_path = pathlib.Path(sdk_value).expanduser().resolve()
+    if not sdk_path.is_dir():
+        raise ValueError(f"macOS SDK not found: {sdk_path}")
+    compiler = ARGUMENTS.get("cxx", "") or xcrun_output("--find", "clang++")
+    return compiler, sdk_path, deployment_target
+
+
 android_prebuilt = None
+macos_sdk = None
+macos_deployment_target = None
 if target_platform == "android":
     compiler_command, android_prebuilt = resolve_android_toolchain()
+elif target_platform == "macos":
+    compiler_command, macos_sdk, macos_deployment_target = resolve_macos_toolchain()
 elif "cxx" in ARGUMENTS:
     compiler_command = ARGUMENTS["cxx"]
 elif target_platform == "windows" and toolchain == "mingw-gcc":
@@ -108,12 +160,18 @@ else:
     compiler_command = os.environ.get("CXX", "c++")
 
 compiler_path = resolve_command(compiler_command)
+reported_compiler_command = pathlib.Path(compiler_command).name
+reported_compiler_path = f"{toolchain}/{pathlib.Path(compiler_path).name}"
 if target_platform == "linuxbsd":
     if os.name != "posix" or host_platform.system() != "Linux":
         raise ValueError("platform=linuxbsd requires a native Linux host")
     host_machine = host_platform.machine().lower()
     if host_machine not in ("x86_64", "amd64"):
         raise ValueError(f"platform=linuxbsd arch=x86_64 cannot run on host architecture {host_machine}")
+elif target_platform == "macos":
+    host_machine = host_platform.machine().lower()
+    if host_machine not in ("x86_64", "amd64", "arm64", "aarch64"):
+        raise ValueError(f"unsupported macOS build-host architecture: {host_machine}")
 
 
 def run_git(*args):
@@ -134,6 +192,8 @@ godot_commit_path = module_dir / "GODOT_COMMIT"
 godot_commit = godot_commit_path.read_text(encoding="utf-8").strip() if godot_commit_path.is_file() else "unknown"
 
 build_dir = benchmark_dir / ".build" / target_platform / architecture / toolchain / precision
+if sanitizer != "none":
+    build_dir /= sanitizer
 generated_dir = build_dir / "generated"
 object_dir = build_dir / "obj"
 generated_dir.mkdir(parents=True, exist_ok=True)
@@ -145,7 +205,17 @@ def cpp_string(value):
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-common_flags = ["-std=c++17", "-Wall", "-Wextra", "-Wpedantic", "-Werror"]
+common_flags = [
+    "-std=c++17",
+    "-fno-exceptions",
+    "-fno-rtti",
+    "-include",
+    "benchmark_compiler_contract.h",
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-Werror",
+]
 optimization_flags = ["-O3", "-DNDEBUG"] if optimize == "yes" else ["-O0", "-g3"]
 platform_compile_flags = []
 platform_link_flags = []
@@ -159,30 +229,60 @@ if target_platform == "windows":
 elif target_platform == "android":
     platform_compile_flags.extend(["-fPIE", "-stdlib=libc++"])
     platform_link_flags.extend(["-pie", "-stdlib=libc++", "-static-libstdc++"])
+elif target_platform == "macos":
+    macos_target_flag = f"-mmacosx-version-min={macos_deployment_target}"
+    macos_arch_flags = ["-arch", architecture]
+    macos_sdk_flags = ["-isysroot", str(macos_sdk)]
+    platform_compile_flags.extend(
+        macos_arch_flags + macos_sdk_flags + [macos_target_flag, "-stdlib=libc++"]
+    )
+    platform_link_flags.extend(
+        macos_arch_flags + macos_sdk_flags + [macos_target_flag, "-stdlib=libc++"]
+    )
 
 lto_flags = ["-flto"] if lto == "yes" else []
+sanitizer_names = {
+    "none": "",
+    "address": "address",
+    "undefined": "undefined",
+    "address-undefined": "address,undefined",
+}
+sanitizer_flags = []
+sanitizer_link_flags = []
+if sanitizer != "none":
+    sanitizer_flags = [
+        f"-fsanitize={sanitizer_names[sanitizer]}",
+        "-fno-omit-frame-pointer",
+        "-fno-sanitize-recover=all",
+    ]
+    sanitizer_link_flags = [f"-fsanitize={sanitizer_names[sanitizer]}"]
 precision_define = (
     "TICKSYNC_BENCHMARK_PRECISION_DOUBLE"
     if precision == "double"
     else "TICKSYNC_BENCHMARK_PRECISION_SINGLE"
 )
-reported_flags = (
-    common_flags
-    + optimization_flags
-    + platform_compile_flags
-    + lto_flags
-    + [f"-D{precision_define}"]
-    + [f"-D{name}={value}" for name, value in platform_defines]
-    + platform_link_flags
-)
+reported_flags = [
+    pathlib.Path(flag).name if macos_sdk is not None and flag == str(macos_sdk) else flag
+    for flag in (
+        common_flags
+        + optimization_flags
+        + platform_compile_flags
+        + lto_flags
+        + sanitizer_flags
+        + [f"-D{precision_define}"]
+        + [f"-D{name}={value}" for name, value in platform_defines]
+        + platform_link_flags
+        + sanitizer_link_flags
+    )
+]
 
 build_info_content = (
     "#pragma once\n\n"
     f'#define TICKSYNC_BENCHMARK_MODULE_COMMIT "{cpp_string(module_commit)}"\n'
     f'#define TICKSYNC_BENCHMARK_GODOT_COMMIT "{cpp_string(godot_commit)}"\n'
     f'#define TICKSYNC_BENCHMARK_SOURCE_STATE "{cpp_string(source_state)}"\n'
-    f'#define TICKSYNC_BENCHMARK_COMPILER_COMMAND "{cpp_string(compiler_command)}"\n'
-    f'#define TICKSYNC_BENCHMARK_COMPILER_PATH "{cpp_string(compiler_path)}"\n'
+    f'#define TICKSYNC_BENCHMARK_COMPILER_COMMAND "{cpp_string(reported_compiler_command)}"\n'
+    f'#define TICKSYNC_BENCHMARK_COMPILER_PATH "{cpp_string(reported_compiler_path)}"\n'
     f'#define TICKSYNC_BENCHMARK_COMPILER_FLAGS "{cpp_string(" ".join(reported_flags))}"\n'
     f'#define TICKSYNC_BENCHMARK_OPTIMIZE "{cpp_string(optimize)}"\n'
     f'#define TICKSYNC_BENCHMARK_LTO "{cpp_string(lto)}"\n'
@@ -215,8 +315,8 @@ if android_prebuilt is not None:
     )
 
 env = Environment(**environment_options)
-env.Append(CXXFLAGS=common_flags + optimization_flags + platform_compile_flags + lto_flags)
-env.Append(LINKFLAGS=platform_link_flags + lto_flags)
+env.Append(CXXFLAGS=common_flags + optimization_flags + platform_compile_flags + lto_flags + sanitizer_flags)
+env.Append(LINKFLAGS=platform_link_flags + lto_flags + sanitizer_link_flags)
 env.Append(CPPDEFINES=platform_defines + [precision_define])
 env.Append(CPPPATH=[str(module_dir), str(benchmark_dir), str(generated_dir)])
 if target_platform == "windows":
@@ -235,7 +335,9 @@ sources = [
     "benchmark_platform.cpp",
     "benchmark_result_writer.cpp",
     "benchmark_statistics.cpp",
+    "candidates/protocol_candidate.cpp",
     "candidates/reference_fixed_width_candidate.cpp",
+    "candidates/varint_zigzag_fixed_float_candidate.cpp",
 ]
 object_suffix = ".obj" if target_platform == "windows" else ".o"
 objects = []
@@ -250,11 +352,15 @@ if target_platform == "windows":
     output_dir = benchmark_dir / "bin" / "windows" / "x86_64"
 elif target_platform == "android":
     output_dir = benchmark_dir / "bin" / "android" / "arm64-v8a"
+elif target_platform == "macos":
+    output_dir = benchmark_dir / "bin" / "macos" / architecture
 else:
     output_dir = benchmark_dir / "bin"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 program_filename = f"tick_synchronizer_protocol_benchmark.{precision}"
+if sanitizer != "none":
+    program_filename += f".{sanitizer}"
 if target_platform == "windows":
     program_filename += ".exe"
 

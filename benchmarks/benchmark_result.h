@@ -95,7 +95,7 @@ struct BenchmarkBuildMetadata {
 
 struct ProtocolBenchmarkReport {
 	std::uint32_t schema_version = 3;
-	std::uint32_t benchmark_suite_version = 1;
+	std::uint32_t benchmark_suite_version = 2;
 	std::uint32_t api_version = 0;
 	std::uint32_t wire_protocol_version = 0;
 	std::uint32_t wire_protocol_revision = 0;

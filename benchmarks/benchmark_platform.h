@@ -1,5 +1,5 @@
-// Provides cross-platform CPU affinity and runtime processor queries.
-// Keeps platform-specific scheduling APIs out of the benchmark runner.
+// Provides cross-platform CPU scheduling policy and runtime processor queries.
+// Keeps platform-specific affinity behavior out of the benchmark runner.
 
 #pragma once
 
@@ -34,6 +34,9 @@ struct BenchmarkAffinityResult {
 	std::string thread_siblings = "unknown";
 	std::string error;
 };
+
+// Returns the platform's explicit state before an optional CPU request.
+BenchmarkAffinityResult make_benchmark_platform_affinity_state();
 
 // Enumerates active logical CPUs and the topology needed for directed runs.
 std::vector<BenchmarkLogicalCpuInfo> list_benchmark_logical_cpus();

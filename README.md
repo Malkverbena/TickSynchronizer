@@ -89,7 +89,7 @@ script_api=5
 api=4
 wire=0
 wire_revision=2
-benchmark_suite=1
+benchmark_suite=2
 wire_stable=no
 exact_build_match=yes
 ```
@@ -97,8 +97,9 @@ exact_build_match=yes
 - API version 4 identifies the current public module contract.
 - Wire version 0 means the protocol is experimental.
 - Wire revision 2 identifies the current incompatible experimental layout.
-- Benchmark suite version 1 identifies the comparison methodology.
-- Report schema 3 records Linux, Windows, and Android provenance plus verified native CPU affinity.
+- Benchmark suite version 2 identifies the current corpus and comparison methodology.
+- Report schema 3 records Linux, Windows, Android, and macOS provenance plus
+  the platform CPU execution policy.
 - Client and server module builds, game builds, schemas, and precision must
   match exactly during the experimental period.
 - The canonical complete Godot version must match exactly; a differing Godot
@@ -112,7 +113,11 @@ Display the contract with:
 
 ## Cross-platform protocol benchmarks
 
-The benchmark core is shared across Linux, Windows, and Android through one SCons compilation graph. Windows executables are cross-compiled from Linux with MinGW-w64 or LLVM-MinGW, and Android ARM64 executables use the Android NDK Clang driver. See `documentation/BENCHMARKS.md`.
+The benchmark core is shared across Linux, Windows, Android, and macOS through
+one SCons compilation graph. Windows executables are cross-compiled from Linux
+with MinGW-w64 or LLVM-MinGW, Android ARM64 executables use the Android NDK
+Clang driver, and local Apple Clang thin builds produce macOS Universal 2
+binaries. See `documentation/BENCHMARKS.md`.
 
 ```bash
 ./scripts/build_protocol_benchmarks.sh --precision all --jobs 45
@@ -123,35 +128,49 @@ The benchmark core is shared across Linux, Windows, and Android through one SCon
 ./scripts/build_protocol_benchmarks_windows_cross.sh --precision all --jobs 45
 ```
 
-Prebuilt execution-only packages can be exported for test machines that do not have compilers, SCons, target SDKs, Git, or project sources:
+On a macOS build host:
+
+```bash
+./scripts/build_protocol_benchmarks_macos.sh \
+    --precision all \
+    --clean-first
+```
+
+Private execution-only packages can be exported for qualification machines that
+do not have compilers, SCons, target SDKs, Git, or project sources:
 
 ```bash
 ./scripts/build_protocol_benchmarks.sh --precision all --jobs 45 --export-package
 ./scripts/build_protocol_benchmarks_android.sh --precision all --jobs 45 --export-package
 ./scripts/build_protocol_benchmarks_windows_cross.sh --precision all --jobs 45 --toolchain mingw-gcc
+./scripts/build_protocol_benchmarks_macos.sh --precision all --clean-first
 ```
 
 Each execution-only runner verifies the package manifest before starting a benchmark.
 
-Official reports require a clean source tree and verified native CPU affinity. Cross-platform backend availability does not count as protocol evidence until reports are produced on the actual target hardware and archived with hashes.
+GitHub distribution is source-only. Generated benchmark executables and
+deployment packages are not published. macOS users build from source with their
+own locally licensed Apple toolchain and SDK on Apple-branded hardware running
+macOS; Apple SDK files are never vendored or copied into this repository.
 
-## Current source and validation status
+Official reports require a clean source tree. Linux, Windows, and Android also
+require verified native CPU affinity. Their 16 matched candidate pairs form the
+selection gate. macOS uses the exact scheduler-managed representative policy
+from ADR 0032 and is deferred to the blocking final portability gate in ADR
+0036. Cross-platform backend availability does not count as protocol evidence
+until reports are produced on the actual target hardware and archived with
+hashes.
 
-Current source consistency passes with 41 public/documented methods and 140
-C++ test cases. The complete wire revision 2 matrix passes in `single` and
-`double`: 140 tests, 66,999 assertions, normal editor smoke, both templates,
-and the accepted module-focused sanitizer profiles.
+## Development status
 
-Preliminary quick qualification also passes on Linux and Windows x86_64 across
-distinct L3 domains and on Android ARM64 across multiple core classes. Every
-selected report validates schema 3, affinity, all seven datasets, and 27
-rejected malformed packets with zero accepted. These dirty-tree reports
-validate the infrastructure and current reference candidate but are not
-official protocol-selection evidence.
-
-A known UBSAN diagnostic in Godot's bundled SDL/HIDAPI initialization prevents
-the full sanitized editor smoke test and is documented separately. It does not
-affect the required module-focused sanitizer gate.
+The wire protocol remains experimental and the complete production realtime
+candidate has not been selected. Suite 2 has screened canonical ULEB128/ZigZag
+as the integer primitive to carry into cross-platform qualification. Stateful
+framing, masks, quantization, and recovery policy remain undecided.
+Version-bound implementation state, pending work, and accepted evidence are maintained in
+[`documentation/development/`](documentation/development/). The permanent
+manual describes module behavior and the gates that every accepted source state
+must satisfy.
 
 ## Build and validation
 
@@ -160,6 +179,10 @@ Run consistency checks first:
 ```bash
 ./scripts/verify_source_consistency.sh
 ```
+
+Module-linked C++ follows Godot's restricted subset without STL containers,
+`auto`, avoidable lambdas, exceptions, or RTTI. The engine-independent benchmark
+may use STL containers, but SCons compiles it with exceptions and RTTI disabled.
 
 Run the complete validation matrix:
 
@@ -171,11 +194,18 @@ Run the complete validation matrix:
 Run the focused sanitizer gate:
 
 ```bash
-./scripts/run_sanitized_tests.sh double --jobs 45 --no-smoke
-./scripts/run_sanitized_tests.sh single --jobs 45 --no-smoke
+./scripts/run_sanitized_tests.sh all --jobs 45
 ```
 
-See [`documentation/BUILD.md`](documentation/BUILD.md), [`documentation/TESTING.md`](documentation/TESTING.md), and [`documentation/VALIDATION.md`](documentation/VALIDATION.md).
+The accepted ASAN profile keeps leak detection enabled. Its one version-locked
+Godot 4.7.1 SDL joypad rule and the existing three-rule UBSAN policy are each
+protected by SCons-built unrelated negative controls.
+The two precisions run serially, and the full unrelated LSAN control runs once
+per uninterrupted acceptance batch.
+
+See [`documentation/BUILD.md`](documentation/BUILD.md),
+[`documentation/TESTING.md`](documentation/TESTING.md), and the current
+[`validation record`](documentation/development/VALIDATION.md).
 
 ## Protocol benchmark suite
 
@@ -203,7 +233,11 @@ Run an official benchmark only from a clean Git tree:
     --precision all --cpu "$LINUX_CPU" --no-build
 ```
 
-The current candidate is a fixed-width reference codec. It is a baseline, not the selected production protocol. Decisions derived from benchmark evidence are recorded in [`documentation/BENCHMARK_DECISIONS.md`](documentation/BENCHMARK_DECISIONS.md).
+The suite compares the fixed-width reference with
+`varint_zigzag_fixed_float`. The varint candidate passed the current bounded
+integer screen, but this does not select or stabilize the complete production
+protocol. Decisions and evidence boundaries are recorded in
+[`documentation/BENCHMARK_DECISIONS.md`](documentation/BENCHMARK_DECISIONS.md).
 
 ```mermaid
 flowchart LR
@@ -237,7 +271,7 @@ src/
 
 benchmarks/      Standalone deterministic benchmark suite
 doc_classes/     Godot class reference XML
-documentation/   Architecture, protocol, roadmap, validation, and ADRs
+documentation/   Module manual, architecture decisions, and development records
 scripts/         Build, validation, sanitizer, and benchmark tools
 tests/           C++ tests, smoke project, and golden vectors
 ```
@@ -246,16 +280,13 @@ tests/           C++ tests, smoke project, and golden vectors
 
 ## Documentation map
 
-- [`documentation/PROJECT_STATE.md`](documentation/PROJECT_STATE.md): current implemented state.
-- [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md): architectural boundaries.
-- [`documentation/PROTOCOL.md`](documentation/PROTOCOL.md): experimental control protocol.
-- [`documentation/BINARY_BUFFER.md`](documentation/BINARY_BUFFER.md): binary buffer invariants.
-- [`documentation/BENCHMARKS.md`](documentation/BENCHMARKS.md): benchmark methodology.
-- [`documentation/BENCHMARK_DECISIONS.md`](documentation/BENCHMARK_DECISIONS.md): decisions derived from measurements.
-- [`documentation/ROADMAP.md`](documentation/ROADMAP.md): phased development plan.
-- [`documentation/adr/`](documentation/adr/): accepted architectural decisions.
-
-Mermaid diagrams remain embedded where they clarify architecture or control flow. The repository intentionally does not contain a general Mermaid tutorial because diagram-tool documentation is outside the module's scope.
+[`documentation/README.md`](documentation/README.md) separates the permanent
+module manual, versioned architecture decisions, and stage-specific development
+records. Module behavior and contracts remain in the permanent manual; current
+status and qualification evidence are kept under `documentation/development/`.
+The GitHub Project owns operational planning. After source acceptance and the
+complete final portability gate close, the Wiki may publish derived user guides, while versioned
+contracts, evidence, and ADRs remain authoritative in the repository.
 
 ## Contribution policy
 

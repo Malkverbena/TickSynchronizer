@@ -98,11 +98,27 @@ static ProtocolDisconnectPayload make_evaluation_disconnect(
 	return disconnect;
 }
 
+
+// Consumes one canonical decimal component from a fixed Godot version field.
+static bool consume_decimal_component(
+		const ProtocolGodotVersion &p_value,
+		uint32_t p_length,
+		uint32_t &r_index) {
+	const uint32_t start = r_index;
+	while (r_index < p_length && p_value[r_index] >= '0' && p_value[r_index] <= '9') {
+		r_index++;
+	}
+	if (r_index == start) {
+		return false;
+	}
+	return r_index - start == 1 || p_value[start] != '0';
+}
+
 } // namespace
 
 bool ProtocolHandshakeEvaluator::is_zero_sha1(const ProtocolSha1 &p_value) {
-	for (uint8_t byte : p_value) {
-		if (byte != 0) {
+	for (uint32_t index = 0; index < p_value.size(); index++) {
+		if (p_value[index] != 0) {
 			return false;
 		}
 	}
@@ -111,8 +127,8 @@ bool ProtocolHandshakeEvaluator::is_zero_sha1(const ProtocolSha1 &p_value) {
 
 
 bool ProtocolHandshakeEvaluator::is_zero_opaque_id(const ProtocolOpaqueId &p_value) {
-	for (uint8_t byte : p_value) {
-		if (byte != 0) {
+	for (uint32_t index = 0; index < p_value.size(); index++) {
+		if (p_value[index] != 0) {
 			return false;
 		}
 	}
@@ -122,33 +138,22 @@ bool ProtocolHandshakeEvaluator::is_zero_opaque_id(const ProtocolOpaqueId &p_val
 
 bool ProtocolHandshakeEvaluator::is_valid_godot_version(
 		const ProtocolGodotVersion &p_value) {
-	std::size_t length = 0;
+	uint32_t length = 0;
 	while (length < p_value.size() && p_value[length] != 0) {
 		length++;
 	}
 	if (length == 0 || length == p_value.size()) {
 		return false;
 	}
-	for (std::size_t index = length + 1; index < p_value.size(); index++) {
+	for (uint32_t index = length + 1; index < p_value.size(); index++) {
 		if (p_value[index] != 0) {
 			return false;
 		}
 	}
 
-	std::size_t index = 0;
-	auto consume_decimal_component = [&]() {
-		const std::size_t start = index;
-		while (index < length && p_value[index] >= '0' && p_value[index] <= '9') {
-			index++;
-		}
-		if (index == start) {
-			return false;
-		}
-		return index - start == 1 || p_value[start] != '0';
-	};
-
+	uint32_t index = 0;
 	for (int component = 0; component < 3; component++) {
-		if (!consume_decimal_component()) {
+		if (!consume_decimal_component(p_value, length, index)) {
 			return false;
 		}
 		if (component < 2) {

@@ -2,7 +2,18 @@
 
 ## Status
 
-Benchmark suite version 1 is implemented as a standalone C++17 executable. It currently contains one fixed-width reference candidate and seven deterministic datasets. The suite is the measurement foundation; it does not imply that the reference candidate is the final protocol.
+Benchmark suite version 2 is implemented as a standalone C++17 executable. It
+contains the fixed-width reference and isolated canonical-varint candidates,
+eight deterministic datasets, candidate-independent correctness checks, and
+candidate-specific malformed inputs. The suite has selected an integer
+primitive for continued qualification; it has not selected the complete
+production realtime protocol.
+
+The standalone code may use standard-library containers to remain independent
+of Godot, but it is compiled without C++ exceptions or RTTI. The SCons graph
+enforces `-fno-exceptions`, `-fno-rtti`, and the compiler-feature contract in
+every translation unit. Operational failures use explicit result values and do
+not change timed regions.
 
 ```mermaid
 flowchart LR
@@ -15,14 +26,23 @@ flowchart LR
 
 ## Version contract
 
-- `BENCHMARK_SUITE_VERSION = 1` identifies datasets and methodology.
+- `BENCHMARK_SUITE_VERSION = 2` identifies datasets and methodology.
 - report `schema_version = 3` identifies the cross-platform provenance JSON layout.
 - adding a candidate does not increment the suite version.
 - changing datasets, timed regions, warm-up policy, statistics, or correctness semantics requires a suite-version review.
 
-## Reference candidate
+## Candidates
 
 `reference_fixed_width` uses explicit fixed-width little-endian fields and fixed `float32` or `float64` values according to the benchmark build. Its purpose is to provide a simple, predictable baseline for size and CPU cost.
+
+`varint_zigzag_fixed_float` retains framing, limits, semantic fields, and
+fixed-width scalars while changing unsigned integers to canonical ULEB128 and
+signed integers to portable ZigZag plus canonical ULEB128. ADR 0037 defines the
+complete isolated-variable contract.
+
+Both candidates use canonical little-endian IEEE 754 scalars. All NaNs encode
+to one positive quiet-NaN representation, other NaN payloads are rejected, and
+binary64-to-binary32 conversion is explicitly round-to-nearest, ties-to-even.
 
 ## Deterministic datasets
 
@@ -32,11 +52,14 @@ flowchart LR
 4. `snapshot_medium`
 5. `snapshot_dense`
 6. `numeric_extremes`
-7. `sequential_flow`
+7. `integer_boundaries`
+8. `sequential_flow`
 
 The same seed and semantic inputs must be used for every candidate.
+`numeric_extremes` and `integer_boundaries` are correctness coverage datasets;
+they are reported but excluded from workload-weighted selection gates.
 
-## Methodology v1
+## Methodology v2
 
 Official configuration:
 
@@ -49,14 +72,17 @@ Official configuration:
 - correctness validated outside timed regions;
 - median, p95, minimum, maximum, and MAD reported;
 - output consumed through a volatile diagnostic sink;
-- official execution pinned by the native executable to an explicit logical CPU;
+- official execution uses the platform CPU policy: verified hard affinity on
+  Linux, Windows, and Android, or the exact scheduler-managed representative
+  policy on macOS;
 - official execution rejected when the Git tree is dirty.
 
-Official eligibility additionally requires the complete seven-dataset suite and
+Official eligibility additionally requires the complete eight-dataset suite and
 an exact match for every methodology field above. It also requires a full
-module commit identifier and the qualified Godot baseline commit. CLI overrides
-and `--only` runs remain useful diagnostics, but they cannot produce official
-reports. Every benchmark build wrapper runs source consistency before SCons.
+module commit identifier, the qualified Godot baseline commit, and the exact
+CPU execution policy for the report platform. CLI overrides and `--only` runs
+remain useful diagnostics, but they cannot produce official reports. Every
+benchmark build wrapper runs source consistency before SCons.
 
 ```mermaid
 sequenceDiagram
@@ -78,9 +104,20 @@ A candidate is not eligible for performance comparison if it:
 - fails any semantic round-trip;
 - produces nondeterministic bytes for deterministic input;
 - accepts malformed packets that should be rejected;
+- returns a different decode error than the malformed-packet contract requires;
+- mutates output after a failed decode;
+- accepts a nonminimal varint or a noncanonical NaN payload;
+- accepts fields that have no canonical meaning for the message kind;
+- mutates an existing output buffer after an encode failure;
 - performs an unbounded allocation based on input;
 - depends on native struct padding, endianness, or ABI;
 - changes output semantics across repeated executions.
+
+Malformed-packet results are correctness gates, not cross-candidate timing
+metrics. Suite 2 deliberately adds candidate-specific attacks, so rejection
+counts and aggregate rejection time are not comparable between candidates. A
+future rejection-cost comparison must use a separately identified common
+packet corpus with identical inputs and weights.
 
 ## Metrics
 
@@ -101,7 +138,8 @@ Per dataset and operation:
 ./scripts/build_protocol_benchmarks.sh --precision all --jobs 45
 ```
 
-The build produces independent `single` and `double` executables and runs their self-tests.
+The build produces independent `single` and `double` executables and runs both
+candidate self-tests in each binary.
 
 ## Execution
 
@@ -173,8 +211,16 @@ Schema 3 records:
 - optimization and LTO state;
 - operating system, build, architecture, runtime backend, device, and SoC;
 - requested and actual logical CPU, processor group, affinity result, core class, package, NUMA node, L3 domain, and SMT siblings;
+- the scheduler-managed sentinel instead of invented topology on macOS;
 - frequency driver, governor, and frequency limits;
 - thermal information when exposed by the platform.
+
+Compiler command and path fields use privacy-safe executable and
+toolchain-relative identifiers. Compiler flags preserve relevant options and
+SDK identity without recording a private SDK location. Executable paths use a
+package-relative basename, except for the fixed Android remote path under
+`/data/local/tmp`. Report validation and package export reject host user
+directories, mounted-volume paths, and drive-qualified paths.
 
 ## Windows backend
 
@@ -301,6 +347,64 @@ Inspect the selected device and run through adb:
 
 Official Android evidence requires an explicit `--cpu N` after topology inspection. `--cpu-class` is a convenience selector based on exposed maximum frequencies and is accepted only for quick diagnostics. The runner pushes a static-libc++ executable to `/data/local/tmp`, requires a matching remote SHA-256, executes the native self-test, captures thermal and battery state, and pulls JSON/CSV reports.
 
+## macOS backend
+
+macOS builds run locally on a Mac; hosted build automation is not part of this
+phase. The build host needs Apple Clang and a macOS SDK from Xcode or Apple
+Command Line Tools, Python, SCons, Git, and the standard `lipo` and `otool`
+tools.
+Build and create a private qualification package for both precisions:
+
+```bash
+./scripts/build_protocol_benchmarks_macos.sh \
+    --precision all \
+    --deployment-target 12.0 \
+    --clean-first
+```
+
+The wrapper invokes the shared SCons graph once for each `x86_64` and `arm64`
+thin target, merges the linked slices into Universal 2 executables, confirms
+both architectures, rejects non-system dynamic-library dependencies, and runs
+the native slice self-test. On the available Intel build host, `x86_64` is
+executed natively while `arm64` is structural evidence only.
+
+Extract the generated ZIP on a private qualification Mac and run the
+execution-only package:
+
+```bash
+./run_protocol_benchmarks_macos.sh --precision all --quick
+```
+
+The package requires macOS 12 or newer and standard system utilities only. It
+does not require a compiler, Homebrew, an SDK, SCons, Python, Git, or project
+sources. The runner verifies its SHA-256 manifest, rejects Rosetta execution,
+runs both native self-tests, validates report schema and integrity markers, and
+creates per-report hashes.
+
+`--allow-dirty` is reserved for a full diagnostic run from a package whose
+embedded source state is `dirty`. It is rejected for clean packages, cannot be
+combined with `--quick`, and must produce `official_eligible=false`.
+
+macOS has no public hard logical-CPU pinning contract equivalent to the other
+supported hosts. Official reports therefore use the exact scheduler-managed
+representative state from ADR 0032: affinity is neither requested nor claimed,
+and unsupported topology fields carry explicit sentinels. This exception is
+accepted only for `platform=macOS` with `runtime_backend=macos-native`; all
+other platforms still require verified hard affinity.
+
+The build adds no explicit signing or notarization step and records whether a
+signature is detected on the result. The runner records whether quarantine is
+present, attempts normal execution, and never removes or changes the attribute.
+A deliberate signing or notarization policy will be evaluated only after the
+target Mac provides actual Gatekeeper evidence.
+
+Public GitHub distribution is source-only. It includes neither macOS binaries
+nor an Apple SDK. Each user who needs a macOS executable supplies a locally
+licensed Apple toolchain and SDK on Apple-branded hardware running macOS. The
+build scripts may discover local tools through `xcrun`, but they do not download
+or redistribute Apple software. Linux cross-compilation with a copied Apple SDK
+is unsupported. See ADR 0034.
+
 ## Comparing reports
 
 The comparator keeps `single` and `double` reports in separate groups and uses
@@ -319,9 +423,30 @@ domain, and executable hash so files named `results.json` remain unambiguous.
 `--allow-preliminary` is diagnostic only and must be omitted for official
 comparisons.
 
-## Execution-only deployment packages
+Candidate selection uses matched report pairs and the predeclared ADR 0037
+screen:
 
-Prebuilt benchmark packages decouple compilation from measurement. Build hosts own SCons, cross-compilers, and the Android NDK; test machines receive only target executables, runners, integrity hashes, metadata, and instructions.
+```bash
+./scripts/analyze_protocol_candidates.py \
+    --output candidate-analysis.md \
+    REFERENCE_DOUBLE/results.json VARINT_DOUBLE/results.json \
+    REFERENCE_SINGLE/results.json VARINT_SINGLE/results.json
+```
+
+Use `--allow-preliminary` only for diagnostic pairs. The analyzer requires the
+same execution identity, executable hash, and sampling configuration; reports
+must be no more than one hour apart and should come from one uninterrupted
+runner invocation. It also requires identical semantic hashes, all correctness
+gates, at least 5% workload byte reduction, no workload size increase, weighted
+encode/decode ratios no greater than 1.50x, and per-workload latency ratios no
+greater than 2.00x.
+
+## Private execution-only qualification packages
+
+Prebuilt benchmark packages decouple compilation from measurement. Build hosts
+own SCons, cross-compilers, and the Android NDK; qualification machines receive
+only target executables, runners, integrity hashes, metadata, and instructions.
+These generated packages remain outside Git and public releases.
 
 ```bash
 ./scripts/build_protocol_benchmarks.sh \
@@ -338,9 +463,18 @@ Prebuilt benchmark packages decouple compilation from measurement. Build hosts o
     --precision all \
     --jobs 45 \
     --export-package
+
+./scripts/build_protocol_benchmarks_macos.sh \
+    --precision all \
+    --clean-first
 ```
 
-After extraction, Linux and Android packages use `--execution-only`. This disables all source-tree and build actions; cleanliness and commit provenance come from metadata embedded in the binaries at build time. Every package runner verifies its SHA-256 manifest before execution. A full run from a dirty build remains diagnostic and cannot become `official_eligible`.
+After extraction, Linux and Android packages use `--execution-only`; Windows
+and macOS packages are execution-only by construction. This disables all
+source-tree and build actions; cleanliness and commit provenance come from
+metadata embedded in the binaries at build time. Every package runner verifies
+its SHA-256 manifest before execution. A full run from a dirty build remains
+diagnostic and cannot become `official_eligible`.
 
 Runtime-only requirements are:
 
@@ -349,44 +483,44 @@ Runtime-only requirements are:
 | Linux x86_64 | Bash, Python 3, `sha256sum`, and standard system utilities |
 | Windows x86_64 | Windows PowerShell 5.1 or newer |
 | Android ARM64 | No development tools on the device; the Linux controller needs Bash, ADB, Python 3, and `sha256sum` |
+| macOS Universal 2 | macOS 12 or newer and standard system utilities; no Homebrew or Python |
 
 Deployment archives are written under `benchmark_dist/`. Package creation uses `../tick_synchronizer_tmp` by default and accepts a safe `TICKSYNC_TEMP_DIR` override.
+The external archive hash sidecar records only the archive basename, never an
+absolute build-host path.
 
 ## Platform matrix
 
-The suite is compiled without methodology changes for the following qualification matrix:
+A matched pair contains reference and varint reports from one executable,
+precision, device, and CPU execution identity. The candidate-selection gate
+contains 16 clean-tree matched pairs, or 32 reports. The deferred final macOS
+gate brings the complete initial-platform matrix to 18 pairs, or 36 reports:
 
-| Platform | Architecture | Role |
-|---|---|---|
-| Available Linux system | x86_64 | Quick qualification complete across distinct L3 domains |
-| Available Windows system | x86_64 | Quick qualification complete across distinct L3 domains |
-| Second Windows machine | x86_64 | Deferred until available |
-| Recent Android device | ARM64 | Controlled quick qualification complete across exposed core classes |
-| Older Android device | ARM64 | Quick qualification complete across exposed core classes |
+| Platform and hardware | Configuration | Precisions | Pairs | Reports | Gate |
+|---|---|---|---:|---:|---|
+| Linux, Ryzen 9 9950X3D | X3D CCD | `single`, `double` | 2 | 4 | selection |
+| Linux, Ryzen 9 9950X3D | frequency CCD | `single`, `double` | 2 | 4 | selection |
+| Windows 11, Ryzen 9 9950X3D | X3D CCD | `single`, `double` | 2 | 4 | selection |
+| Windows 11, Ryzen 9 9950X3D | frequency CCD | `single`, `double` | 2 | 4 | selection |
+| Android, Galaxy SM-S928B | efficiency core | `single`, `double` | 2 | 4 | selection |
+| Android, Galaxy SM-S928B | prime core | `single`, `double` | 2 | 4 | selection |
+| Android, Redmi Note 9 Pro | efficiency core | `single`, `double` | 2 | 4 | selection |
+| Android, Redmi Note 9 Pro | performance core | `single`, `double` | 2 | 4 | selection |
+| **Selection subtotal** |  |  | **16** | **32** |  |
+| macOS 12.7.6, available Intel Mac | scheduler-managed representative | `single`, `double` | 2 | 4 | final portability |
+| **Complete total** |  |  | **18** | **36** |  |
 
-Android runs distinguish efficiency, performance, and prime core classes when
-the kernel exposes usable affinity information. Windows and Android backends
-and the available quick device matrix are qualified. Clean-tree official
-baselines remain pending.
+Linux and Windows select one primary hardware thread in each documented CCD
+domain. Android uses the listed exposed core classes with verified affinity.
+macOS contributes one representative configuration under ADR 0032, does not
+claim per-core evidence, and is deferred to final development under ADR 0036.
+Its failure blocks stabilization or release and reopens the affected decision.
 
-## Current preliminary qualification
+## Qualification evidence
 
-The selected quick matrix uses report schema 3 and the
-`reference_fixed_width` candidate:
-
-- Linux and Windows x86_64 cover distinct L3 domains;
-- Android ARM64 covers recent and older devices across exposed efficiency,
-  performance, and prime core classes under controlled power settings.
-
-Every selected report passed the self-test, all seven datasets, explicit
-affinity, JSON/CSV validation, and the malformed corpus with 27 rejected and
-zero accepted packets. Runs without confirmed environmental controls are
-excluded from qualified performance comparisons.
-
-The quick reports record dirty source provenance and `official=no`; they
-validate execution, portability, topology discovery, and platform sensitivity
-but cannot select the production protocol. The second Windows machine and all
-clean-tree official runs remain pending.
+The matrix above defines the permanent qualification contract. Completed runs,
+pending platform work, and source-specific acceptance status are recorded in
+[`development/VALIDATION.md`](development/VALIDATION.md).
 
 ## Decision process
 

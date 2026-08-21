@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MODULE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 BENCHMARK_DIR="${MODULE_DIR}/benchmarks"
 PRECISION="double"
+CANDIDATE="all"
 ABI="arm64-v8a"
 API_LEVEL="24"
 JOBS=""
@@ -21,6 +22,7 @@ BINARY_DIR="${TICKSYNC_BENCHMARK_BINARY_DIR:-}"
 EXECUTION_ONLY=0
 LIST_CPUS=0
 EXTRA_ARGS=()
+declare -A BUILT_PRECISIONS=()
 
 fail() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -34,6 +36,8 @@ Usage:
 
 Options:
   --precision single|double|all  Precision. Default: double.
+  --candidate reference_fixed_width|varint_zigzag_fixed_float|all
+                                Candidate. Default: all.
   --serial SERIAL               Selects one adb device.
   --cpu N                       Pins the native benchmark thread to logical CPU N.
   --cpu-class CLASS             Selects efficiency, performance, or prime by max frequency.
@@ -146,12 +150,14 @@ verify_package_integrity() {
 
 run_one() {
     local precision="$1"
+    local candidate="$2"
     local selected_binary_dir="${BINARY_DIR:-${BENCHMARK_DIR}/bin/android/${ABI}}"
     local binary="${selected_binary_dir}/tick_synchronizer_protocol_benchmark.${precision}"
-    if (( ! NO_BUILD )); then
+    if (( ! NO_BUILD )) && [[ -z "${BUILT_PRECISIONS[$precision]:-}" ]]; then
         local -a build=("${SCRIPT_DIR}/build_protocol_benchmarks_android.sh" --precision "$precision" --abi "$ABI" --api-level "$API_LEVEL")
         [[ -z "$JOBS" ]] || build+=(--jobs "$JOBS")
         "${build[@]}"
+        BUILT_PRECISIONS[$precision]=1
     fi
     [[ -f "$binary" ]] || fail "Android benchmark binary not found: $binary"
 
@@ -168,7 +174,7 @@ run_one() {
 
     local timestamp report_dir remote_dir remote_binary remote_json remote_csv remote_script
     timestamp="$(date -u +'%Y%m%dT%H%M%SZ')"
-    report_dir="${OUTPUT_ROOT}/${timestamp}-android-${device_slug}-${precision}-suite1"
+    report_dir="${OUTPUT_ROOT}/${timestamp}-android-${device_slug}-${candidate}-${precision}-suite2"
     remote_dir="/data/local/tmp/ticksynchronizer-benchmark"
     remote_binary="${remote_dir}/tick_synchronizer_protocol_benchmark.${precision}"
     remote_json="${remote_dir}/results.${precision}.json"
@@ -208,9 +214,11 @@ run_one() {
         printf 'export TICKSYNC_BENCHMARK_SCALING_GOVERNOR=%s\n' "$(shell_quote "$governor")"
         printf 'export TICKSYNC_BENCHMARK_CPU_MIN_FREQUENCY_KHZ=%s\n' "$(shell_quote "$min_freq")"
         printf 'export TICKSYNC_BENCHMARK_CPU_MAX_FREQUENCY_KHZ=%s\n' "$(shell_quote "$max_freq")"
-        printf '%s --self-test\n' "$(shell_quote "$remote_binary")"
-        printf 'exec %s --cpu %s --json %s --csv %s' \
-            "$(shell_quote "$remote_binary")" "$CPU" "$(shell_quote "$remote_json")" "$(shell_quote "$remote_csv")"
+        printf '%s --self-test --candidate %s\n' \
+            "$(shell_quote "$remote_binary")" "$(shell_quote "$candidate")"
+        printf 'exec %s --candidate %s --cpu %s --json %s --csv %s' \
+            "$(shell_quote "$remote_binary")" "$(shell_quote "$candidate")" "$CPU" \
+            "$(shell_quote "$remote_json")" "$(shell_quote "$remote_csv")"
         (( QUICK )) && printf ' --quick'
         local arg
         for arg in "${EXTRA_ARGS[@]}"; do printf ' %s' "$(shell_quote "$arg")"; done
@@ -228,6 +236,7 @@ run_one() {
         printf 'Hardware: %s\n' "$hardware"
         printf 'ABI: %s\n' "$ABI"
         printf 'Precision: %s\n' "$precision"
+        printf 'Candidate: %s\n' "$candidate"
         printf 'Logical CPU: %s\n' "$CPU"
         printf 'CPU class: %s\n' "$CPU_CLASS"
         printf 'CPU min/max kHz: %s / %s\n' "$min_freq" "$max_freq"
@@ -256,13 +265,24 @@ run_one() {
     python3 "$SCRIPT_DIR/verify_benchmark_results.py" "${verify_args[@]}"
     find "$report_dir" -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | \
         xargs -0 sha256sum > "$report_dir/SHA256SUMS.txt"
-    printf 'TICKSYNCHRONIZER_ANDROID_BENCHMARK_REPORT_OK precision=%s cpu=%s device=%s report=%s\n' \
-        "$precision" "$CPU" "$device_slug" "$report_dir"
+    printf 'TICKSYNCHRONIZER_ANDROID_BENCHMARK_REPORT_OK candidate=%s precision=%s cpu=%s device=%s report=%s\n' \
+        "$candidate" "$precision" "$CPU" "$device_slug" "$report_dir"
+}
+
+run_precision() {
+    local precision="$1"
+    if [[ "$CANDIDATE" == all ]]; then
+        run_one "$precision" reference_fixed_width
+        run_one "$precision" varint_zigzag_fixed_float
+    else
+        run_one "$precision" "$CANDIDATE"
+    fi
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --precision) [[ $# -ge 2 ]] || fail "--precision requires a value"; PRECISION="$2"; shift 2 ;;
+        --candidate) [[ $# -ge 2 ]] || fail "--candidate requires a value"; CANDIDATE="$2"; shift 2 ;;
         --serial) [[ $# -ge 2 ]] || fail "--serial requires a value"; SERIAL="$2"; shift 2 ;;
         --cpu) [[ $# -ge 2 ]] || fail "--cpu requires a value"; CPU="$2"; CPU_CLASS="explicit"; CPU_EXPLICIT=1; shift 2 ;;
         --cpu-class) [[ $# -ge 2 ]] || fail "--cpu-class requires a value"; CPU_CLASS="$2"; shift 2 ;;
@@ -288,6 +308,8 @@ done
 
 [[ "$PRECISION" == "single" || "$PRECISION" == "double" || "$PRECISION" == "all" ]] || \
     fail "invalid precision: $PRECISION"
+[[ "$CANDIDATE" == "reference_fixed_width" || "$CANDIDATE" == "varint_zigzag_fixed_float" || "$CANDIDATE" == "all" ]] || \
+    fail "invalid candidate: $CANDIDATE"
 [[ -z "$CPU" || "$CPU" =~ ^[0-9]+$ ]] || fail "invalid CPU: $CPU"
 verify_package_integrity
 verify_preconditions
@@ -304,8 +326,8 @@ fi
 mkdir -p "$OUTPUT_ROOT"
 
 if [[ "$PRECISION" == all ]]; then
-    run_one double
-    run_one single
+    run_precision double
+    run_precision single
 else
-    run_one "$PRECISION"
+    run_precision "$PRECISION"
 fi

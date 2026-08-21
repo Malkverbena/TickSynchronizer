@@ -9,19 +9,74 @@
 #include "core/string/ustring.h"
 #include "core/variant/variant.h"
 
-#include <array>
-#include <cstddef>
 #include <cstdint>
 
 namespace tick_synchronizer {
 
-static constexpr std::size_t PROTOCOL_SHA1_SIZE = 20;
-static constexpr std::size_t PROTOCOL_OPAQUE_ID_SIZE = 16;
-static constexpr std::size_t PROTOCOL_GODOT_VERSION_SIZE = 32;
+static constexpr uint32_t PROTOCOL_SHA1_SIZE = 20;
+static constexpr uint32_t PROTOCOL_OPAQUE_ID_SIZE = 16;
+static constexpr uint32_t PROTOCOL_GODOT_VERSION_SIZE = 32;
 
-using ProtocolSha1 = std::array<uint8_t, PROTOCOL_SHA1_SIZE>;
-using ProtocolOpaqueId = std::array<uint8_t, PROTOCOL_OPAQUE_ID_SIZE>;
-using ProtocolGodotVersion = std::array<uint8_t, PROTOCOL_GODOT_VERSION_SIZE>;
+// Stores one fixed-size protocol byte field without depending on STL containers.
+template <uint32_t N>
+struct ProtocolFixedBytes {
+	uint8_t bytes[N] = {};
+
+	// Returns the compile-time byte count.
+	constexpr uint32_t size() const {
+		return N;
+	}
+
+	// Returns mutable access to the first byte.
+	uint8_t *data() {
+		return bytes;
+	}
+
+	// Returns read-only access to the first byte.
+	const uint8_t *data() const {
+		return bytes;
+	}
+
+	// Returns mutable indexed byte access.
+	uint8_t &operator[](uint32_t p_index) {
+		return bytes[p_index];
+	}
+
+	// Returns read-only indexed byte access.
+	const uint8_t &operator[](uint32_t p_index) const {
+		return bytes[p_index];
+	}
+
+	// Assigns one value to every byte.
+	void fill(uint8_t p_value) {
+		for (uint32_t index = 0; index < N; index++) {
+			bytes[index] = p_value;
+		}
+	}
+
+	// Compares every byte for exact equality.
+	bool operator==(const ProtocolFixedBytes<N> &p_other) const {
+		for (uint32_t index = 0; index < N; index++) {
+			if (bytes[index] != p_other.bytes[index]) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	// Compares every byte for exact inequality.
+	bool operator!=(const ProtocolFixedBytes<N> &p_other) const {
+		return !(*this == p_other);
+	}
+};
+
+using ProtocolSha1 = ProtocolFixedBytes<PROTOCOL_SHA1_SIZE>;
+using ProtocolOpaqueId = ProtocolFixedBytes<PROTOCOL_OPAQUE_ID_SIZE>;
+using ProtocolGodotVersion = ProtocolFixedBytes<PROTOCOL_GODOT_VERSION_SIZE>;
+
+static_assert(sizeof(ProtocolSha1) == PROTOCOL_SHA1_SIZE);
+static_assert(sizeof(ProtocolOpaqueId) == PROTOCOL_OPAQUE_ID_SIZE);
+static_assert(sizeof(ProtocolGodotVersion) == PROTOCOL_GODOT_VERSION_SIZE);
 
 enum class ProtocolPrecisionMode : uint8_t {
 	INVALID = 0,

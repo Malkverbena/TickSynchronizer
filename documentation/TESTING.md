@@ -11,7 +11,16 @@ flowchart LR
 
 ## 1. Source consistency
 
-`verify_source_consistency.sh` checks bindings, XML, public declarations, test counts, manifests, version constants, protocol contracts, benchmark infrastructure, English-language policy, file-purpose comments, and Mermaid blocks.
+`verify_source_consistency.sh` checks bindings, XML, public declarations, test
+counts, manifests, version constants, protocol contracts, benchmark
+infrastructure, documentation structure, language policy, and file-purpose
+comments. It also rejects unsupported C++ features after stripping comments and
+literals: module-linked sources follow the Godot subset, while standalone
+benchmark sources remain exception-free and RTTI-free.
+
+Generated `.godot/` cache directories are excluded from the source inventory at
+any depth. Project-owned inputs such as `tests/smoke_project/project.godot`
+remain covered by `FILE_MANIFEST.txt` and `SHA256SUMS.txt`.
 
 ```bash
 ./scripts/verify_source_consistency.sh
@@ -19,7 +28,9 @@ flowchart LR
 
 ## 2. C++ tests
 
-Godot's doctest runner executes cases filtered by `*TickSynchronizer*`. The current minimum is 140 cases.
+Godot's doctest runner executes cases filtered by `*TickSynchronizer*`.
+Version-bound test and assertion counts are recorded in
+[`development/VALIDATION.md`](development/VALIDATION.md).
 
 Coverage includes:
 
@@ -47,23 +58,44 @@ Both `template_debug` and `template_release` are compiled to detect editor-only 
 ./scripts/build_and_validate.sh --mode all --precision single --jobs 45
 ```
 
-The current wire revision 2 source passes this matrix in both precisions with
-140 tests, 66,999 assertions, all required smoke markers, `template_debug`, and
-`template_release`.
+An accepted source state must pass this matrix in both precisions. The current
+results are recorded separately in
+[`development/VALIDATION.md`](development/VALIDATION.md).
 
 ## 6. Sanitizers
 
 ```bash
-./scripts/run_sanitized_tests.sh double --jobs 45 --no-smoke
-./scripts/run_sanitized_tests.sh single --jobs 45 --no-smoke
+./scripts/run_sanitized_tests.sh all --jobs 45
 ```
 
-ASAN and UBSAN passes are separated to keep toolchain behavior diagnosable. Suppressions are narrow, version-specific, and stored in external files.
+ASAN and UBSAN passes are separated to keep toolchain behavior diagnosable.
+The accepted profile runs the real GDScript smoke; `--no-smoke` is diagnostic
+only.
 
-The known SDL/HIDAPI UBSAN diagnostic is outside TickSynchronizer. Any report that enters module code remains a release blocker.
+The ASAN pass explicitly keeps `detect_leaks=1`. Godot 4.7.1 uses exactly one
+function-specific LSAN rule for SDL joypad/UDEV allocations reproduced with an
+exact-commit editor that did not contain TickSynchronizer:
 
-The current module-focused sanitizer matrix passes all 140 tests and 66,999
-assertions in both precisions under the accepted `--no-smoke` profile.
+```text
+leak:JoypadSDL::initialize
+```
+
+Once per uninterrupted acceptance batch, `verify_lsan_suppressions.sh` rejects
+any rule-set change, builds an unrelated 4,096-byte leak through SCons, and
+requires LeakSanitizer to report it with a fatal status. Before every later
+ASAN pass in the same batch, it rechecks the exact static rule without
+rebuilding the identical probe. Disabling the reviewed rule is diagnostic only
+and does not disable leak detection.
+
+The Godot 4.7.1 UBSAN file accepts exactly three reviewed
+category-and-source pairs. The SDL TLS bounds and GDScript VM alignment
+diagnostics were each reproduced with an exact-commit editor that did not
+contain TickSynchronizer. The existing test-setup rule remains version locked.
+
+Before each UBSAN pass, `verify_sanitizer_suppressions.sh` rejects any change
+to the exact rule set, builds unrelated C++17 bounds and alignment probes
+through SCons, and requires both diagnostics to remain fatal. Any report from
+another source location, including module code, remains a release blocker.
 
 ## 7. Benchmark correctness
 
@@ -89,16 +121,25 @@ read -r -p "Linux logical CPU: " LINUX_CPU
     --precision all --quick --cpu "$LINUX_CPU" --no-build
 ```
 
-The generated reports must use schema 3 and record `affinity_requested=yes` and `affinity_applied=yes`. Windows and Android builds or device runs begin only after this Linux gate passes.
+The generated reports must use schema 3 and record `affinity_requested=yes` and
+`affinity_applied=yes`. Windows and Android builds or device runs begin only
+after this Linux gate passes and may proceed concurrently on independent
+hosts. macOS uses the exact scheduler-managed sentinel from ADR 0032, but ADR
+0036 defers all native Mac work to the final blocking portability gate.
 
-Execution-only packages validate the same binaries without a development environment on the test machine:
+Private execution-only packages validate the same binaries without a development environment on the qualification machine:
 
 ```bash
 ./scripts/build_protocol_benchmarks.sh --precision all --jobs 45 --export-package
 ./scripts/build_protocol_benchmarks_android.sh --precision all --jobs 45 --export-package
+./scripts/build_protocol_benchmarks_macos.sh --precision all --clean-first
 ```
 
-The Windows cross-build exports its deployment package automatically. Package runners never rebuild; official eligibility comes from clean source provenance embedded at compilation and native affinity verified at execution.
+The Windows cross-build and macOS Universal 2 build export deployment packages
+automatically. Package runners never rebuild; official eligibility comes from
+clean source provenance embedded at compilation and the exact platform CPU
+execution policy verified at runtime. Generated binaries and packages remain
+outside Git and public releases.
 
 ## 8. Golden vectors
 
@@ -112,5 +153,6 @@ Golden vectors are versioned byte-level fixtures. They protect canonical encodin
 - invalid external data must be rejected before allocation or mutation;
 - tests may not be disabled without a documented reason;
 - a sanitizer finding in TickSynchronizer is never suppressed merely to pass a gate.
+- LeakSanitizer must remain enabled during an accepted ASAN pass;
 - an I/O or filesystem error invalidates the affected build or run; do not
   classify it as a code failure, and never reuse its generated artifacts.

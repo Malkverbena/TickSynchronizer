@@ -25,7 +25,7 @@ Usage:
   ./scripts/build_protocol_benchmarks.sh [options]
 
 Options:
-  --precision single|double|all  Reference candidate precision. Default: double.
+  --precision single|double|all  Wire floating-point precision. Default: double.
   --jobs N                      Parallel jobs.
   --scons-bin COMMAND           SCons executable. Default: scons.
   --cxx COMMAND                 C++ compiler. Default: the CXX variable or c++.
@@ -57,7 +57,8 @@ build_one() {
         platform=linuxbsd arch=x86_64 toolchain=native \
         "precision=${precision}" "cxx=${CXX_BIN}" "lto=${LTO}" "-j${JOBS}"
     [[ -x "$binary" ]] || fail "binary not found after build: $binary"
-    "$binary" --self-test
+    "$binary" --self-test --candidate reference_fixed_width
+    "$binary" --self-test --candidate varint_zigzag_fixed_float
     printf 'TICKSYNCHRONIZER_BENCHMARK_BUILD_OK suite=%s precision=%s binary=%s\n' \
         "$(${MODULE_DIR}/scripts/build_and_validate.sh --print-benchmark-suite-version)" \
         "$precision" "$binary"

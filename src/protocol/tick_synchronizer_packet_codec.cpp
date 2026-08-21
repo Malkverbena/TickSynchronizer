@@ -52,14 +52,14 @@ static uint64_t read_u64_le(const uint8_t *p_source) {
 	return value;
 }
 
-template <std::size_t N>
-static void write_fixed_bytes(uint8_t *p_destination, const std::array<uint8_t, N> &p_value) {
+template <uint32_t N>
+static void write_fixed_bytes(uint8_t *p_destination, const ProtocolFixedBytes<N> &p_value) {
 	std::memcpy(p_destination, p_value.data(), N);
 }
 
-template <std::size_t N>
-static std::array<uint8_t, N> read_fixed_bytes(const uint8_t *p_source) {
-	std::array<uint8_t, N> value = {};
+template <uint32_t N>
+static ProtocolFixedBytes<N> read_fixed_bytes(const uint8_t *p_source) {
+	ProtocolFixedBytes<N> value;
 	std::memcpy(value.data(), p_source, N);
 	return value;
 }

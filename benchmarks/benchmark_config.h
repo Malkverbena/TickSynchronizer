@@ -11,7 +11,7 @@ inline constexpr char QUALIFICATION_GODOT_COMMIT[] =
 		"a13da4feb8d8aefc283c3763d33a2f170a18d541";
 
 struct BenchmarkConfig {
-	std::uint32_t suite_version = 1;
+	std::uint32_t suite_version = 2;
 	std::uint32_t warmup_rounds = 5;
 	std::uint32_t measured_rounds = 30;
 	std::uint64_t minimum_iterations = 10'000;
@@ -21,7 +21,7 @@ struct BenchmarkConfig {
 	bool quick_mode = false;
 };
 
-// Reports whether every methodology field matches benchmark suite 1 exactly.
+// Reports whether every methodology field matches benchmark suite 2 exactly.
 inline bool is_official_benchmark_config(const BenchmarkConfig &config) {
 	const BenchmarkConfig official;
 	return config.suite_version == official.suite_version &&

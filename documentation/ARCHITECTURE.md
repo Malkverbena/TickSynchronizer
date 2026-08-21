@@ -115,23 +115,28 @@ No external endpoint may deliver untrusted gameplay data before the packet-secur
 
 Protocol candidates are evaluated by a standalone harness with deterministic semantic messages. Benchmark code is intentionally isolated from Godot startup, rendering, JNI, Java, and network transports so results reflect codec behavior.
 
-One SCons graph compiles the harness for native Linux, Windows x86_64 cross-targets, and Android ARM64 cross-targets. Execution-only deployment packages separate compilation provenance from physical-machine measurement, so test environments never need project sources or target development toolchains.
+Suite 2 centralizes canonical scalar semantics outside candidate
+implementations. IEEE binary32/binary64 bytes are little-endian, NaNs have one
+accepted payload, and binary64-to-binary32 rounding is defined independently of
+the host floating-point environment. Candidate-independent semantic hashing and
+atomic decode gates prevent an encoding from changing the workload it measures.
 
-The current preliminary cross-platform matrix is:
+The module side follows Godot's restricted C++ subset. The standalone harness
+keeps STL containers for engine independence, but its SCons graph disables
+exceptions and RTTI and propagates operational failures explicitly.
 
-- Linux x86_64 across distinct L3 domains — completed;
-- Windows x86_64 across distinct L3 domains — completed;
-- Android ARM64 on recent and older devices across multiple core classes under
-  controlled power settings — completed;
-- a second Windows x86_64 machine — deferred until available.
+One SCons graph compiles the harness for native Linux, Windows x86_64
+cross-targets, Android ARM64 cross-targets, and local macOS Universal 2 thin
+targets. Private execution-only deployment packages separate compilation
+provenance from physical-machine measurement, so qualification environments
+never need project sources or target development toolchains. Public GitHub
+distribution remains source-only.
 
-## Planned components
+The candidate-selection matrix uses Linux, Windows, and Android matched report
+pairs. Native macOS execution is intentionally deferred to the final blocking
+portability gate; its Apple Clang, Universal 2, scheduler, packaging, and
+Gatekeeper results cannot be inferred from another backend. ADRs 0036 and 0037
+define this gate split and the current integer-primitive decision.
 
-1. clean-tree official benchmark qualification and deferred second-machine coverage;
-2. additional protocol candidates;
-3. transport endpoint abstraction and loopback endpoint;
-4. session and registry layer;
-5. offline simulation;
-6. client/server synchronization;
-7. prediction, rollback, and reconciliation;
-8. relevance, frequency control, metrics, and tooling.
+Platform qualification status and future implementation phases are maintained
+in [`development/`](development/), outside the architectural contract.

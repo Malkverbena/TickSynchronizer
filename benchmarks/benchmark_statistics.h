@@ -1,5 +1,5 @@
 // Declares distribution statistics used by benchmark reports.
-// Defines the stable statistical output contract for suite version 1.
+// Defines the stable statistical output contract used by benchmark suite 2.
 
 #pragma once
 

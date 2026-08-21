@@ -8,24 +8,23 @@
 #include "benchmark_platform.h"
 #include "benchmark_runner.h"
 #include "candidates/reference_fixed_width_candidate.h"
+#include "candidates/varint_zigzag_fixed_float_candidate.h"
 #include "src/internal/tick_synchronizer_version.h"
 
 #include "benchmark_build_info.h"
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <cstdlib>
-#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <optional>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #if defined(__linux__)
@@ -40,42 +39,89 @@ struct CommandLineOptions {
 	bool self_test = false;
 	bool list_cpus = false;
 	bool list_datasets = false;
+	bool list_candidates = false;
+	bool help = false;
 	std::string json_path;
 	std::string csv_path;
 	std::string only_dataset;
+	std::string candidate_name = "reference_fixed_width";
 	std::optional<std::uint32_t> logical_cpu;
 };
 
-// Parses a strict unsigned command-line integer or terminates with context.
-std::uint64_t parse_u64(const char *text, const char *option) {
-	const std::string value_text = text != nullptr ? text : "<null>";
-	try {
-		if (text == nullptr || text[0] == '\0' || text[0] == '-') {
-			throw std::invalid_argument("missing or negative value");
-		}
-		const bool hexadecimal = text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
-		const char *digits = hexadecimal ? text + 2 : text;
-		if (digits[0] == '\0') {
-			throw std::invalid_argument("missing digits");
-		}
-		for (const char *cursor = digits; *cursor != '\0'; cursor++) {
-			const bool decimal_digit = *cursor >= '0' && *cursor <= '9';
-			const bool lower_hex_digit = *cursor >= 'a' && *cursor <= 'f';
-			const bool upper_hex_digit = *cursor >= 'A' && *cursor <= 'F';
-			if ((!hexadecimal && !decimal_digit) ||
-					(hexadecimal && !decimal_digit && !lower_hex_digit && !upper_hex_digit)) {
-				throw std::invalid_argument("invalid digit");
-			}
-		}
-		std::size_t consumed = 0;
-		const std::uint64_t value = std::stoull(text, &consumed, hexadecimal ? 16 : 10);
-		if (text[consumed] != '\0') {
-			throw std::invalid_argument("trailing characters");
-		}
-		return value;
-	} catch (const std::exception &) {
-		throw std::runtime_error(std::string("invalid value for ") + option + ": " + value_text);
+// Parses one strict unsigned command-line integer with overflow detection.
+bool parse_u64(
+		const char *p_text,
+		const char *p_option,
+		std::uint64_t &r_value,
+		std::string &r_error) {
+	if (p_text == nullptr || p_text[0] == '\0' || p_text[0] == '-') {
+		r_error = std::string("invalid value for ") + p_option + ": " +
+				(p_text != nullptr ? p_text : "<null>");
+		return false;
 	}
+	const bool hexadecimal = p_text[0] == '0' && (p_text[1] == 'x' || p_text[1] == 'X');
+	const char *digits = hexadecimal ? p_text + 2 : p_text;
+	if (digits[0] == '\0') {
+		r_error = std::string("invalid value for ") + p_option + ": " + p_text;
+		return false;
+	}
+
+	const std::uint64_t base = hexadecimal ? 16 : 10;
+	std::uint64_t value = 0;
+	for (const char *cursor = digits; *cursor != '\0'; cursor++) {
+		std::uint64_t digit = 0;
+		if (*cursor >= '0' && *cursor <= '9') {
+			digit = static_cast<std::uint64_t>(*cursor - '0');
+		} else if (hexadecimal && *cursor >= 'a' && *cursor <= 'f') {
+			digit = static_cast<std::uint64_t>(*cursor - 'a' + 10);
+		} else if (hexadecimal && *cursor >= 'A' && *cursor <= 'F') {
+			digit = static_cast<std::uint64_t>(*cursor - 'A' + 10);
+		} else {
+			r_error = std::string("invalid value for ") + p_option + ": " + p_text;
+			return false;
+		}
+		if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / base) {
+			r_error = std::string("value exceeds uint64 range for ") + p_option + ": " + p_text;
+			return false;
+		}
+		value = value * base + digit;
+	}
+	r_value = value;
+	return true;
+}
+
+
+// Advances to and parses one required unsigned option value.
+bool parse_required_u64(
+		int p_argument_count,
+		char **p_arguments,
+		int &r_index,
+		const char *p_option,
+		std::uint64_t &r_value,
+		std::string &r_error) {
+	if (r_index + 1 >= p_argument_count) {
+		r_error = std::string(p_option) + " requires a value";
+		return false;
+	}
+	r_index++;
+	return parse_u64(p_arguments[r_index], p_option, r_value, r_error);
+}
+
+
+// Advances to one required string option value.
+bool read_required_value(
+		int p_argument_count,
+		char **p_arguments,
+		int &r_index,
+		const char *p_option,
+		const char *&r_value,
+		std::string &r_error) {
+	if (r_index + 1 >= p_argument_count) {
+		r_error = std::string(p_option) + " requires a value";
+		return false;
+	}
+	r_value = p_arguments[++r_index];
+	return true;
 }
 
 
@@ -84,10 +130,40 @@ bool is_lower_hex_sha1(std::string_view value) {
 	if (value.size() != 40) {
 		return false;
 	}
-	return std::all_of(value.begin(), value.end(), [](char character) {
-		return (character >= '0' && character <= '9') ||
-				(character >= 'a' && character <= 'f');
-	});
+	for (char character : value) {
+		if (!((character >= '0' && character <= '9') ||
+				(character >= 'a' && character <= 'f'))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+
+// Accepts either verified hard affinity or the exact macOS scheduler policy.
+bool has_official_cpu_execution_policy(const BenchmarkBuildMetadata &build) {
+#if defined(__APPLE__)
+	const bool scheduler_managed_macos =
+			build.runtime_backend == "macos-native" &&
+			build.logical_cpu == "unbound" &&
+			build.cpu_class == "representative" &&
+			build.processor_group == "unsupported" &&
+			build.affinity_requested == "no" &&
+			build.affinity_applied == "no" &&
+			build.affinity_actual_cpu == "unknown" &&
+			build.affinity_error == "unsupported-by-platform-policy";
+	return scheduler_managed_macos;
+#else
+	const bool verified_hard_affinity =
+			build.logical_cpu != "unbound" &&
+			build.logical_cpu != "unknown" &&
+			build.affinity_requested == "yes" &&
+			build.affinity_applied == "yes" &&
+			build.affinity_actual_cpu != "unbound" &&
+			build.affinity_actual_cpu != "unknown" &&
+			build.affinity_error == "none";
+	return verified_hard_affinity;
+#endif
 }
 
 
@@ -99,6 +175,8 @@ void print_usage(const char *program) {
 			<< "  --self-test                Validate datasets, round-trip, determinism and invalid rejection.\n"
 			<< "  --list-cpus                List active logical CPUs and native topology.\n"
 			<< "  --list-datasets            List deterministic dataset names.\n"
+			<< "  --list-candidates          List compiled protocol candidates.\n"
+			<< "  --candidate NAME           Select one candidate; default: reference_fixed_width.\n"
 			<< "  --only NAME                Run only one dataset.\n"
 			<< "  --json PATH                Write the canonical JSON report.\n"
 			<< "  --csv PATH                 Write the summary CSV report.\n"
@@ -112,77 +190,117 @@ void print_usage(const char *program) {
 
 
 // Parses benchmark options while rejecting unknown or incomplete arguments.
-CommandLineOptions parse_options(int argc, char **argv) {
-	CommandLineOptions options;
+bool parse_options(
+		int argc,
+		char **argv,
+		CommandLineOptions &r_options,
+		std::string &r_error) {
 	for (int index = 1; index < argc; ++index) {
 		const std::string_view argument(argv[index]);
-		auto require_value = [&](const char *option) -> const char * {
-			if (index + 1 >= argc) {
-				throw std::runtime_error(std::string(option) + " requires a value");
-			}
-			return argv[++index];
-		};
 		if (argument == "--quick") {
-			options.config = make_quick_benchmark_config();
+			r_options.config = make_quick_benchmark_config();
 		} else if (argument == "--self-test") {
-			options.self_test = true;
+			r_options.self_test = true;
 		} else if (argument == "--list-cpus") {
-			options.list_cpus = true;
+			r_options.list_cpus = true;
 		} else if (argument == "--list-datasets") {
-			options.list_datasets = true;
+			r_options.list_datasets = true;
+		} else if (argument == "--list-candidates") {
+			r_options.list_candidates = true;
+		} else if (argument == "--candidate") {
+			const char *value = nullptr;
+			if (!read_required_value(argc, argv, index, "--candidate", value, r_error)) {
+				return false;
+			}
+			r_options.candidate_name = value;
 		} else if (argument == "--only") {
-			options.only_dataset = require_value("--only");
+			const char *value = nullptr;
+			if (!read_required_value(argc, argv, index, "--only", value, r_error)) {
+				return false;
+			}
+			r_options.only_dataset = value;
 		} else if (argument == "--json" || argument == "--output-json") {
-			options.json_path = require_value("--json");
+			const char *value = nullptr;
+			if (!read_required_value(argc, argv, index, "--json", value, r_error)) {
+				return false;
+			}
+			r_options.json_path = value;
 		} else if (argument == "--csv" || argument == "--output-csv") {
-			options.csv_path = require_value("--csv");
+			const char *value = nullptr;
+			if (!read_required_value(argc, argv, index, "--csv", value, r_error)) {
+				return false;
+			}
+			r_options.csv_path = value;
 		} else if (argument == "--warmup") {
-			const std::uint64_t value = parse_u64(require_value("--warmup"), "--warmup");
-			if (value > std::numeric_limits<std::uint32_t>::max()) {
-				throw std::runtime_error("--warmup exceeds uint32 range");
+			std::uint64_t value = 0;
+			if (!parse_required_u64(argc, argv, index, "--warmup", value, r_error)) {
+				return false;
 			}
-			options.config.warmup_rounds = static_cast<std::uint32_t>(value);
+			if (value > std::numeric_limits<std::uint32_t>::max()) {
+				r_error = "--warmup exceeds uint32 range";
+				return false;
+			}
+			r_options.config.warmup_rounds = static_cast<std::uint32_t>(value);
 		} else if (argument == "--rounds") {
-			const std::uint64_t value = parse_u64(require_value("--rounds"), "--rounds");
-			if (value > std::numeric_limits<std::uint32_t>::max()) {
-				throw std::runtime_error("--rounds exceeds uint32 range");
+			std::uint64_t value = 0;
+			if (!parse_required_u64(argc, argv, index, "--rounds", value, r_error)) {
+				return false;
 			}
-			options.config.measured_rounds = static_cast<std::uint32_t>(value);
+			if (value > std::numeric_limits<std::uint32_t>::max()) {
+				r_error = "--rounds exceeds uint32 range";
+				return false;
+			}
+			r_options.config.measured_rounds = static_cast<std::uint32_t>(value);
 		} else if (argument == "--min-iterations") {
-			// Parses a strict unsigned command-line integer or terminates with context.
-			options.config.minimum_iterations = parse_u64(require_value("--min-iterations"), "--min-iterations");
+			if (!parse_required_u64(
+					argc, argv, index, "--min-iterations",
+					r_options.config.minimum_iterations, r_error)) {
+				return false;
+			}
 		} else if (argument == "--min-sample-ms") {
-			const std::uint64_t value = parse_u64(require_value("--min-sample-ms"), "--min-sample-ms");
+			std::uint64_t value = 0;
+			if (!parse_required_u64(argc, argv, index, "--min-sample-ms", value, r_error)) {
+				return false;
+			}
 			if (value > std::numeric_limits<std::uint64_t>::max() / UINT64_C(1'000'000)) {
-				throw std::runtime_error("--min-sample-ms exceeds nanosecond range");
+				r_error = "--min-sample-ms exceeds nanosecond range";
+				return false;
 			}
-			options.config.minimum_sample_duration_ns = value * UINT64_C(1'000'000);
+			r_options.config.minimum_sample_duration_ns = value * UINT64_C(1'000'000);
 		} else if (argument == "--seed") {
-			// Parses a strict unsigned command-line integer or terminates with context.
-			options.config.random_seed = parse_u64(require_value("--seed"), "--seed");
-		} else if (argument == "--cpu") {
-			const std::uint64_t value = parse_u64(require_value("--cpu"), "--cpu");
-			if (value > std::numeric_limits<std::uint32_t>::max()) {
-				throw std::runtime_error("--cpu exceeds uint32 range");
+			if (!parse_required_u64(
+					argc, argv, index, "--seed",
+					r_options.config.random_seed, r_error)) {
+				return false;
 			}
-			options.logical_cpu = static_cast<std::uint32_t>(value);
+		} else if (argument == "--cpu") {
+			std::uint64_t value = 0;
+			if (!parse_required_u64(argc, argv, index, "--cpu", value, r_error)) {
+				return false;
+			}
+			if (value > std::numeric_limits<std::uint32_t>::max()) {
+				r_error = "--cpu exceeds uint32 range";
+				return false;
+			}
+			r_options.logical_cpu = static_cast<std::uint32_t>(value);
 		} else if (argument == "-h" || argument == "--help") {
-			// Prints standalone benchmark command-line options.
-			print_usage(argv[0]);
-			std::exit(0);
+			r_options.help = true;
 		} else {
-			throw std::runtime_error("unknown option: " + std::string(argument));
+			r_error = "unknown option: " + std::string(argument);
+			return false;
 		}
 	}
-	if (options.config.warmup_rounds == 0 || options.config.measured_rounds == 0 ||
-			options.config.minimum_iterations == 0 || options.config.minimum_sample_duration_ns == 0 ||
-			options.config.random_seed == 0) {
-		throw std::runtime_error("benchmark counts, durations, and seed must be greater than zero");
+	if (r_options.config.warmup_rounds == 0 || r_options.config.measured_rounds == 0 ||
+			r_options.config.minimum_iterations == 0 || r_options.config.minimum_sample_duration_ns == 0 ||
+			r_options.config.random_seed == 0) {
+		r_error = "benchmark counts, durations, and seed must be greater than zero";
+		return false;
 	}
-	if (options.config.minimum_iterations > options.config.maximum_iterations) {
-		throw std::runtime_error("--min-iterations exceeds the benchmark iteration limit");
+	if (r_options.config.minimum_iterations > r_options.config.maximum_iterations) {
+		r_error = "--min-iterations exceeds the benchmark iteration limit";
+		return false;
 	}
-	return options;
+	return true;
 }
 
 
@@ -211,10 +329,11 @@ std::string environment_value(const char *name, const char *fallback = "unknown"
 // Collects compile, source, binary, platform, and CPU provenance.
 BenchmarkBuildMetadata collect_build_metadata(
 		const char *program_path,
-		const BenchmarkAffinityResult &affinity) {
+		const BenchmarkAffinityResult &affinity,
+		const char *precision) {
 	BenchmarkBuildMetadata metadata;
 	metadata.generated_utc = utc_timestamp();
-	metadata.precision = ReferenceFixedWidthCandidate::wire_precision_name();
+	metadata.precision = precision;
 	metadata.runtime_backend = environment_value("TICKSYNC_BENCHMARK_RUNTIME_BACKEND", "native");
 	metadata.device_manufacturer = environment_value("TICKSYNC_BENCHMARK_DEVICE_MANUFACTURER");
 	metadata.device_model = environment_value("TICKSYNC_BENCHMARK_DEVICE_MODEL");
@@ -283,7 +402,7 @@ BenchmarkBuildMetadata collect_build_metadata(
 #elif defined(_WIN32)
 	metadata.platform = "Windows";
 #elif defined(__APPLE__)
-	metadata.platform = "Apple";
+	metadata.platform = "macOS";
 #else
 	metadata.platform = "unknown";
 #endif
@@ -291,8 +410,13 @@ BenchmarkBuildMetadata collect_build_metadata(
 }
 
 
-// Runs correctness gates without measuring performance.
+template <typename Candidate>
+// Runs correctness, canonical-size, bounds, and atomic-failure gates.
 bool run_self_test(const std::vector<BenchmarkDataset> &datasets) {
+	if (!benchmark_wire_scalar_contract_self_test()) {
+		std::cerr << "self-test failed selected-precision scalar contract\n";
+		return false;
+	}
 	std::uint64_t message_count = 0;
 	std::vector<std::vector<std::uint8_t>> all_valid;
 	for (const BenchmarkDataset &dataset : datasets) {
@@ -301,34 +425,97 @@ bool run_self_test(const std::vector<BenchmarkDataset> &datasets) {
 			return false;
 		}
 		message_count += dataset.messages.size();
+		bool retained_dataset_packet = false;
 		for (const BenchmarkMessage &message : dataset.messages) {
 			std::vector<std::uint8_t> first;
 			std::vector<std::uint8_t> second;
 			BenchmarkMessage decoded;
-			if (!ReferenceFixedWidthCandidate::encode(message, first) ||
-					!ReferenceFixedWidthCandidate::encode(message, second) || first != second ||
-					ReferenceFixedWidthCandidate::decode(make_byte_view(first), decoded) != CandidateDecodeError::OK ||
-					!ReferenceFixedWidthCandidate::equivalent_for_wire(message, decoded)) {
+			if (!Candidate::encode(message, first) ||
+					!Candidate::encode(message, second) || first != second ||
+					first.size() != Candidate::estimate_encoded_size(message) ||
+					Candidate::decode(make_byte_view(first), decoded) != CandidateDecodeError::OK ||
+					!Candidate::equivalent_for_wire(message, decoded) ||
+					Candidate::semantic_hash_for_wire(message) != Candidate::semantic_hash_for_wire(decoded)) {
 				std::cerr << "self-test failed in dataset: " << dataset.name << '\n';
 				return false;
 			}
-			if (all_valid.size() < 32) {
+			if (!retained_dataset_packet) {
 				all_valid.push_back(std::move(first));
+				retained_dataset_packet = true;
 			}
 		}
 	}
-	const std::vector<std::vector<std::uint8_t>> invalid = detail::make_invalid_packets(all_valid);
-	BenchmarkMessage decoded;
-	for (const std::vector<std::uint8_t> &packet : invalid) {
-		if (ReferenceFixedWidthCandidate::decode(make_byte_view(packet), decoded) == CandidateDecodeError::OK) {
-			std::cerr << "self-test accepted an invalid packet\n";
+	const std::vector<CandidateInvalidPacket> invalid = detail::make_invalid_packets<Candidate>(all_valid);
+	const BenchmarkMessage sentinel = datasets.front().messages.front();
+	for (const CandidateInvalidPacket &packet : invalid) {
+		BenchmarkMessage decoded = sentinel;
+		const CandidateDecodeError error = Candidate::decode(make_byte_view(packet.bytes), decoded);
+		if (error != packet.expected_error) {
+			std::cerr << "self-test malformed error mismatch: " << packet.name << '\n';
+			return false;
+		}
+		if (!Candidate::equivalent_for_wire(sentinel, decoded)) {
+			std::cerr << "self-test observed partial decode mutation: " << packet.name << '\n';
 			return false;
 		}
 	}
+	const std::vector<std::uint8_t> output_sentinel = { 0xA5 };
+	std::vector<std::uint8_t> rejected_output = output_sentinel;
+	BenchmarkMessage invalid_semantics = sentinel;
+	invalid_semantics.entities.push_back(BenchmarkEntityState{});
+	if (Candidate::encode(invalid_semantics, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded entities in a control message or mutated output\n";
+		return false;
+	}
+	invalid_semantics = sentinel;
+	invalid_semantics.blob.push_back(0x01);
+	if (Candidate::encode(invalid_semantics, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded a blob in a control message or mutated output\n";
+		return false;
+	}
+	invalid_semantics = sentinel;
+	invalid_semantics.axes[0] = 1;
+	if (Candidate::encode(invalid_semantics, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded axes in a control message or mutated output\n";
+		return false;
+	}
+	invalid_semantics = BenchmarkMessage{};
+	invalid_semantics.kind = BenchmarkMessageKind::SNAPSHOT;
+	invalid_semantics.buttons = 1;
+	if (Candidate::encode(invalid_semantics, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded buttons in a snapshot or mutated output\n";
+		return false;
+	}
+	invalid_semantics.buttons = 0;
+	invalid_semantics.axes[0] = 1;
+	if (Candidate::encode(invalid_semantics, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded axes in a snapshot or mutated output\n";
+		return false;
+	}
+	invalid_semantics = BenchmarkMessage{};
+	invalid_semantics.kind = static_cast<BenchmarkMessageKind>(0xFF);
+	if (Candidate::encode(invalid_semantics, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded an unknown kind or mutated output\n";
+		return false;
+	}
+	BenchmarkMessage excessive_blob;
+	excessive_blob.kind = BenchmarkMessageKind::PLAYER_INPUT;
+	excessive_blob.blob.resize(static_cast<std::size_t>(Candidate::MAX_BLOB_SIZE) + 1U);
+	if (Candidate::encode(excessive_blob, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded an excessive blob or mutated output\n";
+		return false;
+	}
+	BenchmarkMessage excessive_entities;
+	excessive_entities.kind = BenchmarkMessageKind::SNAPSHOT;
+	excessive_entities.entities.resize(static_cast<std::size_t>(Candidate::MAX_ENTITIES) + 1U);
+	if (Candidate::encode(excessive_entities, rejected_output) || rejected_output != output_sentinel) {
+		std::cerr << "self-test encoded an excessive entity count or mutated output\n";
+		return false;
+	}
 	std::cout << "TICKSYNCHRONIZER_BENCHMARK_SELF_TEST_OK suite="
 			<< version::BENCHMARK_SUITE_VERSION
-			<< " candidate=" << ReferenceFixedWidthCandidate::info().name
-			<< " precision=" << ReferenceFixedWidthCandidate::wire_precision_name()
+			<< " candidate=" << Candidate::info().name
+			<< " precision=" << Candidate::wire_precision_name()
 			<< " datasets=" << datasets.size()
 			<< " messages=" << message_count
 			<< " invalid=" << invalid.size() << '\n';
@@ -337,10 +524,10 @@ bool run_self_test(const std::vector<BenchmarkDataset> &datasets) {
 
 
 // Prints one stable, tab-separated topology row per active logical CPU.
-void print_cpu_topology() {
+bool print_cpu_topology() {
 	const std::vector<BenchmarkLogicalCpuInfo> cpus = list_benchmark_logical_cpus();
 	if (cpus.empty()) {
-		throw std::runtime_error("native logical CPU topology is unavailable");
+		return false;
 	}
 	std::cout << "logical_cpu\tprocessor_group\tprocessor_number\tcore\tpackage\tnuma"
 			  "\tl3_id\tl3_size\tthread_siblings\n";
@@ -355,6 +542,7 @@ void print_cpu_topology() {
 				<< cpu.l3_cache_size << '\t'
 				<< cpu.thread_siblings << '\n';
 	}
+	return true;
 }
 
 
@@ -380,99 +568,150 @@ void print_console_summary(const ProtocolBenchmarkReport &report) {
 			<< " accepted=" << report.invalid_packets.accepted << '\n';
 }
 
+
+// Prints one stable command failure and returns the process failure status.
+int report_error(const std::string &p_error) {
+	std::cerr << "ERROR: " << p_error << '\n';
+	return 1;
+}
+
+
+template <typename Candidate>
+// Executes one selected candidate and writes at most one JSON/CSV report pair.
+int run_candidate_benchmark(
+		const CommandLineOptions &options,
+		const std::vector<BenchmarkDataset> &datasets,
+		const BenchmarkAffinityResult &affinity,
+		const char *program_path) {
+	const ProtocolCandidateInfo candidate = Candidate::info();
+	ProtocolBenchmarkReport report;
+	report.benchmark_suite_version = tick_synchronizer::version::BENCHMARK_SUITE_VERSION;
+	report.api_version = tick_synchronizer::version::API_VERSION;
+	report.wire_protocol_version = tick_synchronizer::version::WIRE_PROTOCOL_VERSION;
+	report.wire_protocol_revision = tick_synchronizer::version::WIRE_PROTOCOL_REVISION;
+	report.candidate_id = candidate.id;
+	report.candidate_name = std::string(candidate.name);
+	report.candidate_description = std::string(candidate.description);
+	// Collects compile, source, binary, platform, and CPU provenance.
+	report.build = collect_build_metadata(program_path, affinity, Candidate::wire_precision_name());
+	report.config = options.config;
+	report.official_eligible = is_official_benchmark_config(report.config) &&
+			options.only_dataset.empty() &&
+			report.build.source_state == "clean" &&
+			is_lower_hex_sha1(report.build.module_commit) &&
+			report.build.godot_commit == QUALIFICATION_GODOT_COMMIT &&
+			has_official_cpu_execution_policy(report.build);
+	report.datasets.reserve(datasets.size());
+	for (const BenchmarkDataset &dataset : datasets) {
+		DatasetBenchmarkResult result;
+		const BenchmarkRunError run_error = run_dataset_benchmark<Candidate>(
+				dataset, options.config, result);
+		if (run_error != BenchmarkRunError::OK) {
+			return report_error(
+					std::string(benchmark_run_error_message(run_error)) + ": " + dataset.name);
+		}
+		if (result.integrity.round_trip_failures != 0 || result.integrity.determinism_failures != 0) {
+			return report_error("integrity gate failed for dataset: " + dataset.name);
+		}
+		report.datasets.push_back(std::move(result));
+	}
+	const BenchmarkRunError invalid_error = run_invalid_packet_benchmark<Candidate>(
+			datasets, options.config, report.invalid_packets);
+	if (invalid_error != BenchmarkRunError::OK) {
+		return report_error(benchmark_run_error_message(invalid_error));
+	}
+	if (report.invalid_packets.accepted != 0) {
+		return report_error("candidate accepted invalid packets");
+	}
+	// Prints a compact human-readable summary after report generation.
+	print_console_summary(report);
+	if (!options.json_path.empty() && !write_json_report_file(report, options.json_path)) {
+		return report_error("failed to write JSON report: " + options.json_path);
+	}
+	if (!options.csv_path.empty() && !write_csv_report_file(report, options.csv_path)) {
+		return report_error("failed to write CSV report: " + options.csv_path);
+	}
+	std::cout << "TICKSYNCHRONIZER_PROTOCOL_BENCHMARK_OK suite="
+			<< report.benchmark_suite_version
+			<< " candidate=" << report.candidate_name
+			<< " precision=" << report.build.precision
+			<< " datasets=" << report.datasets.size() << '\n';
+	return 0;
+}
+
 } // namespace
 } // namespace tick_synchronizer::benchmarks
 
 int main(int argc, char **argv) {
 	using namespace tick_synchronizer::benchmarks;
-	try {
-		// Parses benchmark options while rejecting unknown or incomplete arguments.
-		const CommandLineOptions options = parse_options(argc, argv);
-		if (options.config.suite_version != tick_synchronizer::version::BENCHMARK_SUITE_VERSION) {
-			throw std::runtime_error("benchmark suite version mismatch between config and version contract");
-		}
-		if (options.list_cpus) {
-			// Prints one stable, tab-separated topology row per active logical CPU.
-			print_cpu_topology();
-			return 0;
-		}
-		std::vector<BenchmarkDataset> datasets = make_protocol_benchmark_datasets(options.config.random_seed);
-		if (options.list_datasets) {
-			for (const BenchmarkDataset &dataset : datasets) {
-				std::cout << dataset.name << "\t" << dataset.description << '\n';
-			}
-			return 0;
-		}
-		if (!options.only_dataset.empty()) {
-			const BenchmarkDataset *selected = find_benchmark_dataset(datasets, options.only_dataset);
-			if (selected == nullptr) {
-				throw std::runtime_error("unknown dataset: " + options.only_dataset);
-			}
-			datasets = { *selected };
-		}
-		if (options.self_test) {
-			// Runs correctness gates without measuring performance.
-			return run_self_test(datasets) ? 0 : 1;
-		}
-
-		BenchmarkAffinityResult affinity;
-		if (options.logical_cpu.has_value()) {
-			affinity = apply_benchmark_thread_affinity(*options.logical_cpu);
-			if (!affinity.applied) {
-				throw std::runtime_error("failed to apply CPU affinity: " + affinity.error);
-			}
-		}
-
-		const ProtocolCandidateInfo candidate = ReferenceFixedWidthCandidate::info();
-		ProtocolBenchmarkReport report;
-		report.benchmark_suite_version = tick_synchronizer::version::BENCHMARK_SUITE_VERSION;
-		report.api_version = tick_synchronizer::version::API_VERSION;
-		report.wire_protocol_version = tick_synchronizer::version::WIRE_PROTOCOL_VERSION;
-		report.wire_protocol_revision = tick_synchronizer::version::WIRE_PROTOCOL_REVISION;
-		report.candidate_id = candidate.id;
-		report.candidate_name = std::string(candidate.name);
-		report.candidate_description = std::string(candidate.description);
-		// Collects compile, source, binary, platform, and CPU provenance.
-		report.build = collect_build_metadata(argv[0], affinity);
-		report.config = options.config;
-		report.official_eligible = is_official_benchmark_config(report.config) &&
-				options.only_dataset.empty() &&
-				report.build.source_state == "clean" &&
-				is_lower_hex_sha1(report.build.module_commit) &&
-				report.build.godot_commit == QUALIFICATION_GODOT_COMMIT &&
-				report.build.affinity_requested == "yes" &&
-				report.build.affinity_applied == "yes" &&
-				report.build.affinity_actual_cpu != "unbound" &&
-				report.build.affinity_actual_cpu != "unknown" &&
-				report.build.affinity_error == "none";
-		report.datasets.reserve(datasets.size());
-		for (const BenchmarkDataset &dataset : datasets) {
-			DatasetBenchmarkResult result = run_dataset_benchmark<ReferenceFixedWidthCandidate>(dataset, options.config);
-			if (result.integrity.round_trip_failures != 0 || result.integrity.determinism_failures != 0) {
-				throw std::runtime_error("integrity gate failed for dataset: " + dataset.name);
-			}
-			report.datasets.push_back(std::move(result));
-		}
-		report.invalid_packets = run_invalid_packet_benchmark<ReferenceFixedWidthCandidate>(datasets, options.config);
-		if (report.invalid_packets.accepted != 0) {
-			throw std::runtime_error("candidate accepted invalid packets");
-		}
-		// Prints a compact human-readable summary after report generation.
-		print_console_summary(report);
-		if (!options.json_path.empty() && !write_json_report_file(report, options.json_path)) {
-			throw std::runtime_error("failed to write JSON report: " + options.json_path);
-		}
-		if (!options.csv_path.empty() && !write_csv_report_file(report, options.csv_path)) {
-			throw std::runtime_error("failed to write CSV report: " + options.csv_path);
-		}
-		std::cout << "TICKSYNCHRONIZER_PROTOCOL_BENCHMARK_OK suite="
-				<< report.benchmark_suite_version
-				<< " candidate=" << report.candidate_name
-				<< " precision=" << report.build.precision
-				<< " datasets=" << report.datasets.size() << '\n';
-		return 0;
-	} catch (const std::exception &error) {
-		std::cerr << "ERROR: " << error.what() << '\n';
-		return 1;
+	CommandLineOptions options;
+	std::string error;
+	if (!parse_options(argc, argv, options, error)) {
+		return report_error(error);
 	}
+	if (options.help) {
+		// Prints standalone benchmark command-line options.
+		print_usage(argv[0]);
+		return 0;
+	}
+	if (options.config.suite_version != tick_synchronizer::version::BENCHMARK_SUITE_VERSION) {
+		return report_error("benchmark suite version mismatch between config and version contract");
+	}
+	if (options.list_candidates) {
+		const ProtocolCandidateInfo candidates[] = {
+			ReferenceFixedWidthCandidate::info(),
+			VarintZigZagFixedFloatCandidate::info(),
+		};
+		for (const ProtocolCandidateInfo &candidate : candidates) {
+			std::cout << candidate.id << "\t" << candidate.name << "\t" << candidate.description << '\n';
+		}
+		return 0;
+	}
+	const std::string_view selected_candidate(options.candidate_name);
+	const bool reference_selected =
+			selected_candidate == ReferenceFixedWidthCandidate::info().name;
+	const bool varint_selected =
+			selected_candidate == VarintZigZagFixedFloatCandidate::info().name;
+	if (!reference_selected && !varint_selected) {
+		return report_error("unknown candidate: " + options.candidate_name);
+	}
+	if (options.list_cpus) {
+		// Prints one stable, tab-separated topology row per active logical CPU.
+		return print_cpu_topology() ? 0 : report_error("native logical CPU topology is unavailable");
+	}
+	std::vector<BenchmarkDataset> datasets = make_protocol_benchmark_datasets(options.config.random_seed);
+	if (options.list_datasets) {
+		for (const BenchmarkDataset &dataset : datasets) {
+			std::cout << dataset.name << "\t" << dataset.description << '\n';
+		}
+		return 0;
+	}
+	if (!options.only_dataset.empty()) {
+		const BenchmarkDataset *selected = find_benchmark_dataset(datasets, options.only_dataset);
+		if (selected == nullptr) {
+			return report_error("unknown dataset: " + options.only_dataset);
+		}
+		datasets = { *selected };
+	}
+	if (options.self_test) {
+		if (reference_selected) {
+			return run_self_test<ReferenceFixedWidthCandidate>(datasets) ? 0 : 1;
+		}
+		return run_self_test<VarintZigZagFixedFloatCandidate>(datasets) ? 0 : 1;
+	}
+
+	BenchmarkAffinityResult affinity = make_benchmark_platform_affinity_state();
+	if (options.logical_cpu.has_value()) {
+		affinity = apply_benchmark_thread_affinity(*options.logical_cpu);
+		if (!affinity.applied) {
+			return report_error("failed to apply CPU affinity: " + affinity.error);
+		}
+	}
+
+	if (reference_selected) {
+		return run_candidate_benchmark<ReferenceFixedWidthCandidate>(
+				options, datasets, affinity, argv[0]);
+	}
+	return run_candidate_benchmark<VarintZigZagFixedFloatCandidate>(
+			options, datasets, affinity, argv[0]);
 }

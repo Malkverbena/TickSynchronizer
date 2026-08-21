@@ -142,9 +142,11 @@ run_wine_self_test() {
         return 0
     fi
 
-    log "Running Windows self-test through Wine: $(basename -- "$binary")"
-    WINEDEBUG=-all "$wine_bin" "$binary" --self-test || \
-        fail "Windows benchmark self-test failed under Wine: $binary"
+    log "Running Windows self-tests through Wine: $(basename -- "$binary")"
+    WINEDEBUG=-all "$wine_bin" "$binary" --self-test --candidate reference_fixed_width || \
+        fail "Windows reference self-test failed under Wine: $binary"
+    WINEDEBUG=-all "$wine_bin" "$binary" --self-test --candidate varint_zigzag_fixed_float || \
+        fail "Windows varint self-test failed under Wine: $binary"
 }
 
 build_one() {

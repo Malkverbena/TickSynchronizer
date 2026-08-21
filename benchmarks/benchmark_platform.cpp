@@ -1,5 +1,5 @@
-// Implements CPU affinity for Linux, Android, and Windows benchmark hosts.
-// Verifies the selected processor before any measured benchmark operation begins.
+// Implements benchmark CPU policy for Linux, Android, Windows, and macOS hosts.
+// Verifies hard affinity where supported and marks macOS as scheduler-managed.
 
 #include "benchmark_platform.h"
 
@@ -310,6 +310,7 @@ std::string errno_message(const char *operation) {
 }
 #endif
 
+#if defined(_WIN32) || defined(__linux__) || defined(__ANDROID__)
 void copy_topology_to_affinity(
 		BenchmarkAffinityResult &affinity,
 		const BenchmarkLogicalCpuInfo &cpu) {
@@ -319,8 +320,26 @@ void copy_topology_to_affinity(
 	affinity.l3_cache_id = cpu.l3_cache_id;
 	affinity.thread_siblings = cpu.thread_siblings;
 }
+#endif
 
 } // namespace
+
+
+BenchmarkAffinityResult make_benchmark_platform_affinity_state() {
+	BenchmarkAffinityResult result;
+#if defined(__APPLE__)
+	result.processor_group = "unsupported";
+	result.actual_cpu = "unknown";
+	result.cpu_core = "unsupported-by-platform-policy";
+	result.cpu_package = "unsupported-by-platform-policy";
+	result.numa_node = "unsupported-by-platform-policy";
+	result.l3_cache_id = "unsupported-by-platform-policy";
+	result.thread_siblings = "unsupported-by-platform-policy";
+	result.error = "unsupported-by-platform-policy";
+#endif
+	return result;
+}
+
 
 std::vector<BenchmarkLogicalCpuInfo> list_benchmark_logical_cpus() {
 #if defined(_WIN32)

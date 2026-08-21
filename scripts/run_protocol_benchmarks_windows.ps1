@@ -4,6 +4,8 @@
 param(
     [ValidateSet("single", "double", "all")]
     [string]$Precision = "double",
+    [ValidateSet("reference_fixed_width", "varint_zigzag_fixed_float", "all")]
+    [string]$Candidate = "all",
     [int]$Cpu = -1,
     [ValidateNotNullOrEmpty()]
     [string]$CpuClass = "desktop",
@@ -40,16 +42,17 @@ function Assert-PackageIntegrity {
     Write-Host "TICKSYNCHRONIZER_BENCHMARK_PACKAGE_INTEGRITY_OK platform=windows"
 }
 
-function Assert-Report([string]$JsonPath, [string]$BinaryHash) {
+function Assert-Report([string]$JsonPath, [string]$BinaryHash, [string]$ExpectedCandidate) {
     $Report = Get-Content -Raw -Encoding UTF8 $JsonPath | ConvertFrom-Json
 
     if ($Report.schema_version -ne 3) { throw "Unexpected report schema: $($Report.schema_version)" }
-    if ($Report.benchmark_suite_version -ne 1) { throw "Unexpected benchmark suite: $($Report.benchmark_suite_version)" }
+    if ($Report.benchmark_suite_version -ne 2) { throw "Unexpected benchmark suite: $($Report.benchmark_suite_version)" }
     if ($Report.api_version -ne 4) { throw "Unexpected public API version: $($Report.api_version)" }
     if ($Report.wire_protocol_version -ne 0 -or $Report.wire_protocol_revision -ne 2) {
         throw "Unexpected experimental wire contract"
     }
     if ($Report.build.runtime_backend -ne "windows-native") { throw "Report is not from the Windows native backend" }
+    if ($Report.candidate.name -ne $ExpectedCandidate) { throw "Unexpected candidate: $($Report.candidate.name)" }
     if ($Report.build.binary_sha256.ToLowerInvariant() -ne $BinaryHash) { throw "Report binary hash does not match the executable" }
     if ($Report.build.affinity_requested -ne "yes" -or $Report.build.affinity_applied -ne "yes") {
         throw "Requested CPU affinity was not applied: $($Report.build.affinity_error)"
@@ -69,7 +72,7 @@ function Assert-Report([string]$JsonPath, [string]$BinaryHash) {
     if (-not $Quick -and -not $AllowDirty -and -not $Report.official_eligible) {
         throw "Report is not eligible for official comparison"
     }
-    if ($Report.datasets.Count -ne 7) { throw "Unexpected dataset count: $($Report.datasets.Count)" }
+    if ($Report.datasets.Count -ne 8) { throw "Unexpected dataset count: $($Report.datasets.Count)" }
 
     foreach ($Dataset in $Report.datasets) {
         if ($Dataset.integrity.round_trip_failures -ne 0) { throw "$($Dataset.name): round-trip failure" }
@@ -106,13 +109,13 @@ function Show-Cpus {
     Write-Host "Use hardware documentation before assigning architecture-specific CPU-class labels."
 }
 
-function Run-One([string]$SelectedPrecision) {
+function Run-One([string]$SelectedPrecision, [string]$SelectedCandidate) {
     $Binary = Join-Path $ScriptDir "tick_synchronizer_protocol_benchmark.$SelectedPrecision.exe"
     if (-not (Test-Path $Binary)) { throw "Benchmark binary not found: $Binary" }
 
     $Topology = @(& $Binary --list-cpus)
     if ($LASTEXITCODE -ne 0) { throw "Native CPU topology discovery failed: $Binary" }
-    & $Binary --self-test
+    & $Binary --self-test --candidate $SelectedCandidate
     if ($LASTEXITCODE -ne 0) { throw "Benchmark self-test failed: $Binary" }
 
     $System = Get-CimInstance Win32_ComputerSystem
@@ -122,7 +125,7 @@ function Run-One([string]$SelectedPrecision) {
     $DeviceSlug = (($System.Manufacturer + "-" + $System.Model).ToLowerInvariant() -replace '[^a-z0-9]+','-').Trim('-')
     $CpuClassSlug = ($CpuClass.ToLowerInvariant() -replace '[^a-z0-9]+','-').Trim('-')
     if (-not $CpuClassSlug) { $CpuClassSlug = "unspecified" }
-    $ReportDir = Join-Path $OutputDir "$Timestamp-windows-$DeviceSlug-$CpuClassSlug-cpu$Cpu-$SelectedPrecision-suite1"
+    $ReportDir = Join-Path $OutputDir "$Timestamp-windows-$DeviceSlug-$CpuClassSlug-cpu$Cpu-$SelectedCandidate-$SelectedPrecision-suite2"
     New-Item -ItemType Directory -Force -Path $ReportDir | Out-Null
     $Json = Join-Path $ReportDir "results.json"
     $Csv = Join-Path $ReportDir "results.csv"
@@ -135,7 +138,7 @@ function Run-One([string]$SelectedPrecision) {
     $env:TICKSYNC_BENCHMARK_OS_VERSION = [string]$OperatingSystem.Caption
     $env:TICKSYNC_BENCHMARK_OS_BUILD = [string]$OperatingSystem.BuildNumber
     $env:TICKSYNC_BENCHMARK_SOC_MODEL = [string]$Processor.Name
-    $env:TICKSYNC_BENCHMARK_EXECUTABLE_PATH = (Resolve-Path $Binary).Path
+    $env:TICKSYNC_BENCHMARK_EXECUTABLE_PATH = [System.IO.Path]::GetFileName($Binary)
     $env:TICKSYNC_BENCHMARK_BINARY_SHA256 = $Hash
     $env:TICKSYNC_BENCHMARK_CPU_MODEL = [string]$Processor.Name
     $env:TICKSYNC_BENCHMARK_CPU_CLASS = $CpuClass
@@ -153,14 +156,14 @@ function Run-One([string]$SelectedPrecision) {
     $env:TICKSYNC_BENCHMARK_CPU_MIN_FREQUENCY_KHZ = "unknown"
     $env:TICKSYNC_BENCHMARK_CPU_MAX_FREQUENCY_KHZ = ([int64]$Processor.MaxClockSpeed * 1000).ToString()
 
-    $Arguments = @("--json", $Json, "--csv", $Csv, "--cpu", $Cpu.ToString())
+    $Arguments = @("--candidate", $SelectedCandidate, "--json", $Json, "--csv", $Csv, "--cpu", $Cpu.ToString())
     if ($Quick) { $Arguments += "--quick" }
     if ($BenchmarkArguments) { $Arguments += $BenchmarkArguments }
 
     & $Binary @Arguments 2>&1 | Tee-Object -FilePath $Log
     if ($LASTEXITCODE -ne 0) { throw "Windows benchmark execution failed" }
 
-    $Report = Assert-Report $Json $Hash
+    $Report = Assert-Report $Json $Hash $SelectedCandidate
 
     $EnvironmentLines = @(
         "Generated UTC: $([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))",
@@ -178,7 +181,8 @@ function Run-One([string]$SelectedPrecision) {
         "L3 cache id: $($Report.build.l3_cache_id)",
         "Thread siblings: $($Report.build.thread_siblings)",
         "Precision: $SelectedPrecision",
-        "Binary: $Binary",
+        "Candidate: $SelectedCandidate",
+        "Binary: $([System.IO.Path]::GetFileName($Binary))",
         "Binary SHA-256: $Hash",
         "Module commit embedded at cross-build: $($Report.build.module_commit)",
         "Source state embedded at cross-build: $($Report.build.source_state)",
@@ -197,7 +201,16 @@ function Run-One([string]$SelectedPrecision) {
         "$FileHash  $($_.Name)"
     } | Set-Content -Encoding ASCII (Join-Path $ReportDir "SHA256SUMS.txt")
 
-    Write-Host "TICKSYNCHRONIZER_WINDOWS_BENCHMARK_REPORT_OK precision=$SelectedPrecision cpu=$Cpu official=$($Report.official_eligible) report=$ReportDir"
+    Write-Host "TICKSYNCHRONIZER_WINDOWS_BENCHMARK_REPORT_OK candidate=$SelectedCandidate precision=$SelectedPrecision cpu=$Cpu official=$($Report.official_eligible) report=$ReportDir"
+}
+
+function Run-Precision([string]$SelectedPrecision) {
+    if ($Candidate -eq "all") {
+        Run-One $SelectedPrecision "reference_fixed_width"
+        Run-One $SelectedPrecision "varint_zigzag_fixed_float"
+    } else {
+        Run-One $SelectedPrecision $Candidate
+    }
 }
 
 Assert-PackageIntegrity
@@ -210,8 +223,8 @@ if ($Cpu -lt 0) { throw "-Cpu N is required so the native executable can verify 
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 if ($Precision -eq "all") {
-    Run-One "double"
-    Run-One "single"
+    Run-Precision "double"
+    Run-Precision "single"
 } else {
-    Run-One $Precision
+    Run-Precision $Precision
 }

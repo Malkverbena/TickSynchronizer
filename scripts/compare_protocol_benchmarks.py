@@ -26,7 +26,7 @@ def load(path: Path, allow_preliminary: bool) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     expected_contract = {
         "schema_version": 3,
-        "benchmark_suite_version": 1,
+        "benchmark_suite_version": 2,
         "api_version": 4,
         "wire_protocol_version": 0,
         "wire_protocol_revision": 2,
@@ -182,7 +182,7 @@ def self_test() -> None:
     def make_report(precision: str, os_build: str, logical_cpu: str) -> dict:
         return {
             "schema_version": 3,
-            "benchmark_suite_version": 1,
+            "benchmark_suite_version": 2,
             "api_version": 4,
             "wire_protocol_version": 0,
             "wire_protocol_revision": 2,
@@ -222,7 +222,7 @@ def self_test() -> None:
     for folder in ("win11-double", "win10-double", "win11-single", "win10-single"):
         if folder not in rendered:
             raise ComparisonError(f"self-test lost report identity: {folder}")
-    print("TICKSYNCHRONIZER_BENCHMARK_COMPARATOR_SELF_TEST_OK schema=3 suite=1")
+    print("TICKSYNCHRONIZER_BENCHMARK_COMPARATOR_SELF_TEST_OK schema=3 suite=2")
 
 
 def main() -> None:
