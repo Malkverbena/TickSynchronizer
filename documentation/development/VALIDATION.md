@@ -205,6 +205,30 @@ acceptance remains historical evidence. The current suite 2 normal matrix,
 standalone sanitizer evidence, and fresh integrated ASAN and UBSAN matrix are
 complete. The clean-tree cross-platform qualification matrix remains pending.
 
+## Suite 2 clean package preparation
+
+The first execution-package preparation from the accepted clean source commit
+validated the Linux package. Both Windows precisions also cross-compiled, and
+both candidates passed their Wine self-tests. Windows package export then
+correctly rejected the PE-header inspection sidecar because the object
+inspector had included the absolute build-host binary path in its heading.
+This was a package-provenance defect, not a benchmark compile, correctness, or
+runtime failure; no Windows package from that attempt is qualification
+evidence.
+
+The Windows cross-build now runs the object inspector from the binary directory
+and supplies only the binary basename. The source-consistency gate requires
+that invocation form and rejects a direct build-host path operand. Package
+privacy validation remains unchanged and continues to reject any actual path
+leak. Official Linux and Windows packages must use the clean commit containing
+this correction because exact module build matching is required.
+
+The same preparation attempt did not start the Android build because the pinned
+Android NDK r28b (`28.1.13356709`) was unavailable on the permitted build-host
+paths. That is an infrastructure prerequisite, not module test evidence. No
+official benchmark measurement was executed during package preparation, and
+macOS remained deferred.
+
 ## Retiring external sanitizer rules
 
 Each Godot 4.7.1 source-scoped or function-specific rule must be removed when

@@ -113,11 +113,19 @@ inspect_pe_binary() {
     fi
 
     if [[ -n "$OBJDUMP_BIN" ]]; then
-        local headers
+        local binary_dir binary_name headers
+        binary_dir="$(cd -- "$(dirname -- "$binary")" && pwd -P)"
+        binary_name="$(basename -- "$binary")"
         if [[ "$(basename -- "$OBJDUMP_BIN")" == "llvm-objdump" ]]; then
-            headers="$($OBJDUMP_BIN --private-headers "$binary" 2>/dev/null || true)"
+            headers="$(
+                cd -- "$binary_dir"
+                "$OBJDUMP_BIN" --private-headers "$binary_name" 2>/dev/null || true
+            )"
         else
-            headers="$($OBJDUMP_BIN -p "$binary" 2>/dev/null || true)"
+            headers="$(
+                cd -- "$binary_dir"
+                "$OBJDUMP_BIN" -p "$binary_name" 2>/dev/null || true
+            )"
         fi
         printf '%s\n' "$headers" > "${binary}.pe-headers.txt"
         if grep -Eiq 'DLL Name:.*(libstdc\+\+|libgcc|libwinpthread|libc\+\+|libunwind).*\.dll' <<<"$headers"; then

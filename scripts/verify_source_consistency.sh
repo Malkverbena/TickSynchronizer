@@ -590,6 +590,21 @@ for token in ("platform=windows", "x86_64-w64-mingw32", "windows/x86_64", "mingw
     if token not in benchmark_windows_build:
         errors.append(f"incomplete Linux-to-Windows cross-build backend: {token}")
 for token in (
+    'binary_dir="$(cd -- "$(dirname -- "$binary")" && pwd -P)"',
+    'binary_name="$(basename -- "$binary")"',
+    'cd -- "$binary_dir"',
+    '"$OBJDUMP_BIN" --private-headers "$binary_name"',
+    '"$OBJDUMP_BIN" -p "$binary_name"',
+):
+    if token not in benchmark_windows_build:
+        errors.append(f"Windows PE inspection must use a privacy-safe binary basename: {token}")
+for forbidden in (
+    '"$OBJDUMP_BIN" --private-headers "$binary"',
+    '"$OBJDUMP_BIN" -p "$binary"',
+):
+    if forbidden in benchmark_windows_build:
+        errors.append(f"Windows PE inspection exposes the build-host binary path: {forbidden}")
+for token in (
     "Get-CimInstance", "--cpu", "ConvertFrom-Json", "Get-FileHash",
     "official_eligible", "--self-test", "--list-cpus", "CpuClass",
     "l3_cache_id", "PACKAGE_INTEGRITY_OK",
