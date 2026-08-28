@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; source-qualification statement amended by ADR 0040.
 
 ## Context
 
@@ -24,8 +24,9 @@ otherwise compatible peer and is stored in handshake actions and established
 session metadata for the future session layer to log.
 
 Module build, game build, schema, precision, API, wire, and required capability
-mismatches remain fatal. Source qualification continues to require the exact
-unmodified Godot baseline commit; only peer connection compatibility changes.
+mismatches remain fatal. ADR 0040 later separates the qualified validation
+baseline from the broader Godot 4.4+ build range; peer connection compatibility
+still uses the canonical complete Godot version defined here.
 
 This incompatible experimental layout advances wire protocol 0 from revision 1
 to revision 2 and HELLO/HELLO_ACK payload version 3 to 4. This decision amends only the Godot

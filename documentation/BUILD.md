@@ -33,16 +33,27 @@ flowchart LR
     SCons --> Release[template_release]
 ```
 
-## Baseline checks
+## Compatibility checks
 
 The build scripts verify:
 
-- Godot `4.7.1-stable` and the exact `GODOT_COMMIT`;
+- Godot 4.x at version 4.4.0 or newer, read from `version.py` without executing
+  it;
 - a clean engine source tree unless explicitly overridden for diagnosis;
 - in the in-tree layout, changes under `modules/tick_synchronizer` are treated as module sources while all other engine changes remain forbidden;
 - the central version contract;
 - source, binding, XML, test, manifest, and documentation consistency;
 - the requested precision and artifact identity.
+
+Run the standalone compatibility preflight with:
+
+```bash
+./scripts/verify_godot_baseline.sh --godot-dir ../godot
+```
+
+Despite its historical filename, this script verifies the supported range and
+reports whether the live tree matches the qualified `GODOT_VERSION` and
+`GODOT_COMMIT`; a supported different commit is not an error.
 
 ## Version queries
 
@@ -61,6 +72,12 @@ Fast editor cycle:
 
 ```bash
 ./scripts/build_and_validate.sh --mode quick --precision double --jobs 45
+```
+
+Compatibility and input preflight without compilation:
+
+```bash
+./scripts/build_and_validate.sh --preflight-only --godot-dir ../godot
 ```
 
 Complete matrix:
@@ -122,13 +139,25 @@ unrelated bounds and alignment controls. Accepted validation requires the full
 editor smoke in both precisions; `--no-smoke` and suppression-disable options
 are diagnostic only.
 
+Because these suppressions describe external diagnostics from one engine
+source, the sanitizer wrapper requires the exact qualified Godot version and
+commit. Other supported Godot 4.x versions may use the normal build path but
+need a separate sanitizer review before their results can become accepted
+evidence.
+
 The `all` batch runs `double` and `single` serially. It executes the full
 unrelated LSAN control once and rechecks the exact rule before every later ASAN
 pass in that uninterrupted batch.
 
 ## Module build ID
 
-A clean tree uses the exact module Git commit as its compatibility identity. A dirty tree receives a deterministic fingerprint based on HEAD, the diff, and unignored untracked files. The handshake requires this exact module build identity while wire version 0 remains experimental. Godot source qualification still uses the exact baseline commit, while peer compatibility requires the canonical complete Godot version and reports a commit mismatch as a warning.
+A clean tree uses the exact module Git commit as its compatibility identity. A
+dirty tree receives a deterministic fingerprint based on HEAD, the diff, and
+unignored untracked files. The handshake requires this exact module build
+identity while wire version 0 remains experimental. Compilation accepts the
+Godot 4.4+ range, validation reports preserve the exact qualified baseline, and
+peer compatibility requires the canonical complete Godot version while
+reporting a commit mismatch as a warning.
 
 ## Standalone benchmarks
 

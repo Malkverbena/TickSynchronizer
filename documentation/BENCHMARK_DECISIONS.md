@@ -6,7 +6,8 @@ This document records what benchmark evidence has established, what remains unde
 
 ## Current decision state
 
-The production realtime protocol has **not** been selected.
+The default scalar-encoding profile is **selected**. The complete production
+realtime wire remains experimental.
 
 Current contract:
 
@@ -16,23 +17,24 @@ wire protocol: 0 (experimental)
 wire revision: 2
 benchmark suite: 2
 reference candidate: reference_fixed_width
-screened integer candidate: varint_zigzag_fixed_float
+default scalar profile: varint_zigzag_fixed_float
 ```
 
-The fixed-width candidate remains the control baseline. Canonical ULEB128 and
-ZigZag have passed the suite 2 Linux screen and are selected as the integer
-primitive to carry into cross-platform qualification. This bounded decision is
-not selection of framing, state references, change masks, quantization,
-transport behavior, or the complete production packet format.
+The fixed-width candidate remains the control baseline. ADR 0039 adopts
+canonical ULEB128/ZigZag with canonical fixed-width IEEE floats as the default
+profile for subsequent gameplay protocol design. This bounded decision is not
+selection of framing, state references, change masks, quantization, transport
+behavior, or the complete production packet format.
 
 ## Evidence boundary
 
 Source-specific measurements and preliminary observations belong in
 [`development/VALIDATION.md`](development/VALIDATION.md). They may reject a
 candidate, qualify methodology, or support a bounded design screen, but they do
-not stabilize the production wire. Candidate selection requires the clean-tree
-Linux, Windows, and Android matrix; stabilization additionally requires the
-deferred final macOS gate in ADR 0036.
+not stabilize the production wire. ADR 0039 closes the Linux, Windows, and
+Android selection stage with 14 measured passing pairs and two explicitly
+waived, unmeasured Redmi performance pairs. Stabilization additionally requires
+the deferred final macOS gate in ADR 0036.
 
 ## Methodological decisions
 
@@ -55,8 +57,10 @@ deferred final macOS gate in ADR 0036.
 No protocol may be stabilized using results from only one architecture or
 operating system. ADR 0036 defines two gates:
 
-- candidate selection: 16 matched pairs, or 32 reports, across Linux x86_64,
-  Windows x86_64, and two Android ARM64 generations;
+- candidate-selection plan: 16 matched pairs, or 32 reports, across Linux
+  x86_64, Windows x86_64, and two Android ARM64 generations; ADR 0039 closes
+  this stage with 14 measured passing pairs and two unmeasured pairs under an
+  explicit informed waiver;
 - final portability: two additional macOS x86_64 pairs, or four reports, for a
   complete total of 18 matched pairs and 36 reports.
 
@@ -79,9 +83,9 @@ hardware thread from each relevant domain. Reports without complete topology
 remain execution diagnostics only. The comparator maintains independent
 `single` and `double` baselines and never computes a ratio across precisions.
 
-## Current bounded decision
+## Accepted bounded decision
 
-ADR 0037 accepts benchmark suite 2 and candidate 2. The final available Linux
+ADR 0037 accepted benchmark suite 2 and screened candidate 2. The final Linux
 diagnostic produced these workload results:
 
 | Precision | Byte reduction | Weighted encode | Weighted decode | Verdict |
@@ -94,10 +98,23 @@ was 1.090x for dense-snapshot decode in `single`; all other final workload
 ratios were at or below 1.005x. All remain below the predeclared limits.
 Correctness, exact error, bounds, canonicality, and sanitizer gates passed.
 
-This evidence selects canonical ULEB128/ZigZag for further qualification. The
-clean-tree 16-pair Linux/Windows/Android matrix remains necessary before the
-complete candidate decision can close. macOS is not inferred; it remains the
-final blocking portability gate.
+The subsequent official evidence contains four passing Linux pairs, four
+passing Windows pairs, four passing Galaxy ARM64 pairs, and two passing Redmi
+ARM64 efficiency-core pairs. The Windows raw envelope failure occurred only in
+a post-measurement validator that mishandled processor-group identities; the
+four matched measurements remain accepted. The controlled Galaxy
+requalification replaced a contested thermally affected pair and produced four
+passing pairs.
+
+The two measured Redmi efficiency pairs also passed. Their geometric-mean
+workload ratios were 0.658x for size, 0.877x for encode, and 0.956x for decode.
+The Redmi performance-core `single` and `double` pairs were not completed. The
+maintainer explicitly waived them based on the consistent direction of all
+completed evidence. They remain unmeasured and may not be described as tests.
+
+ADR 0039 therefore adopts `varint_zigzag_fixed_float` as the default scalar
+profile. macOS is not inferred or waived; it remains the final blocking
+portability and release gate.
 
 ## Candidate progression
 
@@ -154,14 +171,15 @@ A candidate that wins narrowly on one desktop but regresses severely on older AR
 - Desktop peak throughput does not represent mobile sustained performance.
 - `single` and `double` benchmark results must not be merged into one aggregate.
 - Preliminary or dirty-tree reports must not be used as official baselines.
-- Passing the integer screen does not select the full realtime packet format.
+- Selecting the scalar profile does not select the full realtime packet format.
 - macOS is deferred, not waived; a final Mac failure reopens the decision.
 
 ## Decision record procedure
 
 When evidence supports a protocol path:
 
-1. archive every matched official report pair and its hashes;
+1. archive every matched official report pair and its hashes in private
+   qualification storage;
 2. run the predeclared candidate analyzer without preliminary overrides;
 3. update this document with the comparison and trade-offs;
 4. create or revise an ADR for the selected wire decision;

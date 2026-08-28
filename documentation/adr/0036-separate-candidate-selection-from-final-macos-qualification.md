@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted; Android completion requirement amended by ADR 0039.
 
 ## Context
 
@@ -36,6 +36,10 @@ requires one `reference_fixed_width` report and one
 reports must use identical sampling configuration and be generated within one
 hour by the same uninterrupted runner invocation. The selection gate therefore
 contains 16 matched pairs, or 32 reports.
+
+ADR 0039 later closes the bounded selection stage with 14 measured passing
+pairs and an explicit informed waiver for the two unmeasured Redmi
+performance-core pairs. This does not alter the macOS gate below.
 
 macOS is deferred to the final development portability gate. The available
 Intel Mac contributes one scheduler-managed identity in both precisions: two

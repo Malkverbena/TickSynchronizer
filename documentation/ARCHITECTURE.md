@@ -24,6 +24,10 @@ flowchart TB
 
 ## Supported build layouts
 
+The module supports clean Godot 4.x source at version 4.4.0 or newer. The exact
+version and commit in `GODOT_VERSION` and `GODOT_COMMIT` remain qualified
+validation provenance rather than a single-commit compilation restriction.
+
 The same repository must compile in both layouts:
 
 ```text
@@ -132,11 +136,13 @@ provenance from physical-machine measurement, so qualification environments
 never need project sources or target development toolchains. Public GitHub
 distribution remains source-only.
 
-The candidate-selection matrix uses Linux, Windows, and Android matched report
-pairs. Native macOS execution is intentionally deferred to the final blocking
-portability gate; its Apple Clang, Universal 2, scheduler, packaging, and
-Gatekeeper results cannot be inferred from another backend. ADRs 0036 and 0037
-define this gate split and the current integer-primitive decision.
+ADR 0039 closes the Linux, Windows, and Android scalar-profile selection stage
+with 14 measured passing pairs and two explicitly waived, unmeasured Redmi
+performance pairs. It adopts `varint_zigzag_fixed_float` as the default scalar
+profile without selecting the complete realtime packet format. Native macOS
+execution is intentionally deferred to the final blocking portability gate;
+its Apple Clang, Universal 2, scheduler, packaging, and Gatekeeper results
+cannot be inferred from another backend.
 
 Platform qualification status and future implementation phases are maintained
 in [`development/`](development/), outside the architectural contract.

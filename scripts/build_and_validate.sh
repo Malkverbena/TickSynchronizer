@@ -2,7 +2,7 @@
 
 set -Eeuo pipefail
 
-readonly SCRIPT_API_VERSION="5"
+readonly SCRIPT_API_VERSION="6"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MODULE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 VERSION_HEADER="${TICKSYNC_VERSION_HEADER:-${MODULE_DIR}/src/internal/tick_synchronizer_version.h}"
@@ -37,9 +37,8 @@ TEST_FILTER="*TickSynchronizer*"
 MIN_TEST_CASES=140
 RUN_SMOKE=1
 CLEAN_FIRST=0
-ALLOW_GODOT_MISMATCH=0
+PREFLIGHT_ONLY=0
 ALLOW_DIRTY_GODOT=0
-GODOT_BASELINE="${TICKSYNC_GODOT_BASELINE_COMMIT:-}"
 EXTRA_SCONS_ARGS=()
 
 usage() {
@@ -65,10 +64,9 @@ Options:
   --test-filter FILTER        Doctest filter. Default: *TickSynchronizer*.
   --min-test-cases N          Minimum accepted count. Default: 140.
   --clean-first               Cleans each configuration before building.
+  --preflight-only            Validates source, paths, engine policy, and tools without building.
   --no-smoke                  Does not run the GDScript smoke test.
   --scons-arg ARG             Additional SCons argument; may be repeated.
-  --godot-baseline REF        Overrides GODOT_COMMIT for diagnostics.
-  --allow-godot-mismatch      Allows HEAD to differ from the baseline.
   --allow-dirty-godot         Allows local engine changes.
   --version-header PATH       Central version-contract header.
   --print-script-api-version  Prints this script interface version.
@@ -336,33 +334,36 @@ verify_inputs() {
     [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || fail "invalid jobs value: $JOBS"
 }
 
-verify_godot_baseline() {
+verify_godot_compatibility() {
     git -C "$GODOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
         fail "the Godot tree is not a Git repository"
 
-    local configured_version="unknown"
-    if [[ -f "$MODULE_DIR/GODOT_VERSION" ]]; then
-        configured_version="$(tr -d '[:space:]' < "$MODULE_DIR/GODOT_VERSION")"
-    fi
+    [[ -f "$GODOT_DIR/version.py" ]] || fail "version.py not found in the Godot tree"
+    [[ -f "$MODULE_DIR/GODOT_MINIMUM_VERSION" ]] || fail "GODOT_MINIMUM_VERSION not found"
+    [[ -f "$MODULE_DIR/GODOT_VERSION" ]] || fail "GODOT_VERSION not found"
+    [[ -f "$MODULE_DIR/GODOT_COMMIT" ]] || fail "GODOT_COMMIT not found"
+    [[ -x "$SCRIPT_DIR/verify_godot_version.py" ]] || \
+        fail "verify_godot_version.py not found or not executable"
 
-    if [[ -z "$GODOT_BASELINE" ]]; then
-        [[ -f "$MODULE_DIR/GODOT_COMMIT" ]] || fail "GODOT_COMMIT not found"
-        GODOT_BASELINE="$(tr -d '[:space:]' < "$MODULE_DIR/GODOT_COMMIT")"
-    fi
-    [[ -n "$GODOT_BASELINE" ]] || fail "empty baseline"
+    local version_output
+    version_output="$(
+        "$SCRIPT_DIR/verify_godot_version.py" \
+            --godot-dir "$GODOT_DIR" \
+            --minimum-file "$MODULE_DIR/GODOT_MINIMUM_VERSION"
+    )" || fail "Godot version is outside the supported range"
 
-    local baseline_full
-    local head_full
-    baseline_full="$(git -C "$GODOT_DIR" rev-parse "${GODOT_BASELINE}^{commit}" 2>/dev/null)" || \
-        fail "could not resolve baseline '$GODOT_BASELINE' in the Godot tree"
-    head_full="$(git -C "$GODOT_DIR" rev-parse HEAD)"
+    GODOT_VERSION_LABEL="$(sed -n 's/^godot_version=//p' <<<"$version_output")"
+    GODOT_MINIMUM_VERSION_LABEL="$(sed -n 's/^minimum_godot_version=//p' <<<"$version_output")"
+    [[ -n "$GODOT_VERSION_LABEL" && -n "$GODOT_MINIMUM_VERSION_LABEL" ]] || \
+        fail "incomplete Godot version verification output"
 
-    if [[ "$head_full" != "$baseline_full" ]]; then
-        if (( ALLOW_GODOT_MISMATCH )); then
-            printf 'WARNING: Godot HEAD (%s) differs from baseline (%s).\n' "$head_full" "$baseline_full" >&2
-        else
-            fail "Godot HEAD differs from baseline $configured_version ($baseline_full)"
-        fi
+    QUALIFIED_GODOT_VERSION="$(tr -d '[:space:]' < "$MODULE_DIR/GODOT_VERSION")"
+    QUALIFIED_GODOT_COMMIT="$(tr -d '[:space:]' < "$MODULE_DIR/GODOT_COMMIT")"
+    GODOT_HEAD="$(git -C "$GODOT_DIR" rev-parse HEAD)"
+    QUALIFIED_BASELINE_MATCH="no"
+    if [[ "$GODOT_HEAD" == "$QUALIFIED_GODOT_COMMIT" && \
+        "$GODOT_VERSION_LABEL" == "$QUALIFIED_GODOT_VERSION" ]]; then
+        QUALIFIED_BASELINE_MATCH="yes"
     fi
 
     local dirty_status
@@ -375,9 +376,6 @@ verify_godot_baseline() {
         fi
     fi
 
-    RESOLVED_GODOT_BASELINE="$baseline_full"
-    GODOT_HEAD="$head_full"
-    GODOT_VERSION_LABEL="$configured_version"
 }
 
 artifact_matches_configuration() {
@@ -455,11 +453,13 @@ write_environment_report() {
         printf 'Module dir: %s\n' "$MODULE_DIR"
         printf 'Godot dir: %s\n' "$GODOT_DIR"
         printf 'Godot version: %s\n' "$GODOT_VERSION_LABEL"
-        printf 'Godot baseline: %s\n' "$RESOLVED_GODOT_BASELINE"
+        printf 'Minimum Godot version: %s\n' "$GODOT_MINIMUM_VERSION_LABEL"
         printf 'Godot HEAD: %s\n' "$GODOT_HEAD"
+        printf 'Qualified baseline match: %s\n' "$QUALIFIED_BASELINE_MATCH"
+        printf 'Qualified baseline version: %s\n' "$QUALIFIED_GODOT_VERSION"
+        printf 'Qualified baseline commit: %s\n' "$QUALIFIED_GODOT_COMMIT"
         printf 'Godot branch: %s\n' "$(git -C "$GODOT_DIR" branch --show-current 2>/dev/null || true)"
         printf 'Godot describe: %s\n' "$(git -C "$GODOT_DIR" describe --always --dirty --tags 2>/dev/null || true)"
-        printf 'Godot origin: %s\n' "$(git -C "$GODOT_DIR" remote get-url origin 2>/dev/null || true)"
         printf 'Module layout: %s\n' "$MODULE_LAYOUT"
         printf 'custom_modules: %s\n' "${CUSTOM_MODULES:-<omitted>}"
         printf 'Mode: %s\n' "$MODE"
@@ -681,8 +681,9 @@ write_summary() {
         printf 'Platform: %s\n' "$PLATFORM"
         printf 'Precision: %s\n' "$PRECISION"
         printf 'Godot version: %s\n' "$GODOT_VERSION_LABEL"
-        printf 'Godot baseline: %s\n' "$RESOLVED_GODOT_BASELINE"
+        printf 'Minimum Godot version: %s\n' "$GODOT_MINIMUM_VERSION_LABEL"
         printf 'Godot HEAD: %s\n' "$GODOT_HEAD"
+        printf 'Qualified baseline match: %s\n' "$QUALIFIED_BASELINE_MATCH"
         printf 'Test filter: %s\n' "$TEST_FILTER"
         printf 'Minimum test cases: %s\n' "$MIN_TEST_CASES"
         printf 'Test cases found: %s\n' "${TEST_CASES_FOUND:-not-run}"
@@ -778,6 +779,10 @@ while [[ $# -gt 0 ]]; do
             CLEAN_FIRST=1
             shift
             ;;
+        --preflight-only)
+            PREFLIGHT_ONLY=1
+            shift
+            ;;
         --no-smoke)
             RUN_SMOKE=0
             shift
@@ -786,15 +791,6 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || fail "--scons-arg requires a value"
             EXTRA_SCONS_ARGS+=("$2")
             shift 2
-            ;;
-        --godot-baseline)
-            [[ $# -ge 2 ]] || fail "--godot-baseline requires a value"
-            GODOT_BASELINE="$2"
-            shift 2
-            ;;
-        --allow-godot-mismatch)
-            ALLOW_GODOT_MISMATCH=1
-            shift
             ;;
         --allow-dirty-godot)
             ALLOW_DIRTY_GODOT=1
@@ -849,7 +845,16 @@ esac
 
 configure_module_layout
 verify_inputs
-verify_godot_baseline
+verify_godot_compatibility
+
+if (( PREFLIGHT_ONLY )); then
+    printf 'TICKSYNCHRONIZER_BUILD_PREFLIGHT_OK godot=%s minimum=%s qualified_baseline=%s layout=%s\n' \
+        "$GODOT_VERSION_LABEL" \
+        "$GODOT_MINIMUM_VERSION_LABEL" \
+        "$QUALIFIED_BASELINE_MATCH" \
+        "$MODULE_LAYOUT"
+    exit 0
+fi
 
 REPORT_TAG="$(date -u +'%Y%m%dT%H%M%SZ')-${PLATFORM}-${PRECISION}-${MODE}"
 REPORT_DIR="$MODULE_DIR/build_reports/$REPORT_TAG"
@@ -860,8 +865,9 @@ ln -sfn "$REPORT_TAG" "$MODULE_DIR/build_reports/latest"
 write_environment_report "$REPORT_DIR/environment.txt"
 
 log "Reports: $REPORT_DIR"
-log "Godot: $GODOT_DIR"
-log "Baseline: $GODOT_VERSION_LABEL ($RESOLVED_GODOT_BASELINE)"
+log "Godot directory: $GODOT_DIR"
+log "Godot: $GODOT_VERSION_LABEL (minimum $GODOT_MINIMUM_VERSION_LABEL)"
+log "Qualified baseline match: $QUALIFIED_BASELINE_MATCH"
 log "Module: $MODULE_DIR"
 log "Module layout: $MODULE_LAYOUT"
 log "Mode: $MODE"

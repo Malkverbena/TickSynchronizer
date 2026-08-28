@@ -27,6 +27,7 @@ required_files = {
     "AGENTS.md",
     "README.md",
     "FILE_MANIFEST.txt",
+    "GODOT_MINIMUM_VERSION",
     "SCsub",
     "config.py",
     "src/README.md",
@@ -49,6 +50,8 @@ required_files = {
     "tests/golden/control_hello_v4.bin",
     "scripts/build_and_validate.sh",
     "scripts/run_sanitized_tests.sh",
+    "scripts/verify_godot_baseline.sh",
+    "scripts/verify_godot_version.py",
     "scripts/verify_lsan_suppressions.sh",
     "scripts/verify_sanitizer_suppressions.sh",
     "scripts/compute_module_build_id.py",
@@ -90,6 +93,7 @@ required_files = {
     "documentation/BENCHMARK_DECISIONS.md",
     "documentation/BUILD.md",
     "documentation/PROTOCOL.md",
+    "documentation/PRIVACY.md",
     "documentation/TESTING.md",
     "documentation/development/README.md",
     "documentation/development/PROJECT_STATE.md",
@@ -107,6 +111,8 @@ required_files = {
     "documentation/adr/0036-separate-candidate-selection-from-final-macos-qualification.md",
     "documentation/adr/0037-adopt-suite2-and-screen-canonical-varint-integers.md",
     "documentation/adr/0038-keep-lsan-enabled-with-a-godot-joypad-suppression.md",
+    "documentation/adr/0039-adopt-varint-zigzag-fixed-float-default.md",
+    "documentation/adr/0040-support-godot-4-4-and-newer.md",
 }
 
 for relative in sorted(required_files):
@@ -274,6 +280,8 @@ if test_cases < 140:
 # Script interface and sanitizer contracts.
 build_script = read("scripts/build_and_validate.sh")
 sanitizer_script = read("scripts/run_sanitized_tests.sh")
+godot_compatibility_script = read("scripts/verify_godot_baseline.sh")
+godot_version_script = read("scripts/verify_godot_version.py")
 lsan_guard = read("scripts/verify_lsan_suppressions.sh")
 sanitizer_guard = read("scripts/verify_sanitizer_suppressions.sh")
 mermaid_script = read("scripts/verify_mermaid_diagrams.py")
@@ -290,6 +298,31 @@ elif build_api_match.group(1) != wrapper_api_match.group(1):
         f"incompatible scripts: build API {build_api_match.group(1)} "
         f"!= wrapper API {wrapper_api_match.group(1)}"
     )
+for token in (
+    "GODOT_MINIMUM_VERSION",
+    "verify_godot_version.py",
+    "verify_godot_compatibility",
+    "QUALIFIED_BASELINE_MATCH",
+    "TICKSYNCHRONIZER_BUILD_PREFLIGHT_OK",
+):
+    if token not in build_script:
+        errors.append(f"Godot 4.4+ build policy is missing: {token}")
+for token in (
+    "TICKSYNCHRONIZER_GODOT_COMPATIBILITY_OK",
+    "Qualified baseline match",
+    "Supported Godot series: 4.x",
+):
+    if token not in godot_compatibility_script:
+        errors.append(f"Godot compatibility verifier is incomplete: {token}")
+for token in (
+    "TICKSYNCHRONIZER_GODOT_VERSION_POLICY_SELF_TEST_OK",
+    "unsupported Godot major version",
+    "minimum_godot_version",
+):
+    if token not in godot_version_script:
+        errors.append(f"Godot version policy verifier is incomplete: {token}")
+if "verify_qualified_sanitizer_baseline" not in sanitizer_script:
+    errors.append("sanitizer policy is not locked to the qualified Godot baseline")
 if "Skipped for sanitized editor" not in build_script:
     errors.append("sanitized artifact structural validation is missing")
 if 'ASAN_OPTIONS+=\":detect_invalid_pointer_pairs=0\"' not in sanitizer_script:
@@ -400,6 +433,9 @@ if "TemporaryDirectory(prefix=" not in mermaid_script or "dir=temp_root" not in 
 version_header = read("src/internal/tick_synchronizer_version.h")
 godot_version = read("GODOT_VERSION").strip()
 godot_commit = read("GODOT_COMMIT").strip()
+godot_minimum_version = read("GODOT_MINIMUM_VERSION").strip()
+if godot_minimum_version != "4.4.0":
+    errors.append(f"unexpected minimum Godot version: {godot_minimum_version!r}")
 if godot_version != "4.7.1-stable":
     errors.append(f"unexpected Godot version baseline: {godot_version!r}")
 if godot_commit != "a13da4feb8d8aefc283c3763d33a2f170a18d541":
@@ -850,6 +886,34 @@ for token in (
         errors.append(f"build script lacks dual-layout support token: {token}")
 if 'if [[ -n "$CUSTOM_MODULES" ]]' not in build_script_layout:
     errors.append("build script does not omit custom_modules for in-tree builds")
+
+# Public documentation must retain the repository privacy boundary.
+privacy_documentation = read("documentation/PRIVACY.md")
+for token in (
+    "credentials",
+    "private local paths",
+    "operator identity",
+    "serial identifiers",
+    "unpublished qualification artifacts",
+    "Git remote URLs",
+    "Private handoff packages",
+):
+    if token not in privacy_documentation:
+        errors.append(f"privacy documentation is incomplete: {token}")
+
+public_documentation = "\n".join(
+    read(path.relative_to(module).as_posix())
+    for path in sorted(module.rglob("*.md"))
+    if path.is_file() and not is_generated_artifact(path)
+)
+for pattern, label in (
+    (r"/home/[^\s`]+", "private Linux home path"),
+    (r"/mnt/[^\s`]+", "private mounted-volume path"),
+    (r"/Users/[^\s`]+", "private macOS home path"),
+    (r"[A-Za-z]:[\\/]Users[\\/][^\s`]+", "private Windows home path"),
+):
+    if re.search(pattern, public_documentation):
+        errors.append(f"public documentation contains a {label}")
 
 # All project-owned C++ files require two leading purpose lines.
 cpp_files = sorted(

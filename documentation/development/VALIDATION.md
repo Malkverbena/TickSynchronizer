@@ -2,7 +2,8 @@
 
 ## Identification
 
-- Godot: `4.7.1-stable`
+- supported Godot build range: 4.x version 4.4.0 or newer
+- qualified Godot validation baseline: `4.7.1-stable`
 - primary module acceptance platform: Linux x86_64
 - benchmark qualification platforms: Linux x86_64, Windows x86_64, Android
   ARM64, and macOS Universal 2
@@ -109,8 +110,10 @@ The standalone suite 2 passes its self-test and validates:
   mounted-volume, and drive-qualified paths.
 
 Official benchmark baselines must be generated from a clean tree. Candidate
-selection requires verified hard affinity for the 16 matched Linux, Windows,
-and Android pairs. The deferred final macOS gate uses the exact
+selection requires verified hard affinity for every measured Linux, Windows,
+and Android pair. ADR 0039 closes the planned 16-pair stage with 14 measured
+passing pairs and an explicit informed waiver for two unmeasured Redmi
+performance pairs. The deferred final macOS gate uses the exact
 scheduler-managed policy from ADR 0032.
 
 The current Linux close-out reran source consistency, shell and Python syntax,
@@ -157,6 +160,31 @@ and each records `official=no`. They select the integer primitive for continued
 qualification but do not close the clean-tree cross-platform matrix or select
 the complete realtime wire.
 
+## Official suite 2 selection closure
+
+The later authenticated clean-tree campaign accepted 14 matched pairs:
+
+| Environment | Passing pairs | Notes |
+|---|---:|---|
+| Linux x86_64 | 4/4 | two L3 domains, both precisions |
+| Windows x86_64 | 4/4 | measurements accepted; post-measurement validator mishandled processor-group identities |
+| Galaxy ARM64 | 4/4 | controlled requalification replaced one contested pair |
+| Redmi ARM64 efficiency core | 2/2 | both precisions |
+| Redmi ARM64 performance core | 0/2 | unmeasured; informed waiver |
+
+The measured Redmi efficiency aggregate was 0.658x for workload size, 0.877x
+for weighted encode latency, and 0.956x for weighted decode latency. The two
+performance-core pairs produced no complete official measurements. The
+maintainer accepted that missing evidence based on the uniform direction of the
+completed platform and core-class pairs. This is a documented waiver, not an
+inferred test result.
+
+ADR 0039 adopts `varint_zigzag_fixed_float` as the default scalar profile and
+closes the bounded Linux/Windows/Android selection stage. It leaves wire
+version 0 revision 2 experimental and does not select stateful framing, masks,
+quantization, loss/reorder recovery, or transport behavior. macOS remains the
+blocking final portability gate.
+
 ## Historical suite 1 platform evidence
 
 Earlier Linux and Windows x86_64 L3-domain runs and Android ARM64 device/core
@@ -195,17 +223,17 @@ execution-only validation, Universal 2 structure, and Gatekeeper observation
 must be completed. Raw host inventory and build logs remain private and are
 represented here only by privacy-safe conclusions.
 
-The 16-pair, 32-report clean-tree Linux/Windows/Android selection matrix and the
-final two-pair, four-report macOS gate in `BENCHMARKS.md` remain pending.
+The Linux/Windows/Android selection stage is closed under ADR 0039. The final
+two-pair, four-report macOS gate in `BENCHMARKS.md` remains pending.
 
 The earlier C++ policy refactor replaced module `std::array` use and the module
 lambda, removed standalone benchmark exception handling, and added compiler and
 source guards. Its then-current editor, template, sanitizer, and suite 1
 acceptance remains historical evidence. The current suite 2 normal matrix,
 standalone sanitizer evidence, and fresh integrated ASAN and UBSAN matrix are
-complete. The clean-tree cross-platform qualification matrix remains pending.
+complete. The final macOS portability gate remains pending.
 
-## Suite 2 clean package preparation
+## Historical suite 2 clean package preparation
 
 The first execution-package preparation from the accepted clean source commit
 validated the Linux package. Both Windows precisions also cross-compiled, and
@@ -241,6 +269,40 @@ the diagnostic is gone:
 - an engine-baseline update removes the diagnostic.
 
 Broad, wildcard, module, and path-prefix suppressions remain unacceptable.
+
+## Protocol finalization and Godot compatibility policy
+
+The protocol-selection and engine-policy change started from the authenticated
+clean module source at commit
+`0a005e5367dd9fa81f2a3a18edfd4f22b7fb509e`, tree
+`50f9b122e173bb7af530f6fadebcfb919ecafd2a`, with the qualified Godot tree
+clean at `a13da4feb8d8aefc283c3763d33a2f170a18d541`.
+
+No project C++, tests, benchmark implementation, benchmark dataset, or Godot
+source changed. The work changes build-policy scripts and documentation only.
+It therefore did not rerun the accepted normal or sanitizer matrices and did
+not execute any official benchmark measurement. The previously accepted
+runtime evidence remains tied to its exact source and engine identities.
+
+Fresh source-level validation completed:
+
+- shell syntax for every top-level project shell script;
+- Python syntax for every project Python script without generating bytecode;
+- the Godot version-policy self-test, including unsupported older and major-5
+  negative controls;
+- a clean controlled Godot 4.4.0 fixture accepted with a non-qualified commit;
+- dirty Godot fixture rejection;
+- the build wrapper's no-build compatibility preflight;
+- source consistency, benchmark analyzer, report verifier, comparator, Mermaid,
+  and source-manifest checks.
+
+The privacy review found no private workstation paths, host names, operator
+identity, device serials, private result archive names, private result hashes,
+credentials, or authenticated URLs in repository documentation. The only
+private-path patterns retained in scripts are literal rejection patterns used
+by benchmark privacy guards. Build reports no longer record Git remote URLs;
+local diagnostic reports still require review before publication as documented
+in `documentation/PRIVACY.md`.
 
 ## License and contribution responsibility
 

@@ -113,9 +113,10 @@ fi
 	printf 'Generated at UTC: `%s`\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 	printf '## Mandatory instructions\n\n'
 	cat "$MODULE_DIR/AGENTS.md"
-	printf '\n## Declared baseline\n\n'
-	printf -- '- Godot version: `%s`\n' "$(tr -d '[:space:]' <"$MODULE_DIR/GODOT_VERSION")"
-	printf -- '- Godot commit: `%s`\n' "$(tr -d '[:space:]' <"$MODULE_DIR/GODOT_COMMIT")"
+	printf '\n## Declared engine policy\n\n'
+	printf -- '- Minimum Godot version: `%s`\n' "$(tr -d '[:space:]' <"$MODULE_DIR/GODOT_MINIMUM_VERSION")"
+	printf -- '- Qualified Godot version: `%s`\n' "$(tr -d '[:space:]' <"$MODULE_DIR/GODOT_VERSION")"
+	printf -- '- Qualified Godot commit: `%s`\n' "$(tr -d '[:space:]' <"$MODULE_DIR/GODOT_COMMIT")"
 	printf '\n## Module Git state\n\n'
 	module_git
 	printf '\n## Local engine state\n\n'

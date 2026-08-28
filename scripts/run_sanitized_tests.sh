@@ -8,7 +8,7 @@ BUILD_SCRIPT="${SCRIPT_DIR}/build_and_validate.sh"
 LSAN_SUPPRESSION_GUARD="${SCRIPT_DIR}/verify_lsan_suppressions.sh"
 UBSAN_SUPPRESSION_GUARD="${SCRIPT_DIR}/verify_sanitizer_suppressions.sh"
 
-readonly EXPECTED_BUILD_SCRIPT_API="5"
+readonly EXPECTED_BUILD_SCRIPT_API="6"
 
 PRECISION_REQUEST="double"
 PRECISION=""
@@ -38,6 +38,10 @@ Default profile:
 
 Separation avoids depending on Clang’s UBSAN C++ runtime, which may not be
 installed, and avoids the excessively large combined Godot 4.7.1 link.
+
+The accepted sanitizer policy remains qualified only on the exact clean Godot
+version and commit recorded in GODOT_VERSION and GODOT_COMMIT. Other supported
+Godot 4.x versions may compile normally but require a separate sanitizer review.
 
 The `all` precision batch runs `double` and `single` serially. It executes the
 full unrelated LSAN leak control once, while rechecking the exact static rule
@@ -119,6 +123,48 @@ verify_build_script_contract() {
 
     [[ "$actual_api" == "$EXPECTED_BUILD_SCRIPT_API" ]] || \
         fail "incompatible scripts: run_sanitized_tests requires API $EXPECTED_BUILD_SCRIPT_API, but build_and_validate provides '$actual_api'."
+}
+
+default_godot_dir() {
+    local in_tree_root
+    in_tree_root="$(realpath -m -- "${MODULE_DIR}/../..")"
+    if [[ "$(basename -- "$(dirname -- "$MODULE_DIR")")" == "modules" && -f "$in_tree_root/SConstruct" ]]; then
+        printf '%s\n' "$in_tree_root"
+    else
+        realpath -m -- "${MODULE_DIR}/../godot"
+    fi
+}
+
+verify_qualified_sanitizer_baseline() {
+    local godot_dir="${TICKSYNC_GODOT_DIR:-$(default_godot_dir)}"
+    local index
+    for (( index = 0; index < ${#PASSTHROUGH[@]}; index++ )); do
+        if [[ "${PASSTHROUGH[$index]}" == "--godot-dir" ]]; then
+            (( index + 1 < ${#PASSTHROUGH[@]} )) || fail "--godot-dir requires a value"
+            godot_dir="${PASSTHROUGH[$((index + 1))]}"
+        fi
+    done
+
+    godot_dir="$(realpath -m -- "$godot_dir")"
+    git -C "$godot_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+        fail "the Godot tree is not a Git repository: $godot_dir"
+
+    local expected_commit
+    local actual_commit
+    local expected_version
+    local actual_version
+    expected_commit="$(tr -d '[:space:]' < "$MODULE_DIR/GODOT_COMMIT")"
+    expected_version="$(tr -d '[:space:]' < "$MODULE_DIR/GODOT_VERSION")"
+    actual_commit="$(git -C "$godot_dir" rev-parse HEAD)"
+    actual_version="$(
+        "$SCRIPT_DIR/verify_godot_version.py" \
+            --godot-dir "$godot_dir" \
+            --minimum-file "$MODULE_DIR/GODOT_MINIMUM_VERSION" |
+            sed -n 's/^godot_version=//p'
+    )" || fail "could not validate the Godot version for the sanitizer gate"
+
+    [[ "$actual_commit" == "$expected_commit" && "$actual_version" == "$expected_version" ]] || \
+        fail "the accepted sanitizer policy is qualified only for $expected_version at $expected_commit"
 }
 
 make_probe_source() {
@@ -344,6 +390,7 @@ case "$PRECISION_REQUEST" in
 esac
 
 verify_build_script_contract
+verify_qualified_sanitizer_baseline
 initialize_temp_root
 
 COMMON_ARGS_BASE=(

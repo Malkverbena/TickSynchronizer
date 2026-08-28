@@ -22,7 +22,7 @@ Do not conflate these values:
 - experimental wire protocol: 0;
 - experimental wire revision: 2;
 - control envelope major/minor: 1.1;
-- benchmark suite: 1, never transmitted.
+- benchmark suite: 2, never transmitted.
 
 ## Control envelope
 
@@ -168,7 +168,17 @@ Versioned golden packets protect exact envelope and handshake bytes. Any intenti
 
 ## Realtime packet format
 
-The 40-byte control envelope is deliberately optimized for auditability rather than realtime overhead. The production gameplay packet format will be selected after benchmark comparisons and may use a different compact header.
+The 40-byte control envelope is deliberately optimized for auditability rather
+than realtime overhead. ADR 0039 selects `varint_zigzag_fixed_float` as the
+default scalar-encoding profile for subsequent gameplay protocol design:
+unsigned integers use minimal canonical ULEB128, signed integers use portable
+ZigZag plus minimal ULEB128, and floats retain canonical fixed-width IEEE 754
+encoding.
+
+This bounded choice does not define the production gameplay header, packet
+types, state references, delta recovery, masks, quantization, or transport
+behavior. Those contracts remain experimental work, so wire version 0 revision
+2 is unchanged.
 
 ```mermaid
 sequenceDiagram

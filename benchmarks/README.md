@@ -30,7 +30,10 @@ policy. See `documentation/BENCHMARKS.md` and
 
 Linux, Windows, and Android form the candidate-selection matrix. macOS source
 support remains in the shared graph, but native Mac execution is deferred to
-the final blocking portability gate under ADR 0036.
+the final blocking portability gate under ADR 0036. ADR 0039 closes the bounded
+selection stage with 14 measured passing pairs, explicitly waives two
+unmeasured Redmi performance pairs, and adopts
+`varint_zigzag_fixed_float` as the default scalar profile.
 
 ## Cross-platform builds and deployment
 

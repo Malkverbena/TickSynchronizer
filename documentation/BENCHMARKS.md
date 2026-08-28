@@ -5,9 +5,9 @@
 Benchmark suite version 2 is implemented as a standalone C++17 executable. It
 contains the fixed-width reference and isolated canonical-varint candidates,
 eight deterministic datasets, candidate-independent correctness checks, and
-candidate-specific malformed inputs. The suite has selected an integer
-primitive for continued qualification; it has not selected the complete
-production realtime protocol.
+candidate-specific malformed inputs. ADR 0039 selects
+`varint_zigzag_fixed_float` as the default scalar profile; it does not select
+the complete production realtime protocol.
 
 The standalone code may use standard-library containers to remain independent
 of Godot, but it is compiled without C++ exceptions or RTTI. The SCons graph
@@ -38,7 +38,8 @@ flowchart LR
 `varint_zigzag_fixed_float` retains framing, limits, semantic fields, and
 fixed-width scalars while changing unsigned integers to canonical ULEB128 and
 signed integers to portable ZigZag plus canonical ULEB128. ADR 0037 defines the
-complete isolated-variable contract.
+complete isolated-variable contract, and ADR 0039 records its selection as the
+default scalar profile.
 
 Both candidates use canonical little-endian IEEE 754 scalars. All NaNs encode
 to one positive quiet-NaN representation, other NaN payloads are rejected, and
@@ -492,23 +493,25 @@ absolute build-host path.
 ## Platform matrix
 
 A matched pair contains reference and varint reports from one executable,
-precision, device, and CPU execution identity. The candidate-selection gate
-contains 16 clean-tree matched pairs, or 32 reports. The deferred final macOS
-gate brings the complete initial-platform matrix to 18 pairs, or 36 reports:
+precision, device, and CPU execution identity. The original candidate-selection
+plan contains 16 clean-tree matched pairs, or 32 reports. ADR 0039 closes that
+stage with 14 measured passing pairs and an informed waiver for the two
+unmeasured Redmi performance pairs. The deferred final macOS gate still adds
+two measured pairs before the complete initial-platform claim can close:
 
-| Platform and hardware | Configuration | Precisions | Pairs | Reports | Gate |
+| Platform and hardware | Configuration | Precisions | Planned pairs | Measured passing pairs | Disposition |
 |---|---|---|---:|---:|---|
-| Linux, Ryzen 9 9950X3D | X3D CCD | `single`, `double` | 2 | 4 | selection |
-| Linux, Ryzen 9 9950X3D | frequency CCD | `single`, `double` | 2 | 4 | selection |
-| Windows 11, Ryzen 9 9950X3D | X3D CCD | `single`, `double` | 2 | 4 | selection |
-| Windows 11, Ryzen 9 9950X3D | frequency CCD | `single`, `double` | 2 | 4 | selection |
-| Android, Galaxy SM-S928B | efficiency core | `single`, `double` | 2 | 4 | selection |
-| Android, Galaxy SM-S928B | prime core | `single`, `double` | 2 | 4 | selection |
-| Android, Redmi Note 9 Pro | efficiency core | `single`, `double` | 2 | 4 | selection |
-| Android, Redmi Note 9 Pro | performance core | `single`, `double` | 2 | 4 | selection |
-| **Selection subtotal** |  |  | **16** | **32** |  |
-| macOS 12.7.6, available Intel Mac | scheduler-managed representative | `single`, `double` | 2 | 4 | final portability |
-| **Complete total** |  |  | **18** | **36** |  |
+| Linux, Ryzen 9 9950X3D | X3D CCD | `single`, `double` | 2 | 2 | accepted |
+| Linux, Ryzen 9 9950X3D | frequency CCD | `single`, `double` | 2 | 2 | accepted |
+| Windows 11, Ryzen 9 9950X3D | X3D CCD | `single`, `double` | 2 | 2 | accepted |
+| Windows 11, Ryzen 9 9950X3D | frequency CCD | `single`, `double` | 2 | 2 | accepted |
+| Android, Galaxy SM-S928B | efficiency core | `single`, `double` | 2 | 2 | accepted |
+| Android, Galaxy SM-S928B | prime core | `single`, `double` | 2 | 2 | accepted |
+| Android, Redmi Note 9 Pro | efficiency core | `single`, `double` | 2 | 2 | accepted |
+| Android, Redmi Note 9 Pro | performance core | `single`, `double` | 2 | 0 | informed waiver; unmeasured |
+| **Selection subtotal** |  |  | **16** | **14** | **closed by ADR 0039** |
+| macOS 12.7.6, available Intel Mac | scheduler-managed representative | `single`, `double` | 2 | 0 | deferred; blocking |
+| **Initial-platform total** |  |  | **18** | **14** | **not complete** |
 
 Linux and Windows select one primary hardware thread in each documented CCD
 domain. Android uses the listed exposed core classes with verified affinity.

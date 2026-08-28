@@ -29,6 +29,7 @@ Conversations, old messages, and agent memory are not authoritative. Versioned f
   paths, host names, operator identity, serial identifiers, or unpublished
   artifact names and hashes.
 - ADR 0035 defines the complete ownership and publication policy.
+- `documentation/PRIVACY.md` defines the repository publication checklist.
 
 ## Language policy
 
@@ -43,16 +44,22 @@ All repository content must be written in English, including:
 
 Public identifiers that are already part of the API or wire contract must not be renamed merely to satisfy this policy.
 
-## Engine baseline
+## Engine compatibility
 
-- Godot baseline: `4.7.1-stable`.
-- Exact commit: stored in `GODOT_COMMIT`.
-- Human-readable version: stored in `GODOT_VERSION`.
+- Supported engine range: Godot 4.x at version `4.4.0` or newer, as stored in
+  `GODOT_MINIMUM_VERSION`.
+- Godot 5.x and later major versions require an explicit compatibility ADR.
+- Qualified validation version: stored in `GODOT_VERSION`.
+- Qualified validation commit: stored in `GODOT_COMMIT`.
+- A supported engine may compile without matching the qualified commit, but it
+  does not inherit that commit's complete validation evidence.
 - The Godot source tree is normally a sibling at `../godot`.
 - The module may be built externally with `custom_modules=../tick_synchronizer`.
 - The same module may also be copied or checked out at `godot/modules/tick_synchronizer` and built as a conventional in-tree module.
 - Do not modify, patch, or keep local cherry-picks in the Godot engine source.
-- Validation must reject a mismatched or dirty engine tree by default.
+- Validation must reject an unsupported or dirty engine tree by default.
+- The accepted Godot sanitizer suppressions remain locked to the exact
+  qualified version and commit until a separate review qualifies another one.
 
 Both supported layouts must remain functional. Do not introduce path assumptions that work only for the external layout.
 
@@ -102,7 +109,7 @@ benchmark report by itself.
 
 ## C++ and Godot conventions
 
-- Follow Godot 4.7.1 conventions.
+- Use APIs and conventions available in the supported Godot 4.4 floor.
 - Use `#pragma once` in project headers, except existing test headers that intentionally use include guards.
 - Include every used type directly; do not rely on transitive includes.
 - Use exactly one blank line between consecutive function declarations or definitions in project-owned `.h` files.
@@ -143,6 +150,19 @@ Comment non-obvious invariants, wire-layout rules, ownership assumptions, error 
   rejecting an otherwise compatible peer.
 - Module build, game build, schema, and precision mismatches remain fatal.
 - Untrusted lengths and counts must be validated before allocation.
+
+## Protocol selection boundary
+
+- `varint_zigzag_fixed_float` is the accepted default scalar-encoding profile
+  for subsequent gameplay protocol design under ADR 0039.
+- Unsigned integers use minimal canonical ULEB128; signed integers use portable
+  ZigZag followed by minimal canonical ULEB128; floats retain canonical
+  fixed-width IEEE 754 encoding.
+- This selection does not stabilize the complete realtime wire. Framing,
+  state references, masks, delta recovery, quantization, and transport behavior
+  require separate evidence and ADRs.
+- Wire version 0 revision 2 remains experimental, and the final macOS
+  portability gate remains blocking.
 
 ## Required validation
 

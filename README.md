@@ -8,7 +8,8 @@ The project currently provides a validated binary buffer, explicit integer and f
 
 - **Module name:** `TickSynchronizer`
 - **Module directory:** `tick_synchronizer`
-- **Engine baseline:** Godot `4.7.1-stable`
+- **Supported engine range:** Godot 4.x, version `4.4.0` or newer
+- **Qualified engine baseline:** Godot `4.7.1-stable`
 - **Language baseline:** C++17
 - **Build system:** SCons
 - **License:** MIT, Copyright (c) 2026 Malkverbena
@@ -85,7 +86,7 @@ flowchart TB
 ## Current version contract
 
 ```text
-script_api=5
+script_api=6
 api=4
 wire=0
 wire_revision=2
@@ -154,19 +155,20 @@ own locally licensed Apple toolchain and SDK on Apple-branded hardware running
 macOS; Apple SDK files are never vendored or copied into this repository.
 
 Official reports require a clean source tree. Linux, Windows, and Android also
-require verified native CPU affinity. Their 16 matched candidate pairs form the
-selection gate. macOS uses the exact scheduler-managed representative policy
-from ADR 0032 and is deferred to the blocking final portability gate in ADR
-0036. Cross-platform backend availability does not count as protocol evidence
-until reports are produced on the actual target hardware and archived with
-hashes.
+require verified native CPU affinity. ADR 0039 closes the candidate-selection
+stage with 14 measured passing pairs and an explicit informed waiver for the
+two unmeasured Redmi performance-core pairs. The waiver is not recorded as
+measurement evidence. macOS uses the exact scheduler-managed representative
+policy from ADR 0032 and remains the blocking final portability gate.
 
 ## Development status
 
-The wire protocol remains experimental and the complete production realtime
-candidate has not been selected. Suite 2 has screened canonical ULEB128/ZigZag
-as the integer primitive to carry into cross-platform qualification. Stateful
-framing, masks, quantization, and recovery policy remain undecided.
+The wire protocol remains experimental. ADR 0039 adopts
+`varint_zigzag_fixed_float` as the default scalar-encoding profile for
+subsequent gameplay protocol design. This selects canonical ULEB128/ZigZag
+integers with fixed-width canonical floats; it does not select stateful framing,
+masks, quantization, recovery policy, transport behavior, or the complete
+production realtime packet format.
 Version-bound implementation state, pending work, and accepted evidence are maintained in
 [`documentation/development/`](documentation/development/). The permanent
 manual describes module behavior and the gates that every accepted source state
@@ -179,6 +181,11 @@ Run consistency checks first:
 ```bash
 ./scripts/verify_source_consistency.sh
 ```
+
+Normal builds accept clean Godot 4.x source at version 4.4.0 or newer. The
+complete accepted validation and version-specific sanitizer policies remain
+qualified on the exact Godot version and commit recorded in `GODOT_VERSION` and
+`GODOT_COMMIT`.
 
 Module-linked C++ follows Godot's restricted subset without STL containers,
 `auto`, avoidable lambdas, exceptions, or RTTI. The engine-independent benchmark
@@ -234,9 +241,9 @@ Run an official benchmark only from a clean Git tree:
 ```
 
 The suite compares the fixed-width reference with
-`varint_zigzag_fixed_float`. The varint candidate passed the current bounded
-integer screen, but this does not select or stabilize the complete production
-protocol. Decisions and evidence boundaries are recorded in
+`varint_zigzag_fixed_float`. The latter is now the accepted default scalar
+profile, but this does not stabilize the complete production protocol.
+Decisions, waivers, and evidence boundaries are recorded in
 [`documentation/BENCHMARK_DECISIONS.md`](documentation/BENCHMARK_DECISIONS.md).
 
 ```mermaid
@@ -284,6 +291,8 @@ tests/           C++ tests, smoke project, and golden vectors
 module manual, versioned architecture decisions, and stage-specific development
 records. Module behavior and contracts remain in the permanent manual; current
 status and qualification evidence are kept under `documentation/development/`.
+The publication and artifact-handling rules are in
+[`documentation/PRIVACY.md`](documentation/PRIVACY.md).
 The GitHub Project owns operational planning. After source acceptance and the
 complete final portability gate close, the Wiki may publish derived user guides, while versioned
 contracts, evidence, and ADRs remain authoritative in the repository.

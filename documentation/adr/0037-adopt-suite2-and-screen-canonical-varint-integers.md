@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted; default-profile decision completed by ADR 0039.
 
 ## Context
 
@@ -80,6 +80,10 @@ Accordingly, canonical ULEB128/ZigZag is selected as the integer primitive to
 carry into cross-platform qualification and subsequent protocol design. This
 is not selection or stabilization of the complete production realtime wire
 protocol.
+
+ADR 0039 later adopts `varint_zigzag_fixed_float` as the default profile for
+subsequent gameplay protocol design after the official cross-platform
+qualification campaign. The complete realtime wire remains experimental.
 
 Stateful delta encoding, change masks, bit packing, and quantization remain
 undecided. They require real ordered snapshot traces, explicit loss and reorder

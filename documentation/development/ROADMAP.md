@@ -2,7 +2,8 @@
 
 ## Confirmed decisions
 
-- Godot `4.7.1-stable`, no engine modifications.
+- clean Godot 4.x version 4.4.0 or newer for compilation, with no engine
+  modifications; Godot `4.7.1-stable` remains the qualified validation baseline.
 - C++17; SCons is the only compilation system for the module and every standalone benchmark target.
 - external custom-module and in-tree module layouts are both supported.
 - `PackedByteArray` is the canonical Godot byte container.
@@ -23,7 +24,7 @@ flowchart LR
     Foundation[Binary foundation] --> Control[Control protocol]
     Control --> Benchmark[Benchmark methodology]
     Benchmark --> Candidate[Integer candidate comparison]
-    Candidate --> Selection[Linux, Windows, Android selection]
+    Candidate --> Selection[Default scalar profile selected]
     Selection --> Transport[Transport lab and real captures]
     Transport --> Sync[Authoritative synchronization]
     Sync --> Prediction[Prediction and rollback]
@@ -34,6 +35,7 @@ flowchart LR
 
 - independent module repository;
 - Godot version and exact commit files;
+- machine-readable Godot 4.4.0 build floor;
 - engine cleanliness checks;
 - MIT license and contribution policy;
 - project-wide English language policy.
@@ -102,20 +104,19 @@ flowchart LR
   as infrastructure evidence only;
 - final Linux suite 2 preliminary matched pairs pass the bounded integer screen
   in both precisions;
-- canonical ULEB128/ZigZag selected as the integer primitive for
-  cross-platform qualification, without selecting the complete realtime wire;
+- canonical ULEB128/ZigZag with fixed-width canonical floats selected as the
+  default scalar profile, without selecting the complete realtime wire;
 - complete integrated split ASAN and UBSAN matrix accepted in both precisions,
   including the real editor smoke and the exact LSAN and UBSAN policy guards;
-- official clean-tree 16-pair Linux, Windows, and Android candidate-selection
-  matrix pending;
+- official Linux, Windows, and Android candidate selection closed by ADR 0039
+  with 14 measured passing pairs and an informed waiver for two unmeasured
+  Redmi performance pairs;
+- `varint_zigzag_fixed_float` adopted as the default scalar profile without
+  stabilizing the complete realtime wire;
 - final two-pair macOS execution and portability gate pending;
 - derived Wiki publication begins only after the accepted source baseline and
-  complete 18-pair, 36-report final portability matrix; versioned documentation
-  remains in the repository.
-
-The existing quick reports remain preliminary because they were generated from
-the pre-commit dirty source. Official evidence begins with a clean rebuild from
-the accepted logical source commit.
+  final macOS portability gate; versioned documentation remains in the
+  repository.
 
 Current item status, priority, assignment, scheduling, and milestones are kept
 in the GitHub Project. This file records only strategic phases, dependencies,
@@ -127,11 +128,11 @@ flowchart TB
     Windows[Windows x86_64 machine]
     RecentAndroid[Recent Android ARM64 device]
     OlderAndroid[Older Android ARM64 device]
-    Linux --> Matrix[16-pair candidate-selection matrix]
+    Linux --> Matrix[14 measured pairs plus explicit waiver]
     Windows --> Matrix
     RecentAndroid --> Matrix
     OlderAndroid --> Matrix
-    Matrix --> IntegerDecision[Cross-platform integer decision]
+    Matrix --> IntegerDecision[Default scalar profile selected]
     IntegerDecision --> Capture[Real snapshots and loss scenarios]
     Capture --> Stateful[Stateful candidate design]
     Stateful --> MacOS[Final macOS portability gate]
@@ -140,8 +141,9 @@ flowchart TB
 ### Candidate progression
 
 1. `reference_fixed_width` — implemented baseline;
-2. `varint_zigzag_fixed_float` — implemented and screened on Linux; clean-tree
-   Linux, Windows, and Android qualification pending;
+2. `varint_zigzag_fixed_float` — implemented, qualified across Linux, Windows,
+   and Android evidence, and selected as the default scalar profile under ADR
+   0039;
 3. delta plus varint — blocked on real ordered snapshots and loss/reorder models;
 4. masks and bit packing — blocked on real change distributions;
 5. quantized fields — blocked on field-specific numeric error budgets;
