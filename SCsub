@@ -1,0 +1,20 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+import os
+
+Import("env")
+Import("env_modules")
+
+env_tick_synchronizer = env_modules.Clone()
+
+# Module registration.
+env_tick_synchronizer.add_source_files(env.modules_sources, "register_types.cpp")
+
+# All module sources live in `source/` and its subfolders; new files are picked up automatically.
+# Folders are visited in a stable order so builds are reproducible.
+module_dir = Dir(".").srcnode().abspath
+for root, dirs, _files in os.walk(os.path.join(module_dir, "source")):
+    dirs.sort()
+    rel = os.path.relpath(root, module_dir).replace("\\", "/")
+    env_tick_synchronizer.add_source_files(env.modules_sources, rel + "/*.cpp")

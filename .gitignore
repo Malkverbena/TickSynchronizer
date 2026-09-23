@@ -1,0 +1,20 @@
+# Build artifacts produced when the engine compiles this module.
+*.o
+*.obj
+*.os
+*.ox
+*.a
+*.lib
+*.d
+*.gen.*
+.scu/
+.sconsign*.dblite
+__pycache__/
+*.pyc
+
+# Editors / tools.
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+*.code-workspace
