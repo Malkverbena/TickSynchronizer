@@ -1,7 +1,9 @@
 # Headless star demo
 
-A server and a client over ENet (localhost), with optional simulated latency, jitter and packet loss. The client
-predicts its player; the server's NPC is interpolated. Both print their statistics and final positions.
+A server and a client over ENet (localhost), with optional simulated latency, jitter and packet loss. The server
+spawns the client's player with a `TickSpawner` and schedules a `round_start` event half a second ahead; the client
+predicts its player, interpolates the server's NPC and sends a `honk` event every two seconds. Both print their
+statistics, the frames the events ran at, and the final positions.
 
 ```bash
 godot --headless --path . --script main.gd -- server --duration=17 --latency=0.05 --jitter=0.01 --loss=0.05

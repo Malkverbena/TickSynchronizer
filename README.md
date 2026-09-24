@@ -7,8 +7,9 @@ replay), interpolation, lag compensation and per-object authority, over ENet.
 It is a rewrite, inspired by [NetworkSynchronizer](https://github.com/GameNetworking/NetworkSynchronizer)
 (MIT), whose ideas it reuses and extends.
 
-> **Status:** branch `0.1` — phase F2 done: server-authoritative star networks with client prediction,
-> reconciliation and interpolation. Spawning, events and meshes come in the next phases; see [Roadmap](#roadmap).
+> **Status:** branch `0.1` — phase F3 done: server-authoritative star networks with client prediction,
+> reconciliation, interpolation, replicated spawning, frame-scheduled events and sender validation. Meshes and
+> distributed authority come in the next phases; see [Roadmap](#roadmap).
 
 ## Purpose
 
@@ -112,7 +113,20 @@ func _process_tick(delta: float, input: DataBuffer):
 	get_root_node().position += Vector3(direction.x, 0.0, direction.y) * 5.0 * delta
 ```
 
-Set `controller_peer` to the id of the client that controls the object (1 for the server). The class reference
+Set `controller_peer` to the id of the client that controls the object (1 for the server), or let a
+`TickSpawner` do it:
+
+```gdscript
+# Server: create the player of each client that joins; the clients create the same node.
+func _on_peer_ready(peer: int):
+	$Players/TickSpawner.spawn("res://player.tscn", "Player_%d" % peer, peer)
+	# Run something at the same frame on every peer.
+	$TickNetwork.send_event(&"round_start", null, $TickNetwork.get_event_frame(0.5))
+```
+
+Events sent by clients (`TickObject.send_event()`) run on the server at the frame the client predicted, after
+`_validate_event()`; with the default untrusted setting, only the controller of an object can send it events,
+and the rate and size of what clients send are limited. The class reference
 is in `doc_classes/`; a runnable client/server example is in [`demos/star_headless`](demos/star_headless).
 
 ## Building
@@ -146,7 +160,7 @@ flowchart TB
     src --> codec["codec/ — TickCodec"]
     src --> sync["sync/ — TickSyncCore (star network engine), protocol"]
     src --> transport["transport/ — TickTransport, EnetStarTransport, TickLocalNetwork (tests)"]
-    src --> nodes["nodes/ — TickNetwork, TickObject, DataBuffer"]
+    src --> nodes["nodes/ — TickNetwork, TickObject, TickSpawner, DataBuffer"]
     m --> tests["tests/ — doctest suites"]
     m --> docs["doc_classes/ — class reference"]
     m --> demos["demos/ — example projects"]

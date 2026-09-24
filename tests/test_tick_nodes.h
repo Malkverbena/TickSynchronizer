@@ -9,6 +9,8 @@
 #include "scene/main/window.h"
 #include "tests/test_macros.h"
 
+#include "modules/modules_enabled.gen.h" // For MODULE_GDSCRIPT_ENABLED.
+
 #ifdef MODULE_GDSCRIPT_ENABLED
 #include "modules/gdscript/gdscript.h"
 #endif
@@ -70,7 +72,7 @@ struct TestNodeWorld {
 	}
 };
 
-TEST_CASE("[Modules][TickSynchronizer][TickNetwork] Nodes predict and interpolate over a simulated network") {
+TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickNetwork] Nodes predict and interpolate over a simulated network") {
 	const Ref<GDScript> player_script = make_script(R"(
 extends TickObject
 

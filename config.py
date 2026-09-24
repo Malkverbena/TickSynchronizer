@@ -29,6 +29,7 @@ def get_doc_classes():
         "TickCodec",
         "TickNetwork",
         "TickObject",
+        "TickSpawner",
         "TickTransport",
     ]
 

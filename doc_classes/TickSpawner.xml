@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickSpawner" inherits="Node" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Replicates the creation and removal of nodes from the server to the clients.
+	</brief_description>
+	<description>
+		On the server, [method spawn] instantiates one of [member spawnable_scenes] (or [method spawn_custom] calls [member spawn_function]) under [member spawn_path], and every client creates the same node with the same name. Removing a spawned node from the tree on the server removes it on the clients. Clients that join later receive the live spawns.
+		The controller peer given to the spawn becomes the [member TickObject.controller_peer] of every [TickObject] of the new node, on all peers. Clients only instantiate scenes of [member spawnable_scenes] or call [member spawn_function]; nothing else coming from the network is instantiated.
+		[codeblock]
+		func _on_peer_ready(peer: int):
+			$Players/TickSpawner.spawn("res://player.tscn", "Player_%d" % peer, peer)
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_spawnable_scene">
+			<return type="void" />
+			<param index="0" name="path" type="String" />
+			<description>
+				Adds a scene path to [member spawnable_scenes].
+			</description>
+		</method>
+		<method name="get_spawned_nodes" qualifiers="const">
+			<return type="Node[]" />
+			<description>
+				Returns the nodes spawned by this spawner that still exist.
+			</description>
+		</method>
+		<method name="spawn">
+			<return type="Node" />
+			<param index="0" name="scene" type="String" />
+			<param index="1" name="name" type="String" default="&quot;&quot;" />
+			<param index="2" name="controller_peer" type="int" default="1" />
+			<param index="3" name="data" type="Variant" default="null" />
+			<description>
+				Server only. Instantiates [param scene] (one of [member spawnable_scenes]) under [member spawn_path], named [param name] (generated when empty), with [param controller_peer] as the controller of its [TickObject]s, and replicates it. [param data] is sent to the clients too. Returns the new node, or [code]null[/code] on failure.
+			</description>
+		</method>
+		<method name="spawn_custom">
+			<return type="Node" />
+			<param index="0" name="data" type="Variant" />
+			<param index="1" name="name" type="String" default="&quot;&quot;" />
+			<param index="2" name="controller_peer" type="int" default="1" />
+			<description>
+				Server only. Creates a node with [member spawn_function] called with [param data], on the server and on every client, and adds it as in [method spawn]. Returns the new node, or [code]null[/code] on failure.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="network_path" type="NodePath" setter="set_network_path" getter="get_network_path" default="NodePath(&quot;&quot;)">
+			Path to the [TickNetwork]. If empty, the first [TickNetwork] ancestor is used, or else the first one in the scene.
+		</member>
+		<member name="spawn_function" type="Callable" setter="set_spawn_function" getter="get_spawn_function" default="Callable()">
+			Called with the spawn's data to create the node of [method spawn_custom], on every peer. It must return a new [Node] outside the tree.
+		</member>
+		<member name="spawn_path" type="NodePath" setter="set_spawn_path" getter="get_spawn_path" default="NodePath(&quot;..&quot;)">
+			Node the spawned nodes are added to.
+		</member>
+		<member name="spawnable_scenes" type="PackedStringArray" setter="set_spawnable_scenes" getter="get_spawnable_scenes" default="PackedStringArray()">
+			Paths of the scenes that [method spawn] can instantiate.
+		</member>
+	</members>
+	<signals>
+		<signal name="despawned">
+			<param index="0" name="node" type="Node" />
+			<description>
+				Emitted when a spawned [param node] leaves the tree.
+			</description>
+		</signal>
+		<signal name="spawned">
+			<param index="0" name="node" type="Node" />
+			<description>
+				Emitted when a [param node] is spawned, on the server and on the clients.
+			</description>
+		</signal>
+	</signals>
+</class>

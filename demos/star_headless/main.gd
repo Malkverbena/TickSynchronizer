@@ -10,8 +10,11 @@ var options := {"port": 7777, "duration": 15.0, "latency": 0.0, "jitter": 0.0, "
 var world: Node
 var network: TickNetwork
 var transport: EnetStarTransport
+var spawner: TickSpawner
 var elapsed := 0.0
 var rewinds_at_warmup := -1
+var next_honk := 2.0
+var round_frame := -1
 
 
 func _initialize() -> void:
@@ -36,8 +39,14 @@ func _initialize() -> void:
 	network = TickNetwork.new()
 	network.name = "Net"
 	world.add_child(network)
+	# The server spawns the players; the clients get them through the spawner.
+	spawner = TickSpawner.new()
+	spawner.name = "Players"
+	spawner.spawn_function = _make_player
+	world.add_child(spawner)
 	root.add_child(world)
 	_add_body("Npc", Npc, 1)
+	network.event_received.connect(_on_network_event)
 
 	if role == "server":
 		transport = EnetStarTransport.create_server(options.port, 8, compression)
@@ -64,16 +73,31 @@ func _add_body(body_name: String, script: Script, controller: int) -> Node2D:
 	return body
 
 
+func _make_player(_data) -> Node:
+	var body := Node2D.new()
+	var sync := TickObject.new()
+	sync.set_script(Player)
+	body.add_child(sync)
+	return body
+
+
 func _on_peer_ready(peer: int) -> void:
-	# The game spawns the player of each client once it joins; the client spawns its own copy.
-	_add_body("Player_%d" % peer, Player, peer)
+	spawner.spawn_custom(null, "Player_%d" % peer, peer)
 	print("[server] player %d joined" % peer)
+	# Every peer starts the "round" at the same frame, half a second from now.
+	round_frame = network.get_event_frame(0.5)
+	network.send_event(&"round_start", null, round_frame)
 
 
 func _on_connected(_peer: int) -> void:
-	var id := network.get_local_peer_id()
-	_add_body("Player_%d" % id, Player, id)
-	print("[client] connected as %d" % id)
+	print("[client] connected as %d" % network.get_local_peer_id())
+
+
+func _on_network_event(sender: int, event: StringName, _payload: Variant, frame: int) -> void:
+	if event == &"round_start":
+		print("[client] round_start scheduled for frame %d, ran at frame %d" % [frame, network.get_frame() - 1])
+	elif event == &"honk":
+		print("[server] honk from %d, sent for frame %d, ran at frame %d" % [sender, frame, network.get_frame() - 1])
 
 
 func _process(delta: float) -> bool:
@@ -81,6 +105,9 @@ func _process(delta: float) -> bool:
 	if options.get("trace", "") == "1" and int(elapsed * 2.0) != int((elapsed - delta) * 2.0):
 		var s := network.get_stats()
 		print("[%s] t=%.1f frame=%d rewinds=%d ghost=%d late=%d scale=%.3f rtt=%.0f predicting=%s" % [role, elapsed, network.get_frame(), s.rewinds, s.ghost_inputs, s.late_inputs, s.time_scale, network.get_rtt() * 1000.0, network.is_predicting()])
+	if role == "client" and network.is_predicting() and elapsed >= next_honk:
+		next_honk += 2.0
+		network.send_event(&"honk")
 	if rewinds_at_warmup < 0 and elapsed >= 3.0:
 		rewinds_at_warmup = network.get_stats().rewinds
 	if elapsed < options.duration:

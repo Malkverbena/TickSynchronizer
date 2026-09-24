@@ -41,4 +41,10 @@ public:
 
 	// Applies an interpolated state to an object that isn't simulated locally. The default sets the variables.
 	virtual void apply_interpolated_state(const LocalVector<Variant> &p_values);
+
+	// Validates an event sent by `p_sender` to this object: 1 accepts, 0 refuses, -1 (the default) lets the
+	// network's trust policy decide.
+	virtual int validate_event(int p_sender, const StringName &p_event, const Variant &p_payload) { return -1; }
+	// Executes an event. `p_frame` is the frame it was scheduled for.
+	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) {}
 };

@@ -39,6 +39,8 @@ protected:
 	GDVIRTUAL1(_collect_input, Ref<DataBuffer>)
 	GDVIRTUAL2(_process_tick, double, Ref<DataBuffer>)
 	GDVIRTUAL1(_apply_interpolated_state, Dictionary)
+	GDVIRTUAL3R(bool, _validate_event, int, StringName, Variant)
+	GDVIRTUAL4(_on_event, int, StringName, Variant, int64_t)
 
 public:
 	void set_controller_peer(int p_peer);
@@ -55,6 +57,8 @@ public:
 	PackedStringArray get_declared_vars() const;
 
 	int get_net_id() const;
+	// Client: to the server. Server: to `p_peer`, or every client with 0. `p_frame` < 0 uses the default.
+	Error send_event(const StringName &p_event, const Variant &p_payload, int64_t p_frame, int p_peer);
 	bool is_rewinding() const;
 
 	// TickSyncObject.
@@ -66,6 +70,8 @@ public:
 	virtual void collect_input(TickDataBuffer &r_input) override;
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override;
 	virtual void apply_interpolated_state(const LocalVector<Variant> &p_values) override;
+	virtual int validate_event(int p_sender, const StringName &p_event, const Variant &p_payload) override;
+	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override;
 
 	TickObject();
 };

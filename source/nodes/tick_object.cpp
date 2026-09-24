@@ -113,6 +113,23 @@ int TickObject::get_net_id() const {
 	return network ? network->get_net_id(this) : 0;
 }
 
+Error TickObject::send_event(const StringName &p_event, const Variant &p_payload, int64_t p_frame, int p_peer) {
+	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
+	return network->send_object_event(this, p_event, p_payload, p_frame, p_peer);
+}
+
+int TickObject::validate_event(int p_sender, const StringName &p_event, const Variant &p_payload) {
+	bool accepted = false;
+	if (GDVIRTUAL_CALL(_validate_event, p_sender, p_event, p_payload, accepted)) {
+		return accepted ? 1 : 0;
+	}
+	return -1;
+}
+
+void TickObject::on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) {
+	GDVIRTUAL_CALL(_on_event, p_sender, p_event, p_payload, int64_t(p_frame));
+}
+
 bool TickObject::is_rewinding() const {
 	return network && network->is_rewinding();
 }
@@ -168,6 +185,7 @@ void TickObject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_declared_vars"), &TickObject::get_declared_vars);
 	ClassDB::bind_method(D_METHOD("get_net_id"), &TickObject::get_net_id);
 	ClassDB::bind_method(D_METHOD("is_rewinding"), &TickObject::is_rewinding);
+	ClassDB::bind_method(D_METHOD("send_event", "event", "payload", "frame", "peer"), &TickObject::send_event, DEFVAL(Variant()), DEFVAL(-1), DEFVAL(0));
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "controller_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_controller_peer", "get_controller_peer");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "root_path"), "set_root_path", "get_root_path");
@@ -177,4 +195,6 @@ void TickObject::_bind_methods() {
 	GDVIRTUAL_BIND(_collect_input, "input");
 	GDVIRTUAL_BIND(_process_tick, "delta", "input");
 	GDVIRTUAL_BIND(_apply_interpolated_state, "state");
+	GDVIRTUAL_BIND(_validate_event, "sender", "event", "payload");
+	GDVIRTUAL_BIND(_on_event, "sender", "event", "payload", "frame");
 }

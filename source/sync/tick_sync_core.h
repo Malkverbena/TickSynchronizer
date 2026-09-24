@@ -38,6 +38,13 @@ public:
 		virtual void on_prediction_started(uint32_t p_frame) {}
 		// Client: the predicted objects diverged at `p_frame` and `p_frame_count` frames were simulated again.
 		virtual void on_rewound(uint32_t p_frame, int p_frame_count) {}
+		// Server: validates an event without target object; 1 accepts, 0 refuses, -1 accepts (the default).
+		virtual int validate_network_event(int p_sender, const StringName &p_event, const Variant &p_payload) { return -1; }
+		// Executes an event without target object.
+		virtual void on_network_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) {}
+		// Client: the server spawned (or despawned) something with `p_spawner`; the game instantiates it.
+		virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {}
+		virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) {}
 	};
 
 	struct Settings {
@@ -60,6 +67,17 @@ public:
 		// Seconds between pings once the clock is synchronized.
 		double ping_interval = 0.5;
 		int clock_min_samples = 4;
+		// When `false` (untrusted clients), the server limits the rate and size of what clients send, and only
+		// accepts events for an object from its controller unless the object validates them itself.
+		bool trusted = false;
+		// Untrusted: input packets and events accepted per second from each client (with a burst of the same size).
+		int max_input_packets_per_second = 180;
+		int max_events_per_second = 30;
+		// Untrusted: largest input of one object per frame, in bits, and largest event payload, in bytes.
+		int max_input_bits = 1024;
+		int max_event_bytes = 4096;
+		// Largest delay, in seconds, of an event scheduled for a future frame.
+		double max_event_delay = 10.0;
 	};
 
 	struct Stats {
@@ -73,6 +91,12 @@ public:
 		uint64_t snapshots_received = 0;
 		uint64_t snapshots_dropped = 0;
 		uint64_t malformed_packets = 0;
+		uint64_t rate_limited_packets = 0;
+		uint64_t events_sent = 0;
+		uint64_t events_received = 0;
+		uint64_t events_rejected = 0;
+		uint64_t spawns = 0;
+		uint64_t despawns = 0;
 	};
 
 private:
@@ -110,6 +134,33 @@ private:
 		TickSyncObject *object = nullptr;
 	};
 
+	struct RateLimiter {
+		double tokens = -1.0;
+		uint64_t last_usec = 0;
+
+		// Takes one token; tokens refill at `p_rate` per second, up to `p_rate`.
+		bool take(double p_rate, uint64_t p_now_usec);
+	};
+
+	struct PendingEvent {
+		uint32_t frame = TICK_FRAME_NONE;
+		uint32_t requested_frame = TICK_FRAME_NONE;
+		uint64_t sequence = 0;
+		uint64_t expire_usec = 0;
+		int sender = 0;
+		uint16_t target = 0;
+		StringName name;
+		Variant payload;
+	};
+
+	struct SpawnRecord {
+		String spawner;
+		int scene = -1;
+		String name;
+		int controller = 0;
+		Variant data;
+	};
+
 	struct PeerState {
 		bool accepted = false;
 		uint64_t reject_usec = 0;
@@ -123,6 +174,8 @@ private:
 		bool has_last_input = false;
 		uint32_t last_received_frame = TICK_FRAME_NONE;
 		HashMap<uint16_t, TickDataBuffer> tick_inputs;
+		RateLimiter input_limiter;
+		RateLimiter event_limiter;
 	};
 
 	Settings settings;
@@ -143,6 +196,15 @@ private:
 	HashMap<int, PeerState> peers;
 	LocalVector<SnapshotRecord> server_history;
 	uint64_t server_epoch_usec = 0;
+	// Net ids released recently, with the frame they were released at (ADR-034).
+	HashMap<uint16_t, uint32_t> quarantined_ids;
+	HashMap<uint32_t, SpawnRecord> spawns;
+	LocalVector<uint32_t> spawn_order;
+	uint32_t next_spawn_id = 1;
+
+	// Events waiting for their frame (both roles) or for their target object (client).
+	LocalVector<PendingEvent> pending_events;
+	uint64_t next_event_sequence = 0;
 
 	// Client.
 	HashMap<String, TickSyncObject *> local_objects;
@@ -182,6 +244,8 @@ private:
 	void server_tick(uint32_t p_frame);
 	void server_resolve_input(PeerState &r_peer, uint32_t p_frame);
 	void server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t p_frame);
+	void server_handle_event(int p_peer, TickDataBuffer &p_message);
+	void server_send_spawn(int p_peer, uint32_t p_spawn_id);
 	void write_object_state(TickDataBuffer &r_message, const ServerObject &p_object, const LocalVector<Variant> &p_values, const LocalVector<Variant> *p_base) const;
 
 	// Client.
@@ -191,6 +255,9 @@ private:
 	void client_handle_unregister(TickDataBuffer &p_message);
 	void client_handle_snapshot(TickDataBuffer &p_message, bool p_full);
 	void client_handle_pong(TickDataBuffer &p_message);
+	void client_handle_spawn(TickDataBuffer &p_message);
+	void client_handle_despawn(TickDataBuffer &p_message);
+	void client_handle_event(TickDataBuffer &p_message);
 	void client_bind(uint16_t p_net_id, RemoteObject &r_remote);
 	void client_update_predicted_ids();
 	bool client_is_predicted(uint16_t p_net_id) const;
@@ -203,6 +270,15 @@ private:
 	void client_send_ping();
 	void client_update_interpolation();
 	SnapshotRecord *client_get_received(uint32_t p_frame);
+
+	// Events.
+	bool read_event(TickDataBuffer &p_message, PendingEvent &r_event, int &r_payload_bytes);
+	void write_event(TickDataBuffer &r_message, uint16_t p_target, uint32_t p_frame, const StringName &p_name, const Variant &p_payload);
+	void queue_event(const PendingEvent &p_event);
+	// Executes the events due at `p_frame`, or every event whose target is available when `p_frame` is
+	// `TICK_FRAME_NONE`.
+	void run_events(uint32_t p_frame);
+	bool execute_event(const PendingEvent &p_event);
 
 public:
 	void set_settings(const Settings &p_settings);
@@ -236,4 +312,16 @@ public:
 	uint32_t get_latest_snapshot_frame() const { return latest_snapshot; }
 	// Net id of an object, or 0 when unknown.
 	uint16_t get_net_id(const TickSyncObject *p_object) const;
+
+	// Server: records a spawn and sends it to the clients (and to the ones joining later). Call it before the
+	// spawned objects are registered, so the clients create them before binding them.
+	uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data);
+	void despawn(uint32_t p_spawn_id);
+	uint32_t get_next_spawn_id() const { return next_spawn_id; }
+
+	// Sends an event to `p_target` (or the network when null). Client: to the server. Server: to `p_peer`, or
+	// every client with 0. `p_frame` schedules it (`TICK_FRAME_NONE`: see `notes/f3-design.md`).
+	Error send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer);
+	// A frame `p_seconds` after the current one, to schedule events that every peer runs at the same frame.
+	uint32_t get_event_frame(double p_seconds) const;
 };

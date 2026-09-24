@@ -11,6 +11,13 @@
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="get_event_frame" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="seconds" type="float" />
+			<description>
+				Returns the frame [param seconds] after the current one. To run an event at the same frame on every peer, the server sends it for a frame far enough ahead to cover the latency, for example [code]get_event_frame(0.5)[/code].
+			</description>
+		</method>
 		<method name="get_frame" qualifiers="const">
 			<return type="int" />
 			<description>
@@ -65,6 +72,16 @@
 				Returns [code]true[/code] if this peer is the server.
 			</description>
 		</method>
+		<method name="send_event">
+			<return type="int" enum="Error" />
+			<param index="0" name="event" type="StringName" />
+			<param index="1" name="payload" type="Variant" default="null" />
+			<param index="2" name="frame" type="int" default="-1" />
+			<param index="3" name="peer" type="int" default="0" />
+			<description>
+				Sends an event without target object, received with [signal event_received]. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts). From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The [param payload] can't contain objects and is limited to [member max_event_size] bytes. Events aren't repeated during rewinds.
+			</description>
+		</method>
 		<method name="start">
 			<return type="int" enum="Error" />
 			<param index="0" name="transport" type="TickTransport" />
@@ -80,6 +97,9 @@
 		</method>
 	</methods>
 	<members>
+		<member name="event_validator" type="Callable" setter="set_event_validator" getter="get_event_validator" default="Callable()">
+			Called on the server as [code]validator(sender: int, event: StringName, payload: Variant) -&gt; bool[/code] for each event without target object sent by a client; returning [code]false[/code] refuses it. Without a validator, those events are accepted.
+		</member>
 		<member name="history_size" type="int" setter="set_history_size" getter="get_history_size" default="128">
 			Frames of history kept for snapshots, predictions and interpolation.
 		</member>
@@ -88,6 +108,12 @@
 		</member>
 		<member name="interpolation_delay" type="float" setter="set_interpolation_delay" getter="get_interpolation_delay" default="0.1">
 			How far behind the server, in seconds, the interpolated objects are rendered.
+		</member>
+		<member name="max_event_size" type="int" setter="set_max_event_size" getter="get_max_event_size" default="4096">
+			Largest event payload, in bytes. With [constant TRUST_UNTRUSTED], larger events from clients are refused.
+		</member>
+		<member name="max_events_per_second" type="int" setter="set_max_events_per_second" getter="get_max_events_per_second" default="30">
+			With [constant TRUST_UNTRUSTED], the events each client can send per second (with a burst of the same size); the excess is dropped.
 		</member>
 		<member name="max_input_buffer" type="int" setter="set_max_input_buffer" getter="get_max_input_buffer" default="8">
 			Largest number of inputs the client tries to keep buffered on the server.
@@ -104,8 +130,20 @@
 		<member name="ticks_per_second" type="int" setter="set_ticks_per_second" getter="get_ticks_per_second" default="60">
 			Ticks per second of the simulation. Clients use the server's value.
 		</member>
+		<member name="trust" type="int" setter="set_trust" getter="get_trust" enum="TickNetwork.Trust" default="0">
+			How much the server trusts the clients. With [constant TRUST_UNTRUSTED], it limits the rate and size of what they send, and accepts an event for an object only from its controller unless [method TickObject._validate_event] decides. The input of an object is always taken only from its controller, and state only from the server.
+		</member>
 	</members>
 	<signals>
+		<signal name="event_received">
+			<param index="0" name="sender" type="int" />
+			<param index="1" name="event" type="StringName" />
+			<param index="2" name="payload" type="Variant" />
+			<param index="3" name="frame" type="int" />
+			<description>
+				Emitted when an event without target object runs: on the server for events from clients, on clients for events from the server ([param sender] is 1). [param frame] is the frame the event was sent for.
+			</description>
+		</signal>
 		<signal name="peer_left">
 			<param index="0" name="peer" type="int" />
 			<description>
@@ -138,4 +176,12 @@
 			</description>
 		</signal>
 	</signals>
+	<constants>
+		<constant name="TRUST_UNTRUSTED" value="0" enum="Trust">
+			The clients may be modified or malicious: the server limits and validates what they send. The default.
+		</constant>
+		<constant name="TRUST_TRUSTED" value="1" enum="Trust">
+			The peers are trusted (for example, servers of the same cluster): no rate or size limits, and events are accepted from any peer.
+		</constant>
+	</constants>
 </class>

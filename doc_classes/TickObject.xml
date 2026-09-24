@@ -39,6 +39,16 @@
 				Called on the controller, once per tick, to write the input of this tick in [param input]. Not called during rewinds: the stored inputs are used.
 			</description>
 		</method>
+		<method name="_on_event" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="sender" type="int" />
+			<param index="1" name="event" type="StringName" />
+			<param index="2" name="payload" type="Variant" />
+			<param index="3" name="frame" type="int" />
+			<description>
+				Runs an event sent to this object by [param sender] (see [method send_event]). [param frame] is the frame the event was sent for; on the server, a client event runs at that frame, or at the next one if it already passed.
+			</description>
+		</method>
 		<method name="_process_tick" qualifiers="virtual">
 			<return type="void" />
 			<param index="0" name="delta" type="float" />
@@ -51,6 +61,15 @@
 			<return type="void" />
 			<description>
 				Called once, before the object is registered in the network. Declare the synchronized properties here with [method declare_var].
+			</description>
+		</method>
+		<method name="_validate_event" qualifiers="virtual">
+			<return type="bool" />
+			<param index="0" name="sender" type="int" />
+			<param index="1" name="event" type="StringName" />
+			<param index="2" name="payload" type="Variant" />
+			<description>
+				Called on the server for each event a client sends to this object; return [code]false[/code] to refuse it. If not overridden, [member TickNetwork.trust] decides: untrusted networks only accept events from the [member controller_peer].
 			</description>
 		</method>
 		<method name="declare_var">
@@ -89,6 +108,16 @@
 			<return type="bool" />
 			<description>
 				Returns [code]true[/code] while the network simulates again past frames. Use it to skip side effects.
+			</description>
+		</method>
+		<method name="send_event">
+			<return type="int" enum="Error" />
+			<param index="0" name="event" type="StringName" />
+			<param index="1" name="payload" type="Variant" default="null" />
+			<param index="2" name="frame" type="int" default="-1" />
+			<param index="3" name="peer" type="int" default="0" />
+			<description>
+				Sends an event to this object on the other side. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts), and the server calls [method _validate_event] then [method _on_event]. From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. Events aren't repeated during rewinds.
 			</description>
 		</method>
 	</methods>

@@ -1,5 +1,6 @@
 #include "tick_sync_core.h"
 
+#include "core/io/marshalls.h"
 #include "core/math/math_funcs.h"
 #include "core/variant/variant.h"
 
@@ -7,6 +8,36 @@
 static constexpr uint64_t REJECT_DISCONNECT_DELAY_USEC = 1000000;
 // A full snapshot is sent again if it wasn't acknowledged within this delay.
 static constexpr uint64_t FULL_SNAPSHOT_RESEND_USEC = 500000;
+// A client keeps an event for an object it doesn't know yet for this long (E5).
+static constexpr uint64_t PENDING_EVENT_TIMEOUT_USEC = 5000000;
+
+struct PendingEventOrder {
+	template <typename T>
+	bool operator()(const T &p_a, const T &p_b) const {
+		// Events without frame first, then by frame, then in arrival order.
+		if (p_a.frame != p_b.frame) {
+			if (p_a.frame == TICK_FRAME_NONE || p_b.frame == TICK_FRAME_NONE) {
+				return p_a.frame == TICK_FRAME_NONE;
+			}
+			return tick_frame_after(p_b.frame, p_a.frame);
+		}
+		return p_a.sequence < p_b.sequence;
+	}
+};
+
+bool TickSyncCore::RateLimiter::take(double p_rate, uint64_t p_now_usec) {
+	if (tokens < 0.0) {
+		tokens = p_rate;
+		last_usec = p_now_usec;
+	}
+	tokens = MIN(p_rate, tokens + double(p_now_usec - last_usec) * p_rate / 1000000.0);
+	last_usec = p_now_usec;
+	if (tokens < 1.0) {
+		return false;
+	}
+	tokens -= 1.0;
+	return true;
+}
 
 void TickSyncCore::set_settings(const Settings &p_settings) {
 	ERR_FAIL_COND_MSG(role != ROLE_NONE, "The settings can't change while the network is running.");
@@ -86,6 +117,10 @@ void TickSyncCore::stop() {
 	server_objects.clear();
 	server_object_ids.clear();
 	server_ids_by_object.clear();
+	quarantined_ids.clear();
+	spawns.clear();
+	spawn_order.clear();
+	pending_events.clear();
 	received.clear();
 	predictions.clear();
 	for (KeyValue<uint16_t, RemoteObject> &E : remote_objects) {
@@ -123,9 +158,22 @@ void TickSyncCore::register_object(TickSyncObject *p_object) {
 }
 
 void TickSyncCore::server_add_object(TickSyncObject *p_object) {
-	ERR_FAIL_COND_MSG(server_objects.size() >= UINT16_MAX - 1, "Too many synchronized objects.");
-	while (next_net_id == 0 || server_objects.has(next_net_id)) {
-		next_net_id++;
+	ERR_FAIL_COND_MSG(server_objects.size() + quarantined_ids.size() >= UINT16_MAX - 1, "Too many synchronized objects.");
+	const uint32_t current = stepper.get_next_frame_index();
+	const uint32_t quarantine = uint32_t(settings.history_size) * 2;
+	for (int attempt = 0; attempt < UINT16_MAX; attempt++) {
+		if (next_net_id == 0 || server_objects.has(next_net_id)) {
+			next_net_id++;
+			continue;
+		}
+		// A released id is reused only once no snapshot in flight can refer to it (ADR-034).
+		const uint32_t *released = quarantined_ids.getptr(next_net_id);
+		if (released && current - *released < quarantine) {
+			next_net_id++;
+			continue;
+		}
+		quarantined_ids.erase(next_net_id);
+		break;
 	}
 	const uint16_t net_id = next_net_id++;
 	ServerObject object;
@@ -159,6 +207,7 @@ void TickSyncCore::unregister_object(TickSyncObject *p_object) {
 		server_ids_by_object.erase(p_object);
 		server_objects.erase(id);
 		server_object_ids.erase(id);
+		quarantined_ids.insert(id, stepper.get_next_frame_index());
 		if (role == ROLE_SERVER) {
 			for (const KeyValue<int, PeerState> &E : peers) {
 				if (E.value.accepted) {
@@ -195,6 +244,10 @@ uint16_t TickSyncCore::get_net_id(const TickSyncObject *p_object) const {
 
 void TickSyncCore::send(int p_peer, TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message) {
 	ERR_FAIL_COND(transport.is_null());
+	if (p_peer != TickTransport::PEER_BROADCAST && !transport->is_peer_connected(p_peer)) {
+		// The peer left; its disconnection event is processed next.
+		return;
+	}
 	p_message.dry();
 	const LocalVector<uint8_t> &bytes = p_message.get_buffer().get_bytes();
 	transport->send(p_peer, p_channel, p_mode, bytes.ptr(), int(bytes.size()));
@@ -286,6 +339,10 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 				client_send_ping();
 			}
 		}
+		if (!predicting) {
+			// Events waiting for their object (E5), or expiring.
+			run_events(TICK_FRAME_NONE);
+		}
 		client_update_interpolation();
 	}
 
@@ -354,6 +411,9 @@ void TickSyncCore::handle_packet(const TickTransport::Packet &p_packet) {
 			case TICK_MESSAGE_PING:
 				server_handle_ping(p_packet.from_peer, message);
 				break;
+			case TICK_MESSAGE_EVENT:
+				server_handle_event(p_packet.from_peer, message);
+				break;
 			default:
 				stats.malformed_packets++;
 				break;
@@ -387,6 +447,15 @@ void TickSyncCore::handle_packet(const TickTransport::Packet &p_packet) {
 			break;
 		case TICK_MESSAGE_PONG:
 			client_handle_pong(message);
+			break;
+		case TICK_MESSAGE_SPAWN:
+			client_handle_spawn(message);
+			break;
+		case TICK_MESSAGE_DESPAWN:
+			client_handle_despawn(message);
+			break;
+		case TICK_MESSAGE_EVENT:
+			client_handle_event(message);
 			break;
 		default:
 			stats.malformed_packets++;
@@ -432,6 +501,10 @@ void TickSyncCore::server_accept_peer(int p_peer) {
 	welcome.add_uint_bits(server_epoch_usec, 64);
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, welcome);
 
+	// Late join (E4): the live spawns first, so the objects exist when their registration arrives.
+	for (const uint32_t spawn_id : spawn_order) {
+		server_send_spawn(p_peer, spawn_id);
+	}
 	for (const uint16_t net_id : server_object_ids) {
 		server_send_register(p_peer, net_id);
 	}
@@ -467,6 +540,10 @@ void TickSyncCore::server_send_register(int p_peer, uint16_t p_net_id) {
 void TickSyncCore::server_handle_inputs(int p_peer, TickDataBuffer &p_message) {
 	PeerState *peer = peers.getptr(p_peer);
 	if (peer == nullptr || !peer->accepted) {
+		return;
+	}
+	if (!settings.trusted && !peer->input_limiter.take(settings.max_input_packets_per_second, now_usec)) {
+		stats.rate_limited_packets++;
 		return;
 	}
 
@@ -563,6 +640,18 @@ void TickSyncCore::server_resolve_input(PeerState &r_peer, uint32_t p_frame) {
 	if (!parse_frame_input(input, r_peer.tick_inputs)) {
 		stats.malformed_packets++;
 	}
+	if (!settings.trusted) {
+		LocalVector<uint16_t> oversized;
+		for (const KeyValue<uint16_t, TickDataBuffer> &E : r_peer.tick_inputs) {
+			if (E.value.total_size() > settings.max_input_bits) {
+				oversized.push_back(E.key);
+			}
+		}
+		for (const uint16_t net_id : oversized) {
+			r_peer.tick_inputs.erase(net_id);
+			stats.rejected_inputs++;
+		}
+	}
 }
 
 void TickSyncCore::server_tick(uint32_t p_frame) {
@@ -571,6 +660,8 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 			server_resolve_input(E.value, p_frame);
 		}
 	}
+	// Events scheduled for this frame run before the simulation.
+	run_events(p_frame);
 
 	const double delta = get_tick_delta();
 	SnapshotRecord &record = server_history[history_index(p_frame)];
@@ -757,6 +848,8 @@ void TickSyncCore::client_bind(uint16_t p_net_id, RemoteObject &r_remote) {
 	}
 	r_remote.object = *local;
 	predicted_ids_dirty = true;
+	// Events that arrived before the object (E5).
+	run_events(predicting ? stepper.get_next_frame_index() - 1 : TICK_FRAME_NONE);
 	// Its state may be unknown in the current snapshot: ask for a full one.
 	needs_full = true;
 	if (predicting && r_remote.controller == transport->get_local_peer_id() && latest_snapshot != TICK_FRAME_NONE) {
@@ -1081,6 +1174,7 @@ void TickSyncCore::client_reconcile(uint32_t p_frame) {
 
 void TickSyncCore::client_tick(uint32_t p_frame) {
 	client_update_predicted_ids();
+	run_events(p_frame);
 	const double delta = get_tick_delta();
 
 	PredictionRecord &record = predictions[history_index(p_frame)];
@@ -1224,4 +1318,303 @@ void TickSyncCore::client_update_interpolation() {
 			object->apply_interpolated_state(*future_values);
 		}
 	}
+}
+
+// ------------------------------------------------------------------------------------------------------ Spawns
+
+uint32_t TickSyncCore::spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
+	ERR_FAIL_COND_V_MSG(role != ROLE_SERVER, 0, "Only the server can spawn.");
+	ERR_FAIL_COND_V_MSG(p_name.is_empty(), 0, "A spawned node needs a name.");
+	const uint32_t spawn_id = next_spawn_id++;
+	SpawnRecord record;
+	record.spawner = p_spawner;
+	record.scene = p_scene;
+	record.name = p_name;
+	record.controller = p_controller;
+	record.data = p_data;
+	spawns.insert(spawn_id, record);
+	spawn_order.push_back(spawn_id);
+	stats.spawns++;
+	for (const KeyValue<int, PeerState> &E : peers) {
+		if (E.value.accepted) {
+			server_send_spawn(E.key, spawn_id);
+		}
+	}
+	return spawn_id;
+}
+
+void TickSyncCore::despawn(uint32_t p_spawn_id) {
+	ERR_FAIL_COND_MSG(role != ROLE_SERVER, "Only the server can despawn.");
+	const SpawnRecord *record = spawns.getptr(p_spawn_id);
+	ERR_FAIL_NULL_MSG(record, vformat("Spawn %d doesn't exist.", p_spawn_id));
+	TickDataBuffer message;
+	message.begin_write();
+	message.add_uint_bits(TICK_MESSAGE_DESPAWN, 8);
+	message.add_uint_bits(p_spawn_id, 32);
+	message.add_string(record->spawner);
+	for (const KeyValue<int, PeerState> &E : peers) {
+		if (E.value.accepted) {
+			send(E.key, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
+		}
+	}
+	spawns.erase(p_spawn_id);
+	spawn_order.erase(p_spawn_id);
+	stats.despawns++;
+}
+
+void TickSyncCore::server_send_spawn(int p_peer, uint32_t p_spawn_id) {
+	const SpawnRecord &record = spawns[p_spawn_id];
+	TickDataBuffer message;
+	message.begin_write();
+	message.add_uint_bits(TICK_MESSAGE_SPAWN, 8);
+	message.add_uint_bits(p_spawn_id, 32);
+	message.add_string(record.spawner);
+	message.add_int_bits(record.scene, 16);
+	message.add_string(record.name);
+	message.add_int_bits(record.controller, 32);
+	TickCodec::variant()->encode(record.data, message);
+	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
+}
+
+void TickSyncCore::client_handle_spawn(TickDataBuffer &p_message) {
+	const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
+	const String spawner = p_message.read_string();
+	const int scene = int(p_message.read_int_bits(16));
+	const String name = p_message.read_string();
+	const int controller = int(p_message.read_int_bits(32));
+	const Variant data = TickCodec::variant()->decode(p_message);
+	if (p_message.is_buffer_failed() || name.is_empty()) {
+		stats.malformed_packets++;
+		return;
+	}
+	stats.spawns++;
+	if (listener) {
+		listener->on_spawn(spawner, spawn_id, scene, name, controller, data);
+	}
+}
+
+void TickSyncCore::client_handle_despawn(TickDataBuffer &p_message) {
+	const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
+	const String spawner = p_message.read_string();
+	if (p_message.is_buffer_failed()) {
+		stats.malformed_packets++;
+		return;
+	}
+	stats.despawns++;
+	if (listener) {
+		listener->on_despawn(spawner, spawn_id);
+	}
+}
+
+// ------------------------------------------------------------------------------------------------------ Events
+
+void TickSyncCore::write_event(TickDataBuffer &r_message, uint16_t p_target, uint32_t p_frame, const StringName &p_name, const Variant &p_payload) {
+	r_message.begin_write();
+	r_message.add_uint_bits(TICK_MESSAGE_EVENT, 8);
+	r_message.add_uint_bits(p_target, 16);
+	r_message.add_uint_bits(p_frame, 32);
+	r_message.add_string(p_name);
+	TickCodec::variant()->encode(p_payload, r_message);
+}
+
+bool TickSyncCore::read_event(TickDataBuffer &p_message, PendingEvent &r_event, int &r_payload_bytes) {
+	r_event.target = uint16_t(p_message.read_uint_bits(16));
+	r_event.requested_frame = uint32_t(p_message.read_uint_bits(32));
+	r_event.name = p_message.read_string();
+	// The payload size comes first (see `TickCodec::variant()`); checked before decoding anything big.
+	const int offset = p_message.get_bit_offset();
+	r_payload_bytes = int(p_message.read_uint_bits(16));
+	p_message.seek(offset);
+	if (p_message.is_buffer_failed() || String(r_event.name).is_empty()) {
+		return false;
+	}
+	if (!settings.trusted && role == ROLE_SERVER && r_payload_bytes > settings.max_event_bytes) {
+		return true;
+	}
+	r_event.payload = TickCodec::variant()->decode(p_message);
+	return !p_message.is_buffer_failed();
+}
+
+void TickSyncCore::queue_event(const PendingEvent &p_event) {
+	PendingEvent event = p_event;
+	event.sequence = next_event_sequence++;
+	pending_events.push_back(event);
+	pending_events.sort_custom<PendingEventOrder>();
+}
+
+bool TickSyncCore::execute_event(const PendingEvent &p_event) {
+	const uint32_t frame = p_event.requested_frame != TICK_FRAME_NONE ? p_event.requested_frame : p_event.frame;
+	if (p_event.target == 0) {
+		if (listener) {
+			listener->on_network_event(p_event.sender, p_event.name, p_event.payload, frame);
+		}
+		return true;
+	}
+	TickSyncObject *object = nullptr;
+	if (role == ROLE_SERVER) {
+		ServerObject *server_object = server_objects.getptr(p_event.target);
+		object = server_object ? server_object->object : nullptr;
+		if (object == nullptr) {
+			// The object is gone.
+			return true;
+		}
+	} else {
+		RemoteObject *remote = remote_objects.getptr(p_event.target);
+		object = remote ? remote->object : nullptr;
+		if (object == nullptr) {
+			// Not created or bound yet: keep it until it expires (E5).
+			return now_usec >= p_event.expire_usec;
+		}
+	}
+	object->on_event(p_event.sender, p_event.name, p_event.payload, frame);
+	return true;
+}
+
+void TickSyncCore::run_events(uint32_t p_frame) {
+	if (pending_events.is_empty()) {
+		return;
+	}
+	// Executing an event can queue others; work on a copy.
+	LocalVector<PendingEvent> events;
+	events = pending_events;
+	pending_events.clear();
+	LocalVector<PendingEvent> kept;
+	for (const PendingEvent &event : events) {
+		const bool due = event.frame == TICK_FRAME_NONE || (p_frame != TICK_FRAME_NONE && !tick_frame_after(event.frame, p_frame));
+		if (!due || !execute_event(event)) {
+			kept.push_back(event);
+		}
+	}
+	for (const PendingEvent &event : pending_events) {
+		kept.push_back(event);
+	}
+	pending_events = kept;
+	pending_events.sort_custom<PendingEventOrder>();
+}
+
+void TickSyncCore::server_handle_event(int p_peer, TickDataBuffer &p_message) {
+	PeerState *peer = peers.getptr(p_peer);
+	if (peer == nullptr || !peer->accepted) {
+		return;
+	}
+	if (!settings.trusted && !peer->event_limiter.take(settings.max_events_per_second, now_usec)) {
+		stats.rate_limited_packets++;
+		stats.events_rejected++;
+		return;
+	}
+	PendingEvent event;
+	int payload_bytes = 0;
+	if (!read_event(p_message, event, payload_bytes)) {
+		stats.malformed_packets++;
+		return;
+	}
+	if (!settings.trusted && payload_bytes > settings.max_event_bytes) {
+		stats.events_rejected++;
+		return;
+	}
+	event.sender = p_peer;
+
+	// Sender rules (ADR-033).
+	int verdict = -1;
+	if (event.target == 0) {
+		verdict = listener ? listener->validate_network_event(p_peer, event.name, event.payload) : -1;
+		if (verdict < 0) {
+			verdict = 1;
+		}
+	} else {
+		ServerObject *object = server_objects.getptr(event.target);
+		if (object == nullptr) {
+			stats.events_rejected++;
+			return;
+		}
+		verdict = object->object->validate_event(p_peer, event.name, event.payload);
+		if (verdict < 0) {
+			verdict = (settings.trusted || object->controller == p_peer) ? 1 : 0;
+		}
+	}
+	if (verdict == 0) {
+		stats.events_rejected++;
+		return;
+	}
+
+	// Scheduling: the requested frame, or the next one if it already passed.
+	const uint32_t current = stepper.get_next_frame_index();
+	const uint32_t max_delay = uint32_t(settings.max_event_delay * double(settings.ticks_per_second));
+	if (event.requested_frame != TICK_FRAME_NONE && tick_frame_after(event.requested_frame, current + max_delay)) {
+		stats.events_rejected++;
+		return;
+	}
+	if (event.requested_frame == TICK_FRAME_NONE || !tick_frame_after(event.requested_frame, current)) {
+		event.frame = current;
+	} else {
+		event.frame = event.requested_frame;
+	}
+	stats.events_received++;
+	queue_event(event);
+}
+
+void TickSyncCore::client_handle_event(TickDataBuffer &p_message) {
+	PendingEvent event;
+	int payload_bytes = 0;
+	if (!read_event(p_message, event, payload_bytes)) {
+		stats.malformed_packets++;
+		return;
+	}
+	event.sender = TickTransport::PEER_SERVER;
+	event.expire_usec = now_usec + PENDING_EVENT_TIMEOUT_USEC;
+	stats.events_received++;
+
+	// A frame not simulated yet (or any frame, before the prediction starts) waits for the simulation to reach it;
+	// otherwise it runs now.
+	const uint32_t next_frame = stepper.get_next_frame_index();
+	if (event.requested_frame != TICK_FRAME_NONE && (!predicting || !tick_frame_after(next_frame, event.requested_frame))) {
+		event.frame = event.requested_frame;
+		queue_event(event);
+		return;
+	}
+	event.frame = TICK_FRAME_NONE;
+	if (!execute_event(event)) {
+		queue_event(event);
+	}
+}
+
+Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) {
+	ERR_FAIL_COND_V_MSG(role == ROLE_NONE, ERR_UNCONFIGURED, "The network isn't running.");
+	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
+	int payload_bytes = 0;
+	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded (objects aren't allowed).");
+	ERR_FAIL_COND_V_MSG(payload_bytes > settings.max_event_bytes, ERR_INVALID_DATA, vformat("The event payload takes %d bytes; the limit is %d.", payload_bytes, settings.max_event_bytes));
+
+	uint16_t target = 0;
+	if (p_target) {
+		target = get_net_id(p_target);
+		ERR_FAIL_COND_V_MSG(target == 0, ERR_UNAVAILABLE, "The event's target object isn't synchronized yet.");
+	}
+
+	TickDataBuffer message;
+	if (role == ROLE_CLIENT) {
+		ERR_FAIL_COND_V_MSG(!welcomed, ERR_UNAVAILABLE, "The client isn't connected to the server yet.");
+		uint32_t frame = p_frame;
+		if (frame == TICK_FRAME_NONE && predicting) {
+			// By default, the frame the client is predicting.
+			frame = stepper.get_next_frame_index();
+		}
+		write_event(message, target, frame, p_name, p_payload);
+		send(TickTransport::PEER_SERVER, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
+		stats.events_sent++;
+		return OK;
+	}
+
+	write_event(message, target, p_frame, p_name, p_payload);
+	for (const KeyValue<int, PeerState> &E : peers) {
+		if (E.value.accepted && (p_peer == TickTransport::PEER_BROADCAST || p_peer == E.key)) {
+			send(E.key, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
+			stats.events_sent++;
+		}
+	}
+	return OK;
+}
+
+uint32_t TickSyncCore::get_event_frame(double p_seconds) const {
+	return stepper.get_next_frame_index() + uint32_t(Math::ceil(MAX(p_seconds, 0.0) * double(settings.ticks_per_second)));
 }
