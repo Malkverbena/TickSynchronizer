@@ -61,6 +61,19 @@ void TickClock::update_estimate() {
 	rtt_usec = samples[best].rtt_usec;
 }
 
+uint64_t TickClock::get_rtt_spread_usec() const {
+	if (samples.is_empty()) {
+		return 0;
+	}
+	uint64_t highest = samples[0].rtt_usec;
+	uint64_t lowest = samples[0].rtt_usec;
+	for (const Sample &sample : samples) {
+		highest = MAX(highest, sample.rtt_usec);
+		lowest = MIN(lowest, sample.rtt_usec);
+	}
+	return highest - lowest;
+}
+
 uint64_t TickClock::local_to_master_usec(uint64_t p_local_usec) const {
 	// Unsigned arithmetic wraps, which is the intended result for negative offsets.
 	return master ? p_local_usec : p_local_usec + uint64_t(offset_usec);
@@ -83,4 +96,9 @@ uint32_t TickClock::get_master_frame(uint64_t p_local_usec) const {
 	}
 	// Frame indices wrap around, like the ones of `TickFixedStepper`.
 	return uint32_t(uint64_t(master_usec - int64_t(master_epoch_usec)) * uint64_t(ticks_per_second) / 1000000);
+}
+
+double TickClock::get_master_frame_time(uint64_t p_local_usec) const {
+	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_usec);
+	return double(master_usec - int64_t(master_epoch_usec)) * double(ticks_per_second) / 1000000.0;
 }

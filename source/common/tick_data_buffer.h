@@ -135,6 +135,12 @@ public:
 	uint64_t add_uint(uint64_t p_input, CompressionLevel p_compression_level);
 	uint64_t read_uint(CompressionLevel p_compression_level);
 
+	// Integers of any size from 1 to 64 bits, clamped to the range of that size.
+	uint64_t add_uint_bits(uint64_t p_input, int p_bits);
+	uint64_t read_uint_bits(int p_bits);
+	int64_t add_int_bits(int64_t p_input, int p_bits);
+	int64_t read_int_bits(int p_bits);
+
 	double add_real(double p_input, CompressionLevel p_compression_level);
 	double read_real(CompressionLevel p_compression_level);
 

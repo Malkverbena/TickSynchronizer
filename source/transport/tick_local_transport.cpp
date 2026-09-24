@@ -15,10 +15,22 @@ void TickLocalTransport::get_connected_peers(LocalVector<int> &r_peers) const {
 }
 
 int TickLocalTransport::get_channel_count() const {
+	ERR_FAIL_NULL_V(network, 0);
 	return network->get_channel_count();
 }
 
+int TickLocalTransport::get_max_payload_size() const {
+	ERR_FAIL_NULL_V(network, 0);
+	return network->get_max_payload_size();
+}
+
+void TickLocalTransport::disconnect_peer(int p_peer) {
+	ERR_FAIL_NULL(network);
+	network->disconnect_peers(peer_id, p_peer);
+}
+
 Error TickLocalTransport::send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
+	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "This transport was removed from its network.");
 	ERR_FAIL_COND_V_MSG(p_peer < 0, ERR_INVALID_PARAMETER, "The target peer can't be negative.");
 	if (p_peer == PEER_BROADCAST) {
 		LocalVector<int> targets;
@@ -58,22 +70,26 @@ TickLocalNetwork::TickLocalNetwork() {
 }
 
 TickLocalNetwork::~TickLocalNetwork() {
-	for (const KeyValue<int, TickLocalTransport *> &E : peers) {
-		memdelete(E.value);
+	// The transports may outlive the network.
+	for (KeyValue<int, Ref<TickLocalTransport>> &E : peers) {
+		E.value->network = nullptr;
 	}
 	peers.clear();
 }
 
-TickLocalTransport *TickLocalNetwork::add_peer() {
+Ref<TickLocalTransport> TickLocalNetwork::add_peer() {
 	const int peer_id = next_peer_id++;
-	TickLocalTransport *peer = memnew(TickLocalTransport(this, peer_id));
+	Ref<TickLocalTransport> peer;
+	peer.instantiate();
+	peer->network = this;
+	peer->peer_id = peer_id;
 	peers.insert(peer_id, peer);
 	return peer;
 }
 
 void TickLocalNetwork::remove_peer(int p_peer) {
-	TickLocalTransport *peer = get_peer(p_peer);
-	ERR_FAIL_NULL_MSG(peer, vformat("Peer %d doesn't exist.", p_peer));
+	Ref<TickLocalTransport> peer = get_peer(p_peer);
+	ERR_FAIL_COND_MSG(peer.is_null(), vformat("Peer %d doesn't exist.", p_peer));
 
 	LocalVector<int> connected;
 	peer->get_connected_peers(connected);
@@ -81,20 +97,20 @@ void TickLocalNetwork::remove_peer(int p_peer) {
 		disconnect_peers(p_peer, other);
 	}
 	peers.erase(p_peer);
-	memdelete(peer);
+	peer->network = nullptr;
 }
 
-TickLocalTransport *TickLocalNetwork::get_peer(int p_peer) const {
-	TickLocalTransport *const *peer = peers.getptr(p_peer);
-	return peer ? *peer : nullptr;
+Ref<TickLocalTransport> TickLocalNetwork::get_peer(int p_peer) const {
+	const Ref<TickLocalTransport> *peer = peers.getptr(p_peer);
+	return peer ? *peer : Ref<TickLocalTransport>();
 }
 
 Error TickLocalNetwork::connect_peers(int p_peer_a, int p_peer_b) {
 	ERR_FAIL_COND_V_MSG(p_peer_a == p_peer_b, ERR_INVALID_PARAMETER, "A peer can't connect to itself.");
-	TickLocalTransport *a = get_peer(p_peer_a);
-	TickLocalTransport *b = get_peer(p_peer_b);
-	ERR_FAIL_NULL_V_MSG(a, ERR_DOES_NOT_EXIST, vformat("Peer %d doesn't exist.", p_peer_a));
-	ERR_FAIL_NULL_V_MSG(b, ERR_DOES_NOT_EXIST, vformat("Peer %d doesn't exist.", p_peer_b));
+	Ref<TickLocalTransport> a = get_peer(p_peer_a);
+	Ref<TickLocalTransport> b = get_peer(p_peer_b);
+	ERR_FAIL_COND_V_MSG(a.is_null(), ERR_DOES_NOT_EXIST, vformat("Peer %d doesn't exist.", p_peer_a));
+	ERR_FAIL_COND_V_MSG(b.is_null(), ERR_DOES_NOT_EXIST, vformat("Peer %d doesn't exist.", p_peer_b));
 	if (a->connected_peers.has(p_peer_b)) {
 		return ERR_ALREADY_EXISTS;
 	}
@@ -112,10 +128,10 @@ Error TickLocalNetwork::connect_peers(int p_peer_a, int p_peer_b) {
 }
 
 void TickLocalNetwork::disconnect_peers(int p_peer_a, int p_peer_b) {
-	TickLocalTransport *a = get_peer(p_peer_a);
-	TickLocalTransport *b = get_peer(p_peer_b);
-	ERR_FAIL_NULL(a);
-	ERR_FAIL_NULL(b);
+	Ref<TickLocalTransport> a = get_peer(p_peer_a);
+	Ref<TickLocalTransport> b = get_peer(p_peer_b);
+	ERR_FAIL_COND(a.is_null());
+	ERR_FAIL_COND(b.is_null());
 	if (!a->connected_peers.has(p_peer_b)) {
 		return;
 	}
@@ -134,7 +150,7 @@ void TickLocalNetwork::disconnect_peers(int p_peer_a, int p_peer_b) {
 
 void TickLocalNetwork::connect_all() {
 	LocalVector<int> ids;
-	for (const KeyValue<int, TickLocalTransport *> &E : peers) {
+	for (const KeyValue<int, Ref<TickLocalTransport>> &E : peers) {
 		ids.push_back(E.key);
 	}
 	ids.sort();
@@ -245,8 +261,8 @@ void TickLocalNetwork::process_usec(uint64_t p_delta_usec) {
 		const InFlightPacket &packet = in_flight[delivered];
 		delivered++;
 
-		TickLocalTransport *recipient = get_peer(packet.to_peer);
-		if (recipient == nullptr || !recipient->is_peer_connected(packet.packet.from_peer)) {
+		Ref<TickLocalTransport> recipient = get_peer(packet.to_peer);
+		if (recipient.is_null() || !recipient->is_peer_connected(packet.packet.from_peer)) {
 			continue;
 		}
 

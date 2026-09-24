@@ -6,11 +6,11 @@
 
 namespace TestTickLocalTransport {
 
-inline void send_byte(TickTransport *p_from, int p_to, int p_channel, TickTransport::TransferMode p_mode, uint8_t p_value) {
+inline void send_byte(const Ref<TickTransport> &p_from, int p_to, int p_channel, TickTransport::TransferMode p_mode, uint8_t p_value) {
 	CHECK(p_from->send(p_to, p_channel, p_mode, &p_value, 1) == OK);
 }
 
-inline LocalVector<uint8_t> receive_bytes(TickTransport *p_transport, int p_expected_sender = -1) {
+inline LocalVector<uint8_t> receive_bytes(const Ref<TickTransport> &p_transport, int p_expected_sender = -1) {
 	LocalVector<uint8_t> values;
 	TickTransport::Packet packet;
 	while (p_transport->pop_packet(packet)) {
@@ -25,9 +25,9 @@ inline LocalVector<uint8_t> receive_bytes(TickTransport *p_transport, int p_expe
 
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Connection events and topology") {
 	TickLocalNetwork network;
-	TickTransport *server = network.add_peer();
-	TickTransport *client_a = network.add_peer();
-	TickTransport *client_b = network.add_peer();
+	Ref<TickTransport> server = network.add_peer();
+	Ref<TickTransport> client_a = network.add_peer();
+	Ref<TickTransport> client_b = network.add_peer();
 	CHECK(server->get_local_peer_id() == 1);
 	CHECK(client_a->get_local_peer_id() == 2);
 	CHECK(client_b->get_local_peer_id() == 3);
@@ -56,7 +56,7 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Connection events and
 	ERR_PRINT_ON;
 
 	network.remove_peer(2);
-	CHECK(network.get_peer(2) == nullptr);
+	CHECK(network.get_peer(2).is_null());
 	server->get_connected_peers(peers);
 	CHECK(peers.size() == 1);
 	int disconnected = 0;
@@ -76,8 +76,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Connection events and
 
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Latency and sender identity") {
 	TickLocalNetwork network;
-	TickTransport *a = network.add_peer();
-	TickTransport *b = network.add_peer();
+	Ref<TickTransport> a = network.add_peer();
+	Ref<TickTransport> b = network.add_peer();
 	network.connect_all();
 	network.set_latency_usec(50000);
 
@@ -107,8 +107,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Latency and sender id
 
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Reliable packets arrive in order despite jitter") {
 	TickLocalNetwork network;
-	TickTransport *a = network.add_peer();
-	TickTransport *b = network.add_peer();
+	Ref<TickTransport> a = network.add_peer();
+	Ref<TickTransport> b = network.add_peer();
 	network.connect_all();
 	network.set_seed(42);
 	network.set_latency_usec(20000);
@@ -131,8 +131,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Reliable packets arri
 
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable packets are lost and reordered") {
 	TickLocalNetwork network;
-	TickTransport *a = network.add_peer();
-	TickTransport *b = network.add_peer();
+	Ref<TickTransport> a = network.add_peer();
+	Ref<TickTransport> b = network.add_peer();
 	network.connect_all();
 	network.set_seed(7);
 	network.set_latency_usec(20000);
@@ -157,8 +157,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable packets ar
 
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable ordered packets never go back in time") {
 	TickLocalNetwork network;
-	TickTransport *a = network.add_peer();
-	TickTransport *b = network.add_peer();
+	Ref<TickTransport> a = network.add_peer();
+	Ref<TickTransport> b = network.add_peer();
 	network.connect_all();
 	network.set_seed(3);
 	network.set_latency_usec(20000);
@@ -181,8 +181,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable ordered pa
 
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Disconnection drops in-flight packets") {
 	TickLocalNetwork network;
-	TickTransport *a = network.add_peer();
-	TickTransport *b = network.add_peer();
+	Ref<TickTransport> a = network.add_peer();
+	Ref<TickTransport> b = network.add_peer();
 	network.connect_all();
 	network.set_latency_usec(10000);
 

@@ -10,6 +10,7 @@ class TickLocalNetwork;
 
 // In-process transport endpoint, created and owned by a `TickLocalNetwork`. Used by the tests.
 class TickLocalTransport : public TickTransport {
+	GDSOFTCLASS(TickLocalTransport, TickTransport);
 	friend class TickLocalNetwork;
 
 	TickLocalNetwork *network = nullptr;
@@ -20,16 +21,18 @@ class TickLocalTransport : public TickTransport {
 	uint32_t next_event = 0;
 	uint32_t next_packet = 0;
 
-	TickLocalTransport(TickLocalNetwork *p_network, int p_peer_id) :
-			network(p_network), peer_id(p_peer_id) {}
-
 public:
+	TickLocalTransport() {}
+
 	virtual int get_local_peer_id() const override { return peer_id; }
 	virtual bool is_peer_connected(int p_peer) const override { return connected_peers.has(p_peer); }
 	virtual void get_connected_peers(LocalVector<int> &r_peers) const override;
 	virtual int get_channel_count() const override;
+	virtual int get_max_payload_size() const override;
 
 	virtual Error send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) override;
+
+	virtual void disconnect_peer(int p_peer) override;
 
 	// The network delivers the packets in `TickLocalNetwork::process()`; this does nothing.
 	virtual void poll() override {}
@@ -57,9 +60,10 @@ class TickLocalNetwork {
 		}
 	};
 
-	HashMap<int, TickLocalTransport *> peers;
+	HashMap<int, Ref<TickLocalTransport>> peers;
 	int next_peer_id = 1;
 	int channel_count = 5;
+	int max_payload_size = 1200;
 
 	uint64_t time_usec = 0;
 	uint64_t latency_usec = 0;
@@ -84,11 +88,11 @@ public:
 	TickLocalNetwork();
 	~TickLocalNetwork();
 
-	// Creates a peer with the next free id (starting at 1). The network owns it.
-	TickLocalTransport *add_peer();
-	// Disconnects and deletes a peer; its links' in-flight packets are dropped.
+	// Creates a peer with the next free id (starting at 1).
+	Ref<TickLocalTransport> add_peer();
+	// Disconnects a peer and removes it from the network; its links' in-flight packets are dropped.
 	void remove_peer(int p_peer);
-	TickLocalTransport *get_peer(int p_peer) const;
+	Ref<TickLocalTransport> get_peer(int p_peer) const;
 
 	// Links two peers; both receive `EVENT_PEER_CONNECTED`.
 	Error connect_peers(int p_peer_a, int p_peer_b);
@@ -99,6 +103,8 @@ public:
 
 	void set_channel_count(int p_channel_count);
 	int get_channel_count() const { return channel_count; }
+	void set_max_payload_size(int p_size) { max_payload_size = p_size; }
+	int get_max_payload_size() const { return max_payload_size; }
 
 	// One way latency; each packet gets a uniform random extra delay in [0, jitter].
 	void set_latency_usec(uint64_t p_latency_usec) { latency_usec = p_latency_usec; }

@@ -51,6 +51,9 @@ public:
 	int64_t get_offset_usec() const { return offset_usec; }
 	// Lowest round trip time among the current samples.
 	uint64_t get_rtt_usec() const { return rtt_usec; }
+	// Difference between the highest and the lowest round trip time among the current samples; an estimate of
+	// the jitter.
+	uint64_t get_rtt_spread_usec() const;
 
 	uint64_t local_to_master_usec(uint64_t p_local_usec) const;
 	uint64_t master_to_local_usec(uint64_t p_master_usec) const;
@@ -63,4 +66,6 @@ public:
 
 	// Frame the master is processing at the given local time.
 	uint32_t get_master_frame(uint64_t p_local_usec) const;
+	// Same as `get_master_frame()`, with the fraction of the frame elapsed; negative before the epoch.
+	double get_master_frame_time(uint64_t p_local_usec) const;
 };

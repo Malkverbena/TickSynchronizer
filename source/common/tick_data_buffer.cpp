@@ -204,6 +204,57 @@ uint64_t TickDataBuffer::read_uint(CompressionLevel p_compression_level) {
 	return fetch_bits(bits);
 }
 
+uint64_t TickDataBuffer::add_uint_bits(uint64_t p_input, int p_bits) {
+	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, p_input, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
+	if (!check_writing()) {
+		return p_input;
+	}
+	const uint64_t max_value = p_bits == 64 ? UINT64_MAX : (uint64_t(1) << p_bits) - 1;
+	const uint64_t value = MIN(p_input, max_value);
+	write_bits(value, p_bits);
+	return value;
+}
+
+uint64_t TickDataBuffer::read_uint_bits(int p_bits) {
+	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, 0, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
+	if (!check_reading(p_bits)) {
+		return 0;
+	}
+	return fetch_bits(p_bits);
+}
+
+int64_t TickDataBuffer::add_int_bits(int64_t p_input, int p_bits) {
+	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, p_input, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
+	if (!check_writing()) {
+		return p_input;
+	}
+	int64_t value = p_input;
+	if (p_bits < 64) {
+		const int64_t max_value = (int64_t(1) << (p_bits - 1)) - 1;
+		const int64_t min_value = -max_value - 1;
+		value = CLAMP(value, min_value, max_value);
+	}
+	uint64_t uvalue;
+	memcpy(&uvalue, &value, sizeof(uint64_t));
+	write_bits(uvalue, p_bits);
+	return value;
+}
+
+int64_t TickDataBuffer::read_int_bits(int p_bits) {
+	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, 0, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
+	if (!check_reading(p_bits)) {
+		return 0;
+	}
+	uint64_t uvalue = fetch_bits(p_bits);
+	if (p_bits < 64 && (uvalue & (uint64_t(1) << (p_bits - 1)))) {
+		// Sign extension.
+		uvalue |= UINT64_MAX << p_bits;
+	}
+	int64_t value;
+	memcpy(&value, &uvalue, sizeof(uint64_t));
+	return value;
+}
+
 double TickDataBuffer::add_real(double p_input, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), p_input);
 	if (!check_writing()) {
