@@ -537,7 +537,11 @@ void TickSyncCore::server_handle_ping(int p_peer, TickDataBuffer &p_message) {
 	pong.add_uint_bits(TICK_MESSAGE_PONG, 8);
 	pong.add_uint_bits(client_time, 64);
 	pong.add_uint_bits(now_usec, 64);
-	pong.add_uint_bits(server_epoch_usec, 64);
+	// The epoch that matches the frame the server is really at, including the part of the next frame already
+	// accumulated: the server's frames can drift from its start time (startup, hitches).
+	const double elapsed_frames = double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
+	const uint64_t elapsed_usec = uint64_t(elapsed_frames * 1000000.0 * get_tick_delta());
+	pong.add_uint_bits(now_usec > elapsed_usec ? now_usec - elapsed_usec : 0, 64);
 	send(p_peer, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, pong);
 }
 
@@ -1157,6 +1161,14 @@ void TickSyncCore::client_send_inputs() {
 		message.add_data_buffer(*groups[i]);
 	}
 	send(TickTransport::PEER_SERVER, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
+}
+
+void TickSyncCore::update_interpolation(uint64_t p_now_usec) {
+	if (role != ROLE_CLIENT) {
+		return;
+	}
+	now_usec = p_now_usec;
+	client_update_interpolation();
 }
 
 void TickSyncCore::client_update_interpolation() {

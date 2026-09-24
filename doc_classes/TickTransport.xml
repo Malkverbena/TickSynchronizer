@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickTransport" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Base class of the transports used by [TickNetwork].
+	</brief_description>
+	<description>
+		A transport moves bytes between peers. It identifies the sender of every packet from the connection, never from the packet's content, so a peer can't impersonate another one. See [EnetStarTransport].
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="disconnect_peer">
+			<return type="void" />
+			<param index="0" name="peer" type="int" />
+			<description>
+				Closes the connection with [param peer].
+			</description>
+		</method>
+		<method name="get_channel_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of channels available to the network.
+			</description>
+		</method>
+		<method name="get_local_peer_id" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the id of this peer; 1 is the server.
+			</description>
+		</method>
+		<method name="get_max_payload_size" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the largest payload, in bytes, that fits in a single datagram without fragmentation.
+			</description>
+		</method>
+		<method name="is_peer_connected" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="peer" type="int" />
+			<description>
+				Returns [code]true[/code] if [param peer] is connected.
+			</description>
+		</method>
+		<method name="poll">
+			<return type="void" />
+			<description>
+				Sends the queued packets and receives the incoming ones. [TickNetwork] calls it every tick.
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="TRANSFER_MODE_UNRELIABLE" value="0" enum="TransferMode">
+			The packet may be lost, or arrive in any order.
+		</constant>
+		<constant name="TRANSFER_MODE_UNRELIABLE_ORDERED" value="1" enum="TransferMode">
+			The packet may be lost; a packet older than the last one received on its channel is dropped.
+		</constant>
+		<constant name="TRANSFER_MODE_RELIABLE" value="2" enum="TransferMode">
+			The packet always arrives, in order with the other reliable packets of its channel.
+		</constant>
+		<constant name="PEER_BROADCAST" value="0">
+			Target peer that sends to every connected peer.
+		</constant>
+		<constant name="PEER_SERVER" value="1">
+			Id of the server.
+		</constant>
+	</constants>
+</class>

@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="DataBuffer" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Bit-packed buffer used to write and read the input of a [TickObject].
+	</brief_description>
+	<description>
+		A [DataBuffer] stores values packed in bits. [TickObject] receives one in [method TickObject._collect_input], to write the controller's input, and in [method TickObject._process_tick], to read it back. Values must be read in the same order and with the same sizes they were written.
+		Reading past the written data doesn't print errors: the buffer is marked as failed (see [method is_failed]) and default values are returned.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_bool">
+			<return type="bool" />
+			<param index="0" name="value" type="bool" />
+			<description>
+				Writes a boolean in 1 bit. Returns [param value].
+			</description>
+		</method>
+		<method name="add_int">
+			<return type="int" />
+			<param index="0" name="value" type="int" />
+			<param index="1" name="bits" type="int" default="32" />
+			<description>
+				Writes a signed integer in [param bits] bits (1 to 64), clamped to the range of that size. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_normalized_vector2">
+			<return type="Vector2" />
+			<param index="0" name="value" type="Vector2" />
+			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Writes a direction (or zero), compressed according to [param compression_level]. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_normalized_vector3">
+			<return type="Vector3" />
+			<param index="0" name="value" type="Vector3" />
+			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Writes a direction (or zero), compressed according to [param compression_level]. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_positive_unit_real">
+			<return type="float" />
+			<param index="0" name="value" type="float" />
+			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Writes a value in the [code][0, 1][/code] range, clamped and compressed according to [param compression_level]. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_real">
+			<return type="float" />
+			<param index="0" name="value" type="float" />
+			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Writes a floating point value: 64 bits with [constant COMPRESSION_LEVEL_0], 32 bits with [constant COMPRESSION_LEVEL_1], 16 bits otherwise. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_string">
+			<return type="void" />
+			<param index="0" name="value" type="String" />
+			<description>
+				Writes a UTF-8 string of at most 65535 bytes.
+			</description>
+		</method>
+		<method name="add_uint">
+			<return type="int" />
+			<param index="0" name="value" type="int" />
+			<param index="1" name="bits" type="int" default="32" />
+			<description>
+				Writes an unsigned integer in [param bits] bits (1 to 63), clamped to the range of that size. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_unit_real">
+			<return type="float" />
+			<param index="0" name="value" type="float" />
+			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Writes a value in the [code][-1, 1][/code] range, clamped and compressed according to [param compression_level]. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_value">
+			<return type="Variant" />
+			<param index="0" name="value" type="Variant" />
+			<param index="1" name="codec" type="TickCodec" />
+			<description>
+				Writes [param value] with [param codec]. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_vector2">
+			<return type="Vector2" />
+			<param index="0" name="value" type="Vector2" />
+			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Writes a [Vector2]; each component is written as in [method add_real]. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="add_vector3">
+			<return type="Vector3" />
+			<param index="0" name="value" type="Vector3" />
+			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Writes a [Vector3]; each component is written as in [method add_real]. Returns the value as it's read back.
+			</description>
+		</method>
+		<method name="begin_read">
+			<return type="void" />
+			<description>
+				Starts reading from the beginning of the buffer.
+			</description>
+		</method>
+		<method name="begin_write">
+			<return type="void" />
+			<description>
+				Clears the buffer and starts writing.
+			</description>
+		</method>
+		<method name="get_bit_offset" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the current read or write position, in bits.
+			</description>
+		</method>
+		<method name="get_size" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the size of the written data, in bits.
+			</description>
+		</method>
+		<method name="is_end_of_buffer" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while reading, once all the data was read.
+			</description>
+		</method>
+		<method name="is_failed" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if a read went past the end of the data or the data was malformed.
+			</description>
+		</method>
+		<method name="is_reading" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while reading, [code]false[/code] while writing.
+			</description>
+		</method>
+		<method name="read_bool">
+			<return type="bool" />
+			<description>
+				Reads a boolean written with [method add_bool].
+			</description>
+		</method>
+		<method name="read_int">
+			<return type="int" />
+			<param index="0" name="bits" type="int" default="32" />
+			<description>
+				Reads a signed integer written with [method add_int] and the same [param bits].
+			</description>
+		</method>
+		<method name="read_normalized_vector2">
+			<return type="Vector2" />
+			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Reads a direction written with [method add_normalized_vector2] and the same [param compression_level].
+			</description>
+		</method>
+		<method name="read_normalized_vector3">
+			<return type="Vector3" />
+			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Reads a direction written with [method add_normalized_vector3] and the same [param compression_level].
+			</description>
+		</method>
+		<method name="read_positive_unit_real">
+			<return type="float" />
+			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Reads a value written with [method add_positive_unit_real] and the same [param compression_level].
+			</description>
+		</method>
+		<method name="read_real">
+			<return type="float" />
+			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Reads a value written with [method add_real] and the same [param compression_level].
+			</description>
+		</method>
+		<method name="read_string">
+			<return type="String" />
+			<description>
+				Reads a string written with [method add_string].
+			</description>
+		</method>
+		<method name="read_uint">
+			<return type="int" />
+			<param index="0" name="bits" type="int" default="32" />
+			<description>
+				Reads an unsigned integer written with [method add_uint] and the same [param bits].
+			</description>
+		</method>
+		<method name="read_unit_real">
+			<return type="float" />
+			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Reads a value written with [method add_unit_real] and the same [param compression_level].
+			</description>
+		</method>
+		<method name="read_value">
+			<return type="Variant" />
+			<param index="0" name="codec" type="TickCodec" />
+			<description>
+				Reads a value written with [method add_value] and the same [param codec].
+			</description>
+		</method>
+		<method name="read_vector2">
+			<return type="Vector2" />
+			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Reads a [Vector2] written with [method add_vector2] and the same [param compression_level].
+			</description>
+		</method>
+		<method name="read_vector3">
+			<return type="Vector3" />
+			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
+			<description>
+				Reads a [Vector3] written with [method add_vector3] and the same [param compression_level].
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="COMPRESSION_LEVEL_0" value="0" enum="CompressionLevel">
+			Finest precision: 64 bits reals, 10 bits unit reals, 12 bits normalized [Vector2].
+		</constant>
+		<constant name="COMPRESSION_LEVEL_1" value="1" enum="CompressionLevel">
+			32 bits reals, 8 bits unit reals, 11 bits normalized [Vector2].
+		</constant>
+		<constant name="COMPRESSION_LEVEL_2" value="2" enum="CompressionLevel">
+			16 bits reals, 6 bits unit reals, 10 bits normalized [Vector2].
+		</constant>
+		<constant name="COMPRESSION_LEVEL_3" value="3" enum="CompressionLevel">
+			Coarsest precision: 16 bits reals, 4 bits unit reals, 9 bits normalized [Vector2].
+		</constant>
+	</constants>
+</class>

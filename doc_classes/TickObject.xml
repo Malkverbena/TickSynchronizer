@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickObject" inherits="Node" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Synchronizes properties of a node through a [TickNetwork].
+	</brief_description>
+	<description>
+		Add a [TickObject] as a child of the node to synchronize (see [member root_path]) and extend it with a script. Declare the synchronized properties in [method _setup_sync], write the controller's input in [method _collect_input] and advance the object by one tick in [method _process_tick].
+		The server simulates the object with the input of its [member controller_peer]. That client predicts it; every other client interpolates it.
+		[codeblock]
+		extends TickObject
+
+		func _setup_sync():
+			declare_var("position", TickCodec.vector3(TickCodec.PRECISION_HALF))
+
+		func _collect_input(input: DataBuffer):
+			input.add_vector2(Input.get_vector("left", "right", "up", "down"), DataBuffer.COMPRESSION_LEVEL_2)
+
+		func _process_tick(delta: float, input: DataBuffer):
+			var direction := Vector2()
+			if input.get_size() &gt; 0:
+				direction = input.read_vector2(DataBuffer.COMPRESSION_LEVEL_2)
+			get_root_node().position += Vector3(direction.x, 0.0, direction.y) * 5.0 * delta
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="_apply_interpolated_state" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="state" type="Dictionary" />
+			<description>
+				Called on peers that interpolate this object, with the interpolated value of each declared property. If not overridden, the properties are set on the root node.
+			</description>
+		</method>
+		<method name="_collect_input" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="input" type="DataBuffer" />
+			<description>
+				Called on the controller, once per tick, to write the input of this tick in [param input]. Not called during rewinds: the stored inputs are used.
+			</description>
+		</method>
+		<method name="_process_tick" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="delta" type="float" />
+			<param index="1" name="input" type="DataBuffer" />
+			<description>
+				Advances the object by one tick. [param input] holds the controller's input; it's empty (size 0) when no input is available. Called on the server and on the predicting client, also during rewinds (see [method is_rewinding]).
+			</description>
+		</method>
+		<method name="_setup_sync" qualifiers="virtual">
+			<return type="void" />
+			<description>
+				Called once, before the object is registered in the network. Declare the synchronized properties here with [method declare_var].
+			</description>
+		</method>
+		<method name="declare_var">
+			<return type="void" />
+			<param index="0" name="property" type="StringName" />
+			<param index="1" name="codec" type="TickCodec" />
+			<description>
+				Declares a property of the root node to synchronize, encoded with [param codec]. Nested properties use the property path syntax, for example [code]"transform:origin"[/code]. Only valid inside [method _setup_sync].
+			</description>
+		</method>
+		<method name="get_declared_vars" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the names of the declared properties.
+			</description>
+		</method>
+		<method name="get_net_id" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the network id of this object, or 0 if it isn't synchronized yet.
+			</description>
+		</method>
+		<method name="get_network" qualifiers="const">
+			<return type="TickNetwork" />
+			<description>
+				Returns the [TickNetwork] this object is registered in.
+			</description>
+		</method>
+		<method name="get_root_node" qualifiers="const">
+			<return type="Node" />
+			<description>
+				Returns the node whose properties are synchronized.
+			</description>
+		</method>
+		<method name="is_rewinding" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while the network simulates again past frames. Use it to skip side effects.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="controller_peer" type="int" setter="set_controller_peer" getter="get_controller_peer" default="1">
+			Peer whose input drives this object: 1 for the server (NPCs, the host), or a client id. It can't change while the object is registered.
+		</member>
+		<member name="network_path" type="NodePath" setter="set_network_path" getter="get_network_path" default="NodePath(&quot;&quot;)">
+			Path to the [TickNetwork]. If empty, the first [TickNetwork] ancestor is used, or else the first one in the scene.
+		</member>
+		<member name="root_path" type="NodePath" setter="set_root_path" getter="get_root_path" default="NodePath(&quot;..&quot;)">
+			Path to the node whose properties are synchronized.
+		</member>
+	</members>
+</class>

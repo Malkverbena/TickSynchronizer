@@ -11,6 +11,8 @@ def can_build(env, platform):
             % (MIN_GODOT_VERSION + (version.major, version.minor))
         )
         return False
+    # EnetStarTransport uses ENet and SceneMultiplayer.
+    env.module_add_dependencies("tick_synchronizer", ["enet", "multiplayer"])
     # The code must stay portable to every platform supported by Godot. It is validated on linuxbsd,
     # android and windows only (see notes/decisions.md ADR-013).
     return True
@@ -18,3 +20,18 @@ def can_build(env, platform):
 
 def configure(env):
     pass
+
+
+def get_doc_classes():
+    return [
+        "DataBuffer",
+        "EnetStarTransport",
+        "TickCodec",
+        "TickNetwork",
+        "TickObject",
+        "TickTransport",
+    ]
+
+
+def get_doc_path():
+    return "doc_classes"

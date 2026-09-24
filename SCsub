@@ -8,6 +8,11 @@ Import("env_modules")
 
 env_tick_synchronizer = env_modules.Clone()
 
+# EnetStarTransport includes the ENet module's headers, which include the bundled ENet library.
+if env["builtin_enet"]:
+    env_tick_synchronizer.Prepend(CPPPATH=["#thirdparty/enet/"])
+    env_tick_synchronizer.Append(CPPDEFINES=["GODOT_ENET"])
+
 # Module registration.
 env_tick_synchronizer.add_source_files(env.modules_sources, "register_types.cpp")
 

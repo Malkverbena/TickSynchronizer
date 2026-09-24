@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="EnetStarTransport" inherits="TickTransport" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Star transport for [TickNetwork] over ENet and [SceneMultiplayer].
+	</brief_description>
+	<description>
+		Sends the messages of a [TickNetwork] with [method SceneMultiplayer.send_bytes], so the game keeps using RPCs and [member SceneMultiplayer.auth_callback] on the same connection. The sender of each packet is the peer identified by the connection, never a value in the packet.
+		[method create_server] and [method create_client] create the ENet peer with the compression mode and, optionally, DTLS encryption. For a custom setup, configure a [SceneMultiplayer] and call [method setup].
+		For debugging, [member simulated_latency], [member simulated_jitter] and [member simulated_packet_loss] degrade the packets sent by this end.
+		[codeblock]
+		var transport := EnetStarTransport.create_server(7000, 32)
+		$TickNetwork.start(transport)
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="create_client" qualifiers="static">
+			<return type="EnetStarTransport" />
+			<param index="0" name="address" type="String" />
+			<param index="1" name="port" type="int" />
+			<param index="2" name="compression" type="int" enum="EnetStarTransport.Compression" default="1" />
+			<param index="3" name="tls_options" type="TLSOptions" default="null" />
+			<param index="4" name="tls_hostname" type="String" default="&quot;&quot;" />
+			<description>
+				Creates an ENet client connecting to [param address]:[param port]. The [param compression] mode must be the same as the server's. With [param tls_options], the connection is encrypted with DTLS and the server certificate is validated against [param tls_hostname] (the address by default). Returns [code]null[/code] on failure.
+			</description>
+		</method>
+		<method name="create_server" qualifiers="static">
+			<return type="EnetStarTransport" />
+			<param index="0" name="port" type="int" />
+			<param index="1" name="max_clients" type="int" default="32" />
+			<param index="2" name="compression" type="int" enum="EnetStarTransport.Compression" default="1" />
+			<param index="3" name="tls_options" type="TLSOptions" default="null" />
+			<description>
+				Creates an ENet server listening on [param port] for up to [param max_clients] clients. With [param tls_options] (see [method TLSOptions.server]), the connections are encrypted with DTLS. Returns [code]null[/code] on failure.
+			</description>
+		</method>
+		<method name="get_multiplayer" qualifiers="const">
+			<return type="SceneMultiplayer" />
+			<description>
+				Returns the [SceneMultiplayer] used by this transport. It can be set as the scene tree's multiplayer to use RPCs on the same connection; then disable [member poll_multiplayer].
+			</description>
+		</method>
+		<method name="setup">
+			<return type="int" enum="Error" />
+			<param index="0" name="multiplayer" type="SceneMultiplayer" />
+			<param index="1" name="encrypted" type="bool" default="false" />
+			<description>
+				Uses a [SceneMultiplayer] configured by the game. Its peer must support at least 6 channels (the module uses channels 1 to 5). Set [param encrypted] when the connection uses DTLS, so the payload size accounts for it.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="poll_multiplayer" type="bool" setter="set_poll_multiplayer" getter="is_polling_multiplayer" default="true">
+			If [code]true[/code], the transport polls its [SceneMultiplayer]. Disable it when the game already polls it (for example, when it's the scene tree's multiplayer).
+		</member>
+		<member name="simulated_jitter" type="float" setter="set_simulated_jitter" getter="get_simulated_jitter" default="0.0">
+			Random extra delay, up to this value in seconds, added to each packet sent by this end. Reliable packets keep their order. For debugging only.
+		</member>
+		<member name="simulated_latency" type="float" setter="set_simulated_latency" getter="get_simulated_latency" default="0.0">
+			Delay, in seconds, added to each packet sent by this end. For debugging only.
+		</member>
+		<member name="simulated_packet_loss" type="float" setter="set_simulated_packet_loss" getter="get_simulated_packet_loss" default="0.0">
+			Probability, from 0 to 1, of dropping an unreliable packet sent by this end. For debugging only.
+		</member>
+	</members>
+	<constants>
+		<constant name="COMPRESSION_NONE" value="0" enum="Compression">
+			No compression.
+		</constant>
+		<constant name="COMPRESSION_RANGE_CODER" value="1" enum="Compression">
+			ENet's range coder, suited for small packets. The default.
+		</constant>
+		<constant name="COMPRESSION_FASTLZ" value="2" enum="Compression">
+			FastLZ compression.
+		</constant>
+		<constant name="COMPRESSION_ZLIB" value="3" enum="Compression">
+			Zlib compression.
+		</constant>
+		<constant name="COMPRESSION_ZSTD" value="4" enum="Compression">
+			Zstandard compression; not efficient on packets smaller than 4 KB.
+		</constant>
+	</constants>
+</class>

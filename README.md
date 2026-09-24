@@ -7,7 +7,8 @@ replay), interpolation, lag compensation and per-object authority, over ENet.
 It is a rewrite, inspired by [NetworkSynchronizer](https://github.com/GameNetworking/NetworkSynchronizer)
 (MIT), whose ideas it reuses and extends.
 
-> **Status:** branch `0.1` — empty module skeleton. Nothing is usable yet; see [Roadmap](#roadmap).
+> **Status:** branch `0.1` — phase F2 done: server-authoritative star networks with client prediction,
+> reconciliation and interpolation. Spawning, events and meshes come in the next phases; see [Roadmap](#roadmap).
 
 ## Purpose
 
@@ -86,6 +87,34 @@ so physics engines that are not deterministic across platforms (such as Jolt or 
 
 GDExtension support is planned for a later version.
 
+## Usage (F2)
+
+```gdscript
+# Server (peer 1) or client, sharing the same scene.
+var transport := EnetStarTransport.create_server(7000, 32)            # or create_client("127.0.0.1", 7000)
+$TickNetwork.start(transport)
+```
+
+```gdscript
+# player_sync.gd — a TickObject child of the synchronized body.
+extends TickObject
+
+func _setup_sync():
+	declare_var("position", TickCodec.vector3(TickCodec.PRECISION_HALF))
+
+func _collect_input(input: DataBuffer):
+	input.add_vector2(Input.get_vector("left", "right", "up", "down"), DataBuffer.COMPRESSION_LEVEL_2)
+
+func _process_tick(delta: float, input: DataBuffer):
+	var direction := Vector2()
+	if input.get_size() > 0:
+		direction = input.read_vector2(DataBuffer.COMPRESSION_LEVEL_2)
+	get_root_node().position += Vector3(direction.x, 0.0, direction.y) * 5.0 * delta
+```
+
+Set `controller_peer` to the id of the client that controls the object (1 for the server). The class reference
+is in `doc_classes/`; a runnable client/server example is in [`demos/star_headless`](demos/star_headless).
+
 ## Building
 
 The module is compiled as part of the engine using `custom_modules`:
@@ -98,6 +127,12 @@ scons platform=linuxbsd target=editor custom_modules=/path/to/tick_synchronizer 
 
 Double-precision binaries get a `.double` suffix. Servers and clients must use the same precision.
 
+Tests (doctest, built with `tests=yes`):
+
+```sh
+bin/godot.linuxbsd.editor.x86_64 --headless --test --test-case="*TickSynchronizer*"
+```
+
 ## Layout
 
 ```mermaid
@@ -106,6 +141,15 @@ flowchart TB
     m --> scsub["SCsub — compiles register_types.cpp and everything under source/"]
     m --> reg["register_types.h/.cpp — class registration"]
     m --> src["source/ — all module sources"]
+    src --> common["common/ — TickBitArray, TickDataBuffer"]
+    src --> tick["tick/ — TickFixedStepper, TickClock"]
+    src --> codec["codec/ — TickCodec"]
+    src --> sync["sync/ — TickSyncCore (star network engine), protocol"]
+    src --> transport["transport/ — TickTransport, EnetStarTransport, TickLocalNetwork (tests)"]
+    src --> nodes["nodes/ — TickNetwork, TickObject, DataBuffer"]
+    m --> tests["tests/ — doctest suites"]
+    m --> docs["doc_classes/ — class reference"]
+    m --> demos["demos/ — example projects"]
 ```
 
 ## Roadmap

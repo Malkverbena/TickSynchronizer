@@ -223,6 +223,8 @@ public:
 
 	// Receives, simulates the pending ticks, sends, and updates the interpolated objects.
 	void process(double p_delta, uint64_t p_now_usec);
+	// Updates only the interpolated objects, for rendering between ticks.
+	void update_interpolation(uint64_t p_now_usec);
 
 	// Next frame to simulate.
 	uint32_t get_frame() const { return stepper.get_next_frame_index(); }
