@@ -49,6 +49,12 @@ public:
 
 	struct Settings {
 		int ticks_per_second = 60;
+		// Peer that simulates every object and is the clock master (ADR-036): the hub of a star, or the node of a
+		// mesh chosen by the project.
+		int authority_peer = 1;
+		// When `false`, the remote objects get the latest snapshot's state without interpolation (proxies on
+		// servers that relay them to their own clients, ADR-039).
+		bool interpolate_remote = true;
 		// Frames of history kept for snapshots, predictions and interpolation.
 		int history_size = 128;
 		// Past inputs repeated in each input packet, against packet loss.
@@ -187,6 +193,7 @@ private:
 	TickClock clock;
 	uint64_t now_usec = 0;
 	bool rewinding = false;
+	const TickSyncCore *clock_source = nullptr;
 
 	// Server.
 	HashMap<uint16_t, ServerObject> server_objects;
@@ -195,7 +202,7 @@ private:
 	uint16_t next_net_id = 1;
 	HashMap<int, PeerState> peers;
 	LocalVector<SnapshotRecord> server_history;
-	uint64_t server_epoch_usec = 0;
+	int64_t server_epoch_usec = 0;
 	// Net ids released recently, with the frame they were released at (ADR-034).
 	HashMap<uint16_t, uint32_t> quarantined_ids;
 	HashMap<uint32_t, SpawnRecord> spawns;
@@ -246,6 +253,9 @@ private:
 	void server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t p_frame);
 	void server_handle_event(int p_peer, TickDataBuffer &p_message);
 	void server_send_spawn(int p_peer, uint32_t p_spawn_id);
+	// Local time of frame 0 of this server's timeline, from the frame it's at now (signed: a server following another
+	// network's clock has frames older than its process).
+	int64_t server_compute_epoch() const;
 	void write_object_state(TickDataBuffer &r_message, const ServerObject &p_object, const LocalVector<Variant> &p_values, const LocalVector<Variant> *p_base) const;
 
 	// Client.
@@ -301,6 +311,13 @@ public:
 	void process(double p_delta, uint64_t p_now_usec);
 	// Updates only the interpolated objects, for rendering between ticks.
 	void update_interpolation(uint64_t p_now_usec);
+
+	// Frame of this network's timeline at `p_now_usec`, with the fraction of the frame, or a negative value while
+	// it isn't known yet (a client before its clock is synchronized).
+	double get_timeline_frame(uint64_t p_now_usec) const;
+	// A server following another network's timeline (ADR-038): its frames advance up to that network's frame,
+	// instead of accumulating the local delta. Null to use the local delta.
+	void set_clock_source(const TickSyncCore *p_source) { clock_source = p_source; }
 
 	// Next frame to simulate.
 	uint32_t get_frame() const { return stepper.get_next_frame_index(); }

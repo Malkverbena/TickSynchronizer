@@ -18,6 +18,7 @@ private:
 	TickSyncCore core;
 	TickSyncCore::Settings settings;
 	NodePath root_path = NodePath("..");
+	NodePath clock_network;
 	Ref<TickTransport> transport;
 	bool running = false;
 	Callable event_validator;
@@ -62,6 +63,13 @@ public:
 	int get_max_event_size() const;
 	void set_event_validator(const Callable &p_validator) { event_validator = p_validator; }
 	Callable get_event_validator() const { return event_validator; }
+	void set_authority_peer(int p_peer);
+	int get_authority_peer() const;
+	void set_interpolate_remote(bool p_enabled);
+	bool is_interpolating_remote() const;
+	void set_clock_network(const NodePath &p_path);
+	NodePath get_clock_network() const { return clock_network; }
+	const TickSyncCore &get_core() const { return core; }
 	void set_root_path(const NodePath &p_path);
 	NodePath get_root_path() const;
 	// Node the object paths are relative to.

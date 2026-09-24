@@ -57,7 +57,7 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 	transport = p_transport;
 	now_usec = p_now_usec;
 	stats = Stats();
-	role = transport->get_local_peer_id() == TickTransport::PEER_SERVER ? ROLE_SERVER : ROLE_CLIENT;
+	role = transport->get_local_peer_id() == settings.authority_peer ? ROLE_SERVER : ROLE_CLIENT;
 
 	stepper.reset();
 	stepper.set_ticks_per_second(settings.ticks_per_second);
@@ -66,7 +66,7 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 
 	if (role == ROLE_SERVER) {
 		clock.set_master(true);
-		server_epoch_usec = p_now_usec;
+		server_epoch_usec = int64_t(p_now_usec);
 		clock.set_master_epoch_usec(server_epoch_usec);
 		server_history.clear();
 		server_history.resize(settings.history_size);
@@ -97,13 +97,13 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 		latest_snapshot = TICK_FRAME_NONE;
 		last_reconciled = TICK_FRAME_NONE;
 		last_ping_usec = 0;
-		if (transport->is_peer_connected(TickTransport::PEER_SERVER)) {
+		if (transport->is_peer_connected(settings.authority_peer)) {
 			TickDataBuffer hello;
 			hello.begin_write();
 			hello.add_uint_bits(TICK_MESSAGE_HELLO, 8);
 			hello.add_uint_bits(TICK_PROTOCOL_VERSION, 16);
 			hello.add_bool(sizeof(real_t) == sizeof(double));
-			send(TickTransport::PEER_SERVER, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, hello);
+			send(settings.authority_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, hello);
 		}
 	}
 	return OK;
@@ -299,12 +299,31 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 	}
 
 	if (role == ROLE_SERVER) {
-		const uint64_t dropped_before = stepper.get_dropped_ticks();
-		stepper.advance(p_delta);
-		// Dropped ticks shift the timeline: the frames keep their duration.
-		server_epoch_usec += uint64_t(double(stepper.get_dropped_ticks() - dropped_before) * 1000000.0 * get_tick_delta());
-		while (stepper.get_pending_ticks() > 0) {
-			server_tick(stepper.pop_tick());
+		if (clock_source) {
+			// Follows the source's timeline: simulates every frame up to the source's current one.
+			const double source_frame = clock_source->get_timeline_frame(now_usec);
+			if (source_frame >= 0.0) {
+				const uint32_t target = uint32_t(Math::floor(source_frame));
+				const uint32_t next = stepper.get_next_frame_index();
+				const int32_t behind = int32_t(target - next) + 1;
+				if (behind > stepper.get_max_ticks_per_advance() * 4 || behind < -stepper.get_max_ticks_per_advance() * 4) {
+					// Too far off (start, or a long hitch): jump to the source's frame.
+					stepper.set_next_frame_index(target);
+					server_tick(stepper.step_frame());
+				} else {
+					for (int32_t i = 0; i < MIN(behind, int32_t(stepper.get_max_ticks_per_advance())); i++) {
+						server_tick(stepper.step_frame());
+					}
+				}
+			}
+		} else {
+			const uint64_t dropped_before = stepper.get_dropped_ticks();
+			stepper.advance(p_delta);
+			// Dropped ticks shift the timeline: the frames keep their duration.
+			server_epoch_usec += int64_t(double(stepper.get_dropped_ticks() - dropped_before) * 1000000.0 * get_tick_delta());
+			while (stepper.get_pending_ticks() > 0) {
+				server_tick(stepper.pop_tick());
+			}
 		}
 
 		LocalVector<int> to_disconnect;
@@ -329,7 +348,7 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 				ticked = true;
 			}
 		}
-		if (transport->is_peer_connected(TickTransport::PEER_SERVER)) {
+		if (transport->is_peer_connected(settings.authority_peer)) {
 			if (ticked || ack_pending) {
 				client_send_inputs();
 				ack_pending = false;
@@ -367,14 +386,14 @@ void TickSyncCore::handle_events() {
 					listener->on_peer_left(event.peer);
 				}
 			}
-		} else if (event.peer == TickTransport::PEER_SERVER) {
+		} else if (event.peer == settings.authority_peer) {
 			if (event.type == TickTransport::EVENT_PEER_CONNECTED) {
 				TickDataBuffer hello;
 				hello.begin_write();
 				hello.add_uint_bits(TICK_MESSAGE_HELLO, 8);
 				hello.add_uint_bits(TICK_PROTOCOL_VERSION, 16);
 				hello.add_bool(sizeof(real_t) == sizeof(double));
-				send(TickTransport::PEER_SERVER, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, hello);
+				send(settings.authority_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, hello);
 			} else {
 				welcomed = false;
 				predicting = false;
@@ -384,7 +403,7 @@ void TickSyncCore::handle_events() {
 				remote_objects.clear();
 				predicted_ids_dirty = true;
 				if (listener) {
-					listener->on_peer_left(TickTransport::PEER_SERVER);
+					listener->on_peer_left(settings.authority_peer);
 				}
 			}
 		}
@@ -422,7 +441,7 @@ void TickSyncCore::handle_packet(const TickTransport::Packet &p_packet) {
 	}
 
 	// The client only trusts the server (H2): state never comes from another peer.
-	if (p_packet.from_peer != TickTransport::PEER_SERVER) {
+	if (p_packet.from_peer != settings.authority_peer) {
 		stats.malformed_packets++;
 		return;
 	}
@@ -498,7 +517,7 @@ void TickSyncCore::server_accept_peer(int p_peer) {
 	welcome.begin_write();
 	welcome.add_uint_bits(TICK_MESSAGE_WELCOME, 8);
 	welcome.add_uint_bits(uint64_t(settings.ticks_per_second), 16);
-	welcome.add_uint_bits(server_epoch_usec, 64);
+	welcome.add_int_bits(server_compute_epoch(), 64);
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, welcome);
 
 	// Late join (E4): the live spawns first, so the objects exist when their registration arrives.
@@ -614,12 +633,15 @@ void TickSyncCore::server_handle_ping(int p_peer, TickDataBuffer &p_message) {
 	pong.add_uint_bits(TICK_MESSAGE_PONG, 8);
 	pong.add_uint_bits(client_time, 64);
 	pong.add_uint_bits(now_usec, 64);
-	// The epoch that matches the frame the server is really at, including the part of the next frame already
-	// accumulated: the server's frames can drift from its start time (startup, hitches).
-	const double elapsed_frames = double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
-	const uint64_t elapsed_usec = uint64_t(elapsed_frames * 1000000.0 * get_tick_delta());
-	pong.add_uint_bits(now_usec > elapsed_usec ? now_usec - elapsed_usec : 0, 64);
+	pong.add_int_bits(server_compute_epoch(), 64);
 	send(p_peer, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, pong);
+}
+
+int64_t TickSyncCore::server_compute_epoch() const {
+	// The epoch that matches the frame the server is really at, including the part of the next frame already
+	// accumulated: the server's frames can drift from its start time (startup, hitches, another network's clock).
+	const double elapsed_frames = double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
+	return int64_t(now_usec) - int64_t(elapsed_frames * 1000000.0 * get_tick_delta());
 }
 
 void TickSyncCore::server_resolve_input(PeerState &r_peer, uint32_t p_frame) {
@@ -672,7 +694,7 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 		ServerObject &object = server_objects[net_id];
 		TickDataBuffer input;
 		input.begin_write();
-		if (object.controller == TickTransport::PEER_SERVER) {
+		if (object.controller == settings.authority_peer) {
 			object.object->collect_input(input);
 		} else {
 			// Only the controller's own input moves the object (H1): inputs are looked up per sending peer.
@@ -786,7 +808,7 @@ void TickSyncCore::server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t 
 
 void TickSyncCore::client_handle_welcome(TickDataBuffer &p_message) {
 	const int ticks_per_second = int(p_message.read_uint_bits(16));
-	const uint64_t epoch = p_message.read_uint_bits(64);
+	const int64_t epoch = p_message.read_int_bits(64);
 	if (p_message.is_buffer_failed() || ticks_per_second <= 0) {
 		stats.malformed_packets++;
 		return;
@@ -797,7 +819,7 @@ void TickSyncCore::client_handle_welcome(TickDataBuffer &p_message) {
 	clock.set_master_epoch_usec(epoch);
 	welcomed = true;
 	if (listener) {
-		listener->on_peer_ready(TickTransport::PEER_SERVER);
+		listener->on_peer_ready(settings.authority_peer);
 	}
 }
 
@@ -996,7 +1018,7 @@ void TickSyncCore::client_handle_snapshot(TickDataBuffer &p_message, bool p_full
 void TickSyncCore::client_handle_pong(TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
 	const uint64_t server_time = p_message.read_uint_bits(64);
-	const uint64_t epoch = p_message.read_uint_bits(64);
+	const int64_t epoch = p_message.read_int_bits(64);
 	if (p_message.is_buffer_failed()) {
 		stats.malformed_packets++;
 		return;
@@ -1011,7 +1033,7 @@ void TickSyncCore::client_send_ping() {
 	ping.begin_write();
 	ping.add_uint_bits(TICK_MESSAGE_PING, 8);
 	ping.add_uint_bits(now_usec, 64);
-	send(TickTransport::PEER_SERVER, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, ping);
+	send(settings.authority_peer, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, ping);
 }
 
 uint32_t TickSyncCore::client_compute_start_frame() const {
@@ -1214,7 +1236,7 @@ void TickSyncCore::client_send_inputs() {
 	if (!predicting) {
 		message.add_uint_bits(0, 8);
 		message.add_uint_bits(TICK_FRAME_NONE, 32);
-		send(TickTransport::PEER_SERVER, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
+		send(settings.authority_peer, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
 		return;
 	}
 
@@ -1232,7 +1254,7 @@ void TickSyncCore::client_send_inputs() {
 	if (predictions[history_index(last_frame)].frame != last_frame) {
 		message.add_uint_bits(0, 8);
 		message.add_uint_bits(TICK_FRAME_NONE, 32);
-		send(TickTransport::PEER_SERVER, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
+		send(settings.authority_peer, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
 		return;
 	}
 
@@ -1254,7 +1276,17 @@ void TickSyncCore::client_send_inputs() {
 		message.add_uint_bits(uint64_t(duplicates[i]), 8);
 		message.add_data_buffer(*groups[i]);
 	}
-	send(TickTransport::PEER_SERVER, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
+	send(settings.authority_peer, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
+}
+
+double TickSyncCore::get_timeline_frame(uint64_t p_now_usec) const {
+	if (role == ROLE_SERVER) {
+		return double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
+	}
+	if (role == ROLE_CLIENT && welcomed && clock.is_synchronized()) {
+		return clock.get_master_frame_time(p_now_usec);
+	}
+	return -1.0;
 }
 
 void TickSyncCore::update_interpolation(uint64_t p_now_usec) {
@@ -1270,9 +1302,10 @@ void TickSyncCore::client_update_interpolation() {
 		return;
 	}
 
-	// Render time, in frames: behind the server's current frame by the interpolation delay.
+	// Render time, in frames: behind the server's current frame by the interpolation delay; the latest state
+	// without interpolation.
 	double render_frame = double(latest_snapshot);
-	if (clock.is_synchronized() && welcomed) {
+	if (settings.interpolate_remote && clock.is_synchronized() && welcomed) {
 		render_frame = clock.get_master_frame_time(now_usec) - settings.interpolation_delay * double(settings.ticks_per_second);
 	}
 
@@ -1560,7 +1593,7 @@ void TickSyncCore::client_handle_event(TickDataBuffer &p_message) {
 		stats.malformed_packets++;
 		return;
 	}
-	event.sender = TickTransport::PEER_SERVER;
+	event.sender = settings.authority_peer;
 	event.expire_usec = now_usec + PENDING_EVENT_TIMEOUT_USEC;
 	stats.events_received++;
 
@@ -1600,7 +1633,7 @@ Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 			frame = stepper.get_next_frame_index();
 		}
 		write_event(message, target, frame, p_name, p_payload);
-		send(TickTransport::PEER_SERVER, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
+		send(settings.authority_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 		stats.events_sent++;
 		return OK;
 	}

@@ -5,6 +5,7 @@
 #include "source/nodes/tick_network.h"
 #include "source/nodes/tick_object.h"
 #include "source/nodes/tick_spawner.h"
+#include "source/transport/enet_mesh_transport.h"
 #include "source/transport/enet_star_transport.h"
 #include "source/transport/tick_transport.h"
 
@@ -18,6 +19,7 @@ void initialize_tick_synchronizer_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(DataBuffer);
 	GDREGISTER_ABSTRACT_CLASS(TickTransport);
 	GDREGISTER_CLASS(EnetStarTransport);
+	GDREGISTER_CLASS(EnetMeshTransport);
 	GDREGISTER_CLASS(TickNetwork);
 	GDREGISTER_CLASS(TickObject);
 	GDREGISTER_CLASS(TickSpawner);

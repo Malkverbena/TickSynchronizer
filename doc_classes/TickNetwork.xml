@@ -39,7 +39,7 @@
 		<method name="get_stats" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code] and [code]time_scale[/code] (the client's speed adjustment).
+				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code], [code]rate_limited_packets[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]time_scale[/code] (the client's speed adjustment), [code]timeline_frame[/code] (this peer's estimate of the authority's current frame, negative while unknown) and [code]latest_snapshot_frame[/code].
 			</description>
 		</method>
 		<method name="get_transport" qualifiers="const">
@@ -97,6 +97,12 @@
 		</method>
 	</methods>
 	<members>
+		<member name="authority_peer" type="int" setter="set_authority_peer" getter="get_authority_peer" default="1">
+			Peer that simulates every object, is the destination of inputs and events, and is the clock master: the hub of a star (1), or the node of a mesh chosen by the project.
+		</member>
+		<member name="clock_network" type="NodePath" setter="set_clock_network" getter="get_clock_network" default="NodePath(&quot;&quot;)">
+			Another [TickNetwork] of this process whose timeline this one follows (only for the [member authority_peer] of this network). A game server's star with its clients follows the cluster's network, so the clients, the game server and the cluster's authority use the same frames. Place the followed network before this one in the tree.
+		</member>
 		<member name="event_validator" type="Callable" setter="set_event_validator" getter="get_event_validator" default="Callable()">
 			Called on the server as [code]validator(sender: int, event: StringName, payload: Variant) -&gt; bool[/code] for each event without target object sent by a client; returning [code]false[/code] refuses it. Without a validator, those events are accepted.
 		</member>
@@ -105,6 +111,9 @@
 		</member>
 		<member name="input_redundancy" type="int" setter="set_input_redundancy" getter="get_input_redundancy" default="5">
 			Number of past inputs repeated in each input packet, against packet loss.
+		</member>
+		<member name="interpolate_remote" type="bool" setter="set_interpolate_remote" getter="is_interpolating_remote" default="true">
+			If [code]false[/code], the objects this peer doesn't simulate get the state of the latest snapshot without interpolation. Use it on game servers that relay a cluster's objects to their own clients, so only the final clients interpolate.
 		</member>
 		<member name="interpolation_delay" type="float" setter="set_interpolation_delay" getter="get_interpolation_delay" default="0.1">
 			How far behind the server, in seconds, the interpolated objects are rendered.

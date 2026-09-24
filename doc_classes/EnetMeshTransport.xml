@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="EnetMeshTransport" inherits="TickTransport" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Mesh transport for [TickNetwork] over plain ENet connections, for networks between servers.
+	</brief_description>
+	<description>
+		Connects the nodes of a mesh directly, without [SceneMultiplayer], which stays free for the star with the clients. Every node has a fixed id and the list of the other nodes; the node with the higher id connects to the lower one and retries while the connection is down.
+		A connection is accepted only from a node in the list, identified by the id it declares when connecting, and only once per id: use it in trusted networks (for example, servers in a LAN), with [member TickNetwork.trust] set to [constant TickNetwork.TRUST_TRUSTED]. It has no DTLS.
+		[codeblock]
+		var mesh := EnetMeshTransport.create(2, 9002)
+		mesh.add_node(1, "10.0.0.1", 9001)
+		mesh.add_node(3, "10.0.0.3", 9003)
+		$Cluster.start(mesh)
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="add_node">
+			<return type="int" enum="Error" />
+			<param index="0" name="id" type="int" />
+			<param index="1" name="address" type="String" />
+			<param index="2" name="port" type="int" />
+			<description>
+				Adds a node of the mesh. This node connects to the nodes with a lower id; the others connect to this one.
+			</description>
+		</method>
+		<method name="create" qualifiers="static">
+			<return type="EnetMeshTransport" />
+			<param index="0" name="local_id" type="int" />
+			<param index="1" name="port" type="int" />
+			<param index="2" name="bind_address" type="String" default="&quot;*&quot;" />
+			<param index="3" name="compression" type="int" enum="EnetMeshTransport.Compression" default="1" />
+			<param index="4" name="max_nodes" type="int" default="32" />
+			<description>
+				Creates the node [param local_id] (positive), listening on [param port]. The [param compression] mode must be the same on every node. Returns [code]null[/code] on failure.
+			</description>
+		</method>
+		<method name="get_local_port" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the port this node listens on.
+			</description>
+		</method>
+		<method name="get_nodes" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the ids of the other nodes of the mesh.
+			</description>
+		</method>
+		<method name="remove_node">
+			<return type="void" />
+			<param index="0" name="id" type="int" />
+			<description>
+				Removes a node from the mesh, closing its connection.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="retry_interval" type="float" setter="set_retry_interval" getter="get_retry_interval" default="1.0">
+			Seconds between connection attempts to a node that isn't connected.
+		</member>
+	</members>
+	<constants>
+		<constant name="COMPRESSION_NONE" value="0" enum="Compression">
+			No compression.
+		</constant>
+		<constant name="COMPRESSION_RANGE_CODER" value="1" enum="Compression">
+			ENet's range coder, suited for small packets. The default.
+		</constant>
+		<constant name="COMPRESSION_FASTLZ" value="2" enum="Compression">
+			FastLZ compression.
+		</constant>
+		<constant name="COMPRESSION_ZLIB" value="3" enum="Compression">
+			Zlib compression.
+		</constant>
+		<constant name="COMPRESSION_ZSTD" value="4" enum="Compression">
+			Zstandard compression; not efficient on packets smaller than 4 KB.
+		</constant>
+	</constants>
+</class>

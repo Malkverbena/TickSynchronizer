@@ -92,6 +92,30 @@ void TickNetwork::on_despawn(const String &p_spawner, uint32_t p_spawn_id) {
 	spawner->client_despawn(p_spawn_id);
 }
 
+void TickNetwork::set_authority_peer(int p_peer) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	ERR_FAIL_COND_MSG(p_peer <= 0, "The authority peer must be positive.");
+	settings.authority_peer = p_peer;
+}
+
+int TickNetwork::get_authority_peer() const {
+	return settings.authority_peer;
+}
+
+void TickNetwork::set_interpolate_remote(bool p_enabled) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	settings.interpolate_remote = p_enabled;
+}
+
+bool TickNetwork::is_interpolating_remote() const {
+	return settings.interpolate_remote;
+}
+
+void TickNetwork::set_clock_network(const NodePath &p_path) {
+	ERR_FAIL_COND_MSG(running, "Can't change the clock network while the network is running.");
+	clock_network = p_path;
+}
+
 void TickNetwork::set_trust(Trust p_trust) {
 	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
 	settings.trusted = p_trust == TRUST_TRUSTED;
@@ -234,6 +258,13 @@ Error TickNetwork::start(const Ref<TickTransport> &p_transport) {
 	ERR_FAIL_COND_V_MSG(running, ERR_ALREADY_IN_USE, "The network is already running.");
 	ERR_FAIL_COND_V_MSG(p_transport.is_null(), ERR_INVALID_PARAMETER, "The transport is null.");
 	core.set_settings(settings);
+	const TickNetwork *source = nullptr;
+	if (!clock_network.is_empty()) {
+		source = Object::cast_to<TickNetwork>(get_node_or_null(clock_network));
+		ERR_FAIL_COND_V_MSG(source == nullptr || source == this, ERR_INVALID_PARAMETER, "`clock_network` must point to another TickNetwork.");
+		ERR_FAIL_COND_V_MSG(p_transport->get_local_peer_id() != settings.authority_peer, ERR_INVALID_PARAMETER, "Only the authority of a network can follow another network's clock.");
+	}
+	core.set_clock_source(source ? &source->get_core() : nullptr);
 	const Error err = core.start(p_transport, OS::get_singleton()->get_ticks_usec());
 	ERR_FAIL_COND_V(err != OK, err);
 	transport = p_transport;
@@ -299,6 +330,8 @@ Dictionary TickNetwork::get_stats() const {
 	result["spawns"] = stats.spawns;
 	result["despawns"] = stats.despawns;
 	result["time_scale"] = core.get_time_scale();
+	result["timeline_frame"] = core.get_timeline_frame(OS::get_singleton()->get_ticks_usec());
+	result["latest_snapshot_frame"] = int64_t(core.get_latest_snapshot_frame());
 	return result;
 }
 
@@ -341,6 +374,12 @@ void TickNetwork::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_min_input_buffer"), &TickNetwork::get_min_input_buffer);
 	ClassDB::bind_method(D_METHOD("set_max_input_buffer", "frames"), &TickNetwork::set_max_input_buffer);
 	ClassDB::bind_method(D_METHOD("get_max_input_buffer"), &TickNetwork::get_max_input_buffer);
+	ClassDB::bind_method(D_METHOD("set_authority_peer", "peer"), &TickNetwork::set_authority_peer);
+	ClassDB::bind_method(D_METHOD("get_authority_peer"), &TickNetwork::get_authority_peer);
+	ClassDB::bind_method(D_METHOD("set_interpolate_remote", "enabled"), &TickNetwork::set_interpolate_remote);
+	ClassDB::bind_method(D_METHOD("is_interpolating_remote"), &TickNetwork::is_interpolating_remote);
+	ClassDB::bind_method(D_METHOD("set_clock_network", "path"), &TickNetwork::set_clock_network);
+	ClassDB::bind_method(D_METHOD("get_clock_network"), &TickNetwork::get_clock_network);
 	ClassDB::bind_method(D_METHOD("set_trust", "trust"), &TickNetwork::set_trust);
 	ClassDB::bind_method(D_METHOD("get_trust"), &TickNetwork::get_trust);
 	ClassDB::bind_method(D_METHOD("set_max_events_per_second", "events"), &TickNetwork::set_max_events_per_second);
@@ -374,6 +413,9 @@ void TickNetwork::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "min_input_buffer", PROPERTY_HINT_RANGE, "0,64,1"), "set_min_input_buffer", "get_min_input_buffer");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_input_buffer", PROPERTY_HINT_RANGE, "0,64,1"), "set_max_input_buffer", "get_max_input_buffer");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "root_path"), "set_root_path", "get_root_path");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "authority_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_authority_peer", "get_authority_peer");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "interpolate_remote"), "set_interpolate_remote", "is_interpolating_remote");
+	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "clock_network", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "TickNetwork"), "set_clock_network", "get_clock_network");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "trust", PROPERTY_HINT_ENUM, "Untrusted,Trusted"), "set_trust", "get_trust");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_events_per_second", PROPERTY_HINT_RANGE, "1,1000,1"), "set_max_events_per_second", "get_max_events_per_second");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_event_size", PROPERTY_HINT_RANGE, "1,65535,1,suffix:B"), "set_max_event_size", "get_max_event_size");

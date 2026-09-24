@@ -26,7 +26,8 @@ class TickClock {
 	uint64_t rtt_usec = 0;
 
 	int ticks_per_second = 60;
-	uint64_t master_epoch_usec = 0;
+	// Master time of frame 0; negative when the timeline started before the master's clock (another process).
+	int64_t master_epoch_usec = 0;
 
 	void update_estimate();
 
@@ -61,8 +62,8 @@ public:
 	// Frame timing: frame 0 starts at `p_master_epoch_usec` (master time).
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const { return ticks_per_second; }
-	void set_master_epoch_usec(uint64_t p_master_epoch_usec) { master_epoch_usec = p_master_epoch_usec; }
-	uint64_t get_master_epoch_usec() const { return master_epoch_usec; }
+	void set_master_epoch_usec(int64_t p_master_epoch_usec) { master_epoch_usec = p_master_epoch_usec; }
+	int64_t get_master_epoch_usec() const { return master_epoch_usec; }
 
 	// Frame the master is processing at the given local time.
 	uint32_t get_master_frame(uint64_t p_local_usec) const;

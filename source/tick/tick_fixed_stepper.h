@@ -40,6 +40,9 @@ public:
 
 	// Consumes one pending tick and returns its frame index.
 	uint32_t pop_tick();
+	// Returns the next frame index and moves past it, without pending ticks: for a timeline driven from outside
+	// (see `TickSyncCore::set_clock_source()`).
+	uint32_t step_frame() { return next_frame_index++; }
 
 	// Frame index the next tick will have.
 	uint32_t get_next_frame_index() const { return next_frame_index; }

@@ -91,14 +91,14 @@ void TickClock::set_ticks_per_second(int p_ticks_per_second) {
 uint32_t TickClock::get_master_frame(uint64_t p_local_usec) const {
 	// Signed, so a local time before the master's clock started doesn't wrap around.
 	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_usec);
-	if (master_usec < int64_t(master_epoch_usec)) {
+	if (master_usec < master_epoch_usec) {
 		return 0;
 	}
 	// Frame indices wrap around, like the ones of `TickFixedStepper`.
-	return uint32_t(uint64_t(master_usec - int64_t(master_epoch_usec)) * uint64_t(ticks_per_second) / 1000000);
+	return uint32_t(uint64_t(master_usec - master_epoch_usec) * uint64_t(ticks_per_second) / 1000000);
 }
 
 double TickClock::get_master_frame_time(uint64_t p_local_usec) const {
 	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_usec);
-	return double(master_usec - int64_t(master_epoch_usec)) * double(ticks_per_second) / 1000000.0;
+	return double(master_usec - master_epoch_usec) * double(ticks_per_second) / 1000000.0;
 }

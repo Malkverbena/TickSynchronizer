@@ -7,9 +7,10 @@ replay), interpolation, lag compensation and per-object authority, over ENet.
 It is a rewrite, inspired by [NetworkSynchronizer](https://github.com/GameNetworking/NetworkSynchronizer)
 (MIT), whose ideas it reuses and extends.
 
-> **Status:** branch `0.1` — phase F3 done: server-authoritative star networks with client prediction,
-> reconciliation, interpolation, replicated spawning, frame-scheduled events and sender validation. Meshes and
-> distributed authority come in the next phases; see [Roadmap](#roadmap).
+> **Status:** branch `0.1` — phase F4 done: server-authoritative star networks (prediction, reconciliation,
+> interpolation, spawning, frame-scheduled events, sender validation) and meshes between servers with a single
+> authority, bridged to each server's clients on a shared timeline. Distributed authority comes next; see
+> [Roadmap](#roadmap).
 
 ## Purpose
 
@@ -129,6 +130,27 @@ Events sent by clients (`TickObject.send_event()`) run on the server at the fram
 and the rate and size of what clients send are limited. The class reference
 is in `doc_classes/`; a runnable client/server example is in [`demos/star_headless`](demos/star_headless).
 
+### Clusters of servers (F4)
+
+A game server can take part in a mesh with other servers and in a star with its own clients at the same time:
+
+```gdscript
+# Mesh between servers: node 1 is the authority and clock master.
+var mesh := EnetMeshTransport.create(my_id, 9000 + my_id)
+for id in other_ids:
+	mesh.add_node(id, addresses[id], 9000 + id)
+$Cluster.trust = TickNetwork.TRUST_TRUSTED
+$Cluster.interpolate_remote = false          # only the final clients interpolate
+$Cluster.start(mesh)
+
+# The star with this server's clients follows the cluster's timeline.
+$Edge.clock_network = NodePath("../Cluster")
+$Edge.start(EnetStarTransport.create_server(7000))
+```
+
+A body relayed from the cluster to the clients has a `TickObject` in each network (`network_path`). See
+[`demos/cluster_headless`](demos/cluster_headless).
+
 ## Building
 
 The module is compiled as part of the engine using `custom_modules`:
@@ -159,7 +181,7 @@ flowchart TB
     src --> tick["tick/ — TickFixedStepper, TickClock"]
     src --> codec["codec/ — TickCodec"]
     src --> sync["sync/ — TickSyncCore (star network engine), protocol"]
-    src --> transport["transport/ — TickTransport, EnetStarTransport, TickLocalNetwork (tests)"]
+    src --> transport["transport/ — TickTransport, EnetStarTransport, EnetMeshTransport, TickLocalNetwork (tests)"]
     src --> nodes["nodes/ — TickNetwork, TickObject, TickSpawner, DataBuffer"]
     m --> tests["tests/ — doctest suites"]
     m --> docs["doc_classes/ — class reference"]
