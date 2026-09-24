@@ -1,11 +1,9 @@
 #pragma once
 
 #include "../common/tick_data_buffer.h"
-#include "../tick/tick_clock.h"
 #include "../tick/tick_fixed_stepper.h"
-#include "../transport/tick_transport.h"
+#include "tick_engine.h"
 #include "tick_protocol.h"
-#include "tick_sync_object.h"
 
 #include "core/templates/hash_map.h"
 
@@ -18,72 +16,12 @@
 //
 // The core doesn't read the clock: `process()` receives the current time, so it runs the same with a real
 // network and with the simulated one of the tests.
-class TickSyncCore {
+class TickSyncCore : public TickEngine {
 public:
 	enum Role {
 		ROLE_NONE,
 		ROLE_SERVER,
 		ROLE_CLIENT,
-	};
-
-	class Listener {
-	public:
-		virtual ~Listener() {}
-		// Server: a client passed the handshake. Client: the server accepted this client.
-		virtual void on_peer_ready(int p_peer) {}
-		virtual void on_peer_left(int p_peer) {}
-		// Client: the server refused the connection.
-		virtual void on_rejected(const String &p_reason) {}
-		// Client: the clock is synchronized and the local objects are now predicted.
-		virtual void on_prediction_started(uint32_t p_frame) {}
-		// Client: the predicted objects diverged at `p_frame` and `p_frame_count` frames were simulated again.
-		virtual void on_rewound(uint32_t p_frame, int p_frame_count) {}
-		// Server: validates an event without target object; 1 accepts, 0 refuses, -1 accepts (the default).
-		virtual int validate_network_event(int p_sender, const StringName &p_event, const Variant &p_payload) { return -1; }
-		// Executes an event without target object.
-		virtual void on_network_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) {}
-		// Client: the server spawned (or despawned) something with `p_spawner`; the game instantiates it.
-		virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {}
-		virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) {}
-	};
-
-	struct Settings {
-		int ticks_per_second = 60;
-		// Peer that simulates every object and is the clock master (ADR-036): the hub of a star, or the node of a
-		// mesh chosen by the project.
-		int authority_peer = 1;
-		// When `false`, the remote objects get the latest snapshot's state without interpolation (proxies on
-		// servers that relay them to their own clients, ADR-039).
-		bool interpolate_remote = true;
-		// Frames of history kept for snapshots, predictions and interpolation.
-		int history_size = 128;
-		// Past inputs repeated in each input packet, against packet loss.
-		int input_redundancy = 5;
-		// A snapshot is sent every `snapshot_interval` ticks.
-		int snapshot_interval = 1;
-		// How far behind the server the interpolated objects are rendered, in seconds.
-		double interpolation_delay = 0.1;
-		// Inputs the server should have buffered ahead of its frame; the client adapts its speed to keep it
-		// between these bounds.
-		int min_input_buffer = 2;
-		int max_input_buffer = 8;
-		// Largest speed change of the client, and how much of the buffer error is corrected per frame.
-		double max_time_scale_delta = 0.1;
-		double time_scale_gain = 0.02;
-		// Seconds between pings once the clock is synchronized.
-		double ping_interval = 0.5;
-		int clock_min_samples = 4;
-		// When `false` (untrusted clients), the server limits the rate and size of what clients send, and only
-		// accepts events for an object from its controller unless the object validates them itself.
-		bool trusted = false;
-		// Untrusted: input packets and events accepted per second from each client (with a burst of the same size).
-		int max_input_packets_per_second = 180;
-		int max_events_per_second = 30;
-		// Untrusted: largest input of one object per frame, in bits, and largest event payload, in bytes.
-		int max_input_bits = 1024;
-		int max_event_bytes = 4096;
-		// Largest delay, in seconds, of an event scheduled for a future frame.
-		double max_event_delay = 10.0;
 	};
 
 	struct Stats {
@@ -193,7 +131,7 @@ private:
 	TickClock clock;
 	uint64_t now_usec = 0;
 	bool rewinding = false;
-	const TickSyncCore *clock_source = nullptr;
+	const TickEngine *clock_source = nullptr;
 
 	// Server.
 	HashMap<uint16_t, ServerObject> server_objects;
@@ -291,54 +229,51 @@ private:
 	bool execute_event(const PendingEvent &p_event);
 
 public:
-	void set_settings(const Settings &p_settings);
-	const Settings &get_settings() const { return settings; }
+	virtual void set_settings(const Settings &p_settings) override;
+	virtual const Settings &get_settings() const override { return settings; }
 	const Stats &get_stats() const { return stats; }
-	void set_listener(Listener *p_listener) { listener = p_listener; }
+	virtual Dictionary get_stats_dictionary() const override;
+	virtual void set_listener(Listener *p_listener) override { listener = p_listener; }
 
-	// The role comes from the transport: peer 1 is the server.
-	Error start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec);
-	void stop();
+	// The role comes from the transport: the `authority_peer` is the server.
+	virtual Error start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec) override;
+	virtual void stop() override;
+	virtual bool is_running() const override { return role != ROLE_NONE; }
 	Role get_role() const { return role; }
-	bool is_server() const { return role == ROLE_SERVER; }
+	virtual bool is_server() const override { return role == ROLE_SERVER; }
+	virtual bool can_spawn() const override { return role == ROLE_SERVER; }
 
 	// Server: objects are simulated and replicated. Client: objects are bound to the server's objects with the
 	// same path, then predicted (controlled by this client) or interpolated.
-	void register_object(TickSyncObject *p_object);
-	void unregister_object(TickSyncObject *p_object);
+	virtual void register_object(TickSyncObject *p_object) override;
+	virtual void unregister_object(TickSyncObject *p_object) override;
 
-	// Receives, simulates the pending ticks, sends, and updates the interpolated objects.
-	void process(double p_delta, uint64_t p_now_usec);
-	// Updates only the interpolated objects, for rendering between ticks.
-	void update_interpolation(uint64_t p_now_usec);
+	virtual void process(double p_delta, uint64_t p_now_usec) override;
+	virtual void update_interpolation(uint64_t p_now_usec) override;
 
-	// Frame of this network's timeline at `p_now_usec`, with the fraction of the frame, or a negative value while
-	// it isn't known yet (a client before its clock is synchronized).
-	double get_timeline_frame(uint64_t p_now_usec) const;
-	// A server following another network's timeline (ADR-038): its frames advance up to that network's frame,
-	// instead of accumulating the local delta. Null to use the local delta.
-	void set_clock_source(const TickSyncCore *p_source) { clock_source = p_source; }
+	virtual double get_timeline_frame(uint64_t p_now_usec) const override;
+	virtual void set_clock_source(const TickEngine *p_source) override { clock_source = p_source; }
 
-	// Next frame to simulate.
-	uint32_t get_frame() const { return stepper.get_next_frame_index(); }
-	bool is_rewinding() const { return rewinding; }
-	bool is_predicting() const { return predicting; }
+	virtual uint32_t get_frame() const override { return stepper.get_next_frame_index(); }
+	virtual bool is_rewinding() const override { return rewinding; }
+	virtual bool is_predicting() const override { return predicting; }
 	bool is_welcomed() const { return welcomed; }
-	const TickClock &get_clock() const { return clock; }
+	virtual const TickClock &get_clock() const override { return clock; }
 	double get_time_scale() const { return stepper.get_time_scale(); }
 	uint32_t get_latest_snapshot_frame() const { return latest_snapshot; }
-	// Net id of an object, or 0 when unknown.
-	uint16_t get_net_id(const TickSyncObject *p_object) const;
+	virtual uint16_t get_net_id(const TickSyncObject *p_object) const override;
+	// The authority simulates every object.
+	virtual int get_owner(const TickSyncObject *p_object) const override { return settings.authority_peer; }
 
 	// Server: records a spawn and sends it to the clients (and to the ones joining later). Call it before the
 	// spawned objects are registered, so the clients create them before binding them.
-	uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data);
-	void despawn(uint32_t p_spawn_id);
-	uint32_t get_next_spawn_id() const { return next_spawn_id; }
+	virtual uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override;
+	virtual void despawn(uint32_t p_spawn_id) override;
+	virtual uint32_t get_next_spawn_id() const override { return next_spawn_id; }
 
 	// Sends an event to `p_target` (or the network when null). Client: to the server. Server: to `p_peer`, or
 	// every client with 0. `p_frame` schedules it (`TICK_FRAME_NONE`: see `notes/f3-design.md`).
-	Error send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer);
+	virtual Error send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) override;
 	// A frame `p_seconds` after the current one, to schedule events that every peer runs at the same frame.
-	uint32_t get_event_frame(double p_seconds) const;
+	virtual uint32_t get_event_frame(double p_seconds) const override;
 };

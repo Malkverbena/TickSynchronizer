@@ -47,4 +47,12 @@ public:
 	virtual int validate_event(int p_sender, const StringName &p_event, const Variant &p_payload) { return -1; }
 	// Executes an event. `p_frame` is the frame it was scheduled for.
 	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) {}
+
+	// Distributed authority: the owner of this object changed (0: nobody owns it).
+	virtual void on_authority_changed(int p_old_owner, int p_new_owner) {}
+	// Distributed authority: `p_requester` asks for this object, owned here. 1 approves, 0 refuses, -1 (the
+	// default) approves.
+	virtual int approve_authority_request(int p_requester) { return -1; }
+	// The `Object` behind this synchronized object, if any; used to report it in signals.
+	virtual Object *get_sync_instance() { return nullptr; }
 };

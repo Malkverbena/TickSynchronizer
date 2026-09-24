@@ -41,6 +41,8 @@ protected:
 	GDVIRTUAL1(_apply_interpolated_state, Dictionary)
 	GDVIRTUAL3R(bool, _validate_event, int, StringName, Variant)
 	GDVIRTUAL4(_on_event, int, StringName, Variant, int64_t)
+	GDVIRTUAL2(_on_authority_changed, int, int)
+	GDVIRTUAL1R(bool, _approve_authority_request, int)
 
 public:
 	void set_controller_peer(int p_peer);
@@ -57,6 +59,13 @@ public:
 	PackedStringArray get_declared_vars() const;
 
 	int get_net_id() const;
+
+	// Distributed authority (see `TickNetwork.authority_mode`).
+	int get_owner_peer() const;
+	bool is_owner() const;
+	Error request_authority();
+	Error release_authority(int p_to_peer);
+	Error assign_authority(int p_peer);
 	// Client: to the server. Server: to `p_peer`, or every client with 0. `p_frame` < 0 uses the default.
 	Error send_event(const StringName &p_event, const Variant &p_payload, int64_t p_frame, int p_peer);
 	bool is_rewinding() const;
@@ -72,6 +81,9 @@ public:
 	virtual void apply_interpolated_state(const LocalVector<Variant> &p_values) override;
 	virtual int validate_event(int p_sender, const StringName &p_event, const Variant &p_payload) override;
 	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override;
+	virtual void on_authority_changed(int p_old_owner, int p_new_owner) override;
+	virtual int approve_authority_request(int p_requester) override;
+	virtual Object *get_sync_instance() override { return this; }
 
 	TickObject();
 };

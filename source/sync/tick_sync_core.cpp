@@ -1651,3 +1651,27 @@ Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 uint32_t TickSyncCore::get_event_frame(double p_seconds) const {
 	return stepper.get_next_frame_index() + uint32_t(Math::ceil(MAX(p_seconds, 0.0) * double(settings.ticks_per_second)));
 }
+
+Dictionary TickSyncCore::get_stats_dictionary() const {
+	Dictionary result;
+	result["rewinds"] = stats.rewinds;
+	result["rewound_frames"] = stats.rewound_frames;
+	result["ghost_inputs"] = stats.ghost_inputs;
+	result["late_inputs"] = stats.late_inputs;
+	result["rejected_inputs"] = stats.rejected_inputs;
+	result["full_snapshots_sent"] = stats.full_snapshots_sent;
+	result["delta_snapshots_sent"] = stats.delta_snapshots_sent;
+	result["snapshots_received"] = stats.snapshots_received;
+	result["snapshots_dropped"] = stats.snapshots_dropped;
+	result["malformed_packets"] = stats.malformed_packets;
+	result["rate_limited_packets"] = stats.rate_limited_packets;
+	result["events_sent"] = stats.events_sent;
+	result["events_received"] = stats.events_received;
+	result["events_rejected"] = stats.events_rejected;
+	result["spawns"] = stats.spawns;
+	result["despawns"] = stats.despawns;
+	result["time_scale"] = stepper.get_time_scale();
+	result["timeline_frame"] = get_timeline_frame(now_usec);
+	result["latest_snapshot_frame"] = int64_t(latest_snapshot);
+	return result;
+}

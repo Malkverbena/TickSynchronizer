@@ -32,11 +32,26 @@
 				Called on peers that interpolate this object, with the interpolated value of each declared property. If not overridden, the properties are set on the root node.
 			</description>
 		</method>
+		<method name="_approve_authority_request" qualifiers="virtual">
+			<return type="bool" />
+			<param index="0" name="requester" type="int" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: called on the owner when [param requester] asks for this object; return [code]false[/code] to refuse. If not overridden, requests are approved. Assignments ([method assign_authority]) can't be refused.
+			</description>
+		</method>
 		<method name="_collect_input" qualifiers="virtual">
 			<return type="void" />
 			<param index="0" name="input" type="DataBuffer" />
 			<description>
 				Called on the controller, once per tick, to write the input of this tick in [param input]. Not called during rewinds: the stored inputs are used.
+			</description>
+		</method>
+		<method name="_on_authority_changed" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="old_owner" type="int" />
+			<param index="1" name="new_owner" type="int" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: called on every node when the owner of this object changes ([param new_owner] is 0 when nobody owns it).
 			</description>
 		</method>
 		<method name="_on_event" qualifiers="virtual">
@@ -72,6 +87,13 @@
 				Called on the server for each event a client sends to this object; return [code]false[/code] to refuse it. If not overridden, [member TickNetwork.trust] decides: untrusted networks only accept events from the [member controller_peer].
 			</description>
 		</method>
+		<method name="assign_authority">
+			<return type="int" enum="Error" />
+			<param index="0" name="peer" type="int" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry to give this object to [param peer]. An orphan is assigned directly, from its last known state; an owned object is transferred without asking its owner. Used, for example, to adopt orphans (see [signal TickNetwork.authority_orphaned]).
+			</description>
+		</method>
 		<method name="declare_var">
 			<return type="void" />
 			<param index="0" name="property" type="StringName" />
@@ -98,16 +120,41 @@
 				Returns the [TickNetwork] this object is registered in.
 			</description>
 		</method>
+		<method name="get_owner_peer" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the node that currently simulates this object: the network's authority with [constant TickNetwork.AUTHORITY_SINGLE], or the current owner with [constant TickNetwork.AUTHORITY_DISTRIBUTED] (0 when nobody owns it).
+			</description>
+		</method>
 		<method name="get_root_node" qualifiers="const">
 			<return type="Node" />
 			<description>
 				Returns the node whose properties are synchronized.
 			</description>
 		</method>
+		<method name="is_owner" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if this peer simulates the object.
+			</description>
+		</method>
 		<method name="is_rewinding" qualifiers="const">
 			<return type="bool" />
 			<description>
 				Returns [code]true[/code] while the network simulates again past frames. Use it to skip side effects.
+			</description>
+		</method>
+		<method name="release_authority">
+			<return type="int" enum="Error" />
+			<param index="0" name="to_peer" type="int" default="0" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: the owner gives this object to [param to_peer], or leaves it orphaned with 0. The object stops being simulated here right away; the new owner continues from its state.
+			</description>
+		</method>
+		<method name="request_authority">
+			<return type="int" enum="Error" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry for this object. The owner may refuse ([method _approve_authority_request]); a request that arrives while another transfer of the object is in progress is refused ([signal TickNetwork.authority_request_denied]). Once transferred, [method _on_authority_changed] is called on every node.
 			</description>
 		</method>
 		<method name="send_event">
@@ -123,7 +170,7 @@
 	</methods>
 	<members>
 		<member name="controller_peer" type="int" setter="set_controller_peer" getter="get_controller_peer" default="1">
-			Peer whose input drives this object: 1 for the server (NPCs, the host), or a client id. It can't change while the object is registered.
+			Peer whose input drives this object: 1 for the server (NPCs, the host), or a client id. With [constant TickNetwork.AUTHORITY_DISTRIBUTED], the node that owns the object at first. It can't change while the object is registered.
 		</member>
 		<member name="network_path" type="NodePath" setter="set_network_path" getter="get_network_path" default="NodePath(&quot;&quot;)">
 			Path to the [TickNetwork]. If empty, the first [TickNetwork] ancestor is used, or else the first one in the scene.

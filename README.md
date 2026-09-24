@@ -7,10 +7,10 @@ replay), interpolation, lag compensation and per-object authority, over ENet.
 It is a rewrite, inspired by [NetworkSynchronizer](https://github.com/GameNetworking/NetworkSynchronizer)
 (MIT), whose ideas it reuses and extends.
 
-> **Status:** branch `0.1` — phase F4 done: server-authoritative star networks (prediction, reconciliation,
-> interpolation, spawning, frame-scheduled events, sender validation) and meshes between servers with a single
-> authority, bridged to each server's clients on a shared timeline. Distributed authority comes next; see
-> [Roadmap](#roadmap).
+> **Status:** branch `0.1` — phase F5 done: server-authoritative star networks (prediction, reconciliation,
+> interpolation, spawning, frame-scheduled events, sender validation), meshes between servers with a single
+> authority bridged to each server's clients, and meshes with distributed, transferable authority per object.
+> Peer-to-peer meshes between players come next; see [Roadmap](#roadmap).
 
 ## Purpose
 
@@ -151,6 +151,23 @@ $Edge.start(EnetStarTransport.create_server(7000))
 A body relayed from the cluster to the clients has a `TickObject` in each network (`network_path`). See
 [`demos/cluster_headless`](demos/cluster_headless).
 
+### Distributed authority (F5)
+
+In a mesh of trusted servers, every object can have its own owner, which simulates it; ownership changes through a
+registry node, with a version per object so late packets from a former owner are discarded:
+
+```gdscript
+$Mesh.authority_mode = TickNetwork.AUTHORITY_DISTRIBUTED
+$Mesh.registry_peer = 1       # keeps the owners; also the default clock master
+$Mesh.start(mesh_transport)
+
+$Crate/TickObject.request_authority()           # the owner may refuse (_approve_authority_request)
+$Crate/TickObject.release_authority(3)          # give it to node 3 (0: leave it orphaned)
+$Mesh.authority_orphaned.connect(func(object, last_owner, last_frame): object.assign_authority(2))
+```
+
+See [`demos/distributed_headless`](demos/distributed_headless).
+
 ## Building
 
 The module is compiled as part of the engine using `custom_modules`:
@@ -180,7 +197,7 @@ flowchart TB
     src --> common["common/ — TickBitArray, TickDataBuffer"]
     src --> tick["tick/ — TickFixedStepper, TickClock"]
     src --> codec["codec/ — TickCodec"]
-    src --> sync["sync/ — TickSyncCore (star network engine), protocol"]
+    src --> sync["sync/ — TickEngine, TickSyncCore (single authority), TickMeshCore (distributed authority), protocol"]
     src --> transport["transport/ — TickTransport, EnetStarTransport, EnetMeshTransport, TickLocalNetwork (tests)"]
     src --> nodes["nodes/ — TickNetwork, TickObject, TickSpawner, DataBuffer"]
     m --> tests["tests/ — doctest suites"]

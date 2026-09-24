@@ -31,19 +31,19 @@
 			<return type="Node" />
 			<param index="0" name="scene" type="String" />
 			<param index="1" name="name" type="String" default="&quot;&quot;" />
-			<param index="2" name="controller_peer" type="int" default="1" />
+			<param index="2" name="controller_peer" type="int" default="0" />
 			<param index="3" name="data" type="Variant" default="null" />
 			<description>
-				Server only. Instantiates [param scene] (one of [member spawnable_scenes]) under [member spawn_path], named [param name] (generated when empty), with [param controller_peer] as the controller of its [TickObject]s, and replicates it. [param data] is sent to the clients too. Returns the new node, or [code]null[/code] on failure.
+				The server of a single authority network, or any node of a distributed one. Instantiates [param scene] (one of [member spawnable_scenes]) under [member spawn_path], named [param name] (generated when empty), with [param controller_peer] as the controller of its [TickObject]s (0: this peer), and replicates it. [param data] is sent to the clients too. Returns the new node, or [code]null[/code] on failure.
 			</description>
 		</method>
 		<method name="spawn_custom">
 			<return type="Node" />
 			<param index="0" name="data" type="Variant" />
 			<param index="1" name="name" type="String" default="&quot;&quot;" />
-			<param index="2" name="controller_peer" type="int" default="1" />
+			<param index="2" name="controller_peer" type="int" default="0" />
 			<description>
-				Server only. Creates a node with [member spawn_function] called with [param data], on the server and on every client, and adds it as in [method spawn]. Returns the new node, or [code]null[/code] on failure.
+				The server of a single authority network, or any node of a distributed one. Creates a node with [member spawn_function] called with [param data], on the server and on every client, and adds it as in [method spawn]. Returns the new node, or [code]null[/code] on failure.
 			</description>
 		</method>
 	</methods>

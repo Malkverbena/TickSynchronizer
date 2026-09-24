@@ -39,7 +39,7 @@
 		<method name="get_stats" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code], [code]rate_limited_packets[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]time_scale[/code] (the client's speed adjustment), [code]timeline_frame[/code] (this peer's estimate of the authority's current frame, negative while unknown) and [code]latest_snapshot_frame[/code].
+				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code], [code]rate_limited_packets[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]time_scale[/code] (the client's speed adjustment), [code]timeline_frame[/code] (this peer's estimate of the authority's current frame, negative while unknown) and [code]latest_snapshot_frame[/code]. With [constant AUTHORITY_DISTRIBUTED]: [code]states_sent[/code], [code]states_received[/code], [code]stale_states[/code], [code]malformed_packets[/code], [code]transfers[/code], [code]orphans[/code], [code]denied_requests[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_forwarded[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code] and [code]timeline_frame[/code].
 			</description>
 		</method>
 		<method name="get_transport" qualifiers="const">
@@ -97,8 +97,14 @@
 		</method>
 	</methods>
 	<members>
+		<member name="authority_mode" type="int" setter="set_authority_mode" getter="get_authority_mode" enum="TickNetwork.AuthorityMode" default="0">
+			[constant AUTHORITY_SINGLE]: one peer ([member authority_peer]) simulates every object — the server of a star, or one node of a mesh. [constant AUTHORITY_DISTRIBUTED]: every object has an owner node that simulates it and sends its state to the other nodes, and ownership can change (see [method TickObject.request_authority]); for trusted meshes of servers, without prediction.
+		</member>
 		<member name="authority_peer" type="int" setter="set_authority_peer" getter="get_authority_peer" default="1">
-			Peer that simulates every object, is the destination of inputs and events, and is the clock master: the hub of a star (1), or the node of a mesh chosen by the project.
+			With [constant AUTHORITY_SINGLE]: the peer that simulates every object, is the destination of inputs and events, and is the clock master — the hub of a star (1), or the node of a mesh chosen by the project.
+		</member>
+		<member name="clock_master" type="int" setter="set_clock_master" getter="get_clock_master" default="1">
+			With [constant AUTHORITY_DISTRIBUTED]: the node whose timeline the others follow.
 		</member>
 		<member name="clock_network" type="NodePath" setter="set_clock_network" getter="get_clock_network" default="NodePath(&quot;&quot;)">
 			Another [TickNetwork] of this process whose timeline this one follows (only for the [member authority_peer] of this network). A game server's star with its clients follows the cluster's network, so the clients, the game server and the cluster's authority use the same frames. Place the followed network before this one in the tree.
@@ -118,6 +124,9 @@
 		<member name="interpolation_delay" type="float" setter="set_interpolation_delay" getter="get_interpolation_delay" default="0.1">
 			How far behind the server, in seconds, the interpolated objects are rendered.
 		</member>
+		<member name="keyframe_interval" type="int" setter="set_keyframe_interval" getter="get_keyframe_interval" default="30">
+			With [constant AUTHORITY_DISTRIBUTED]: owners send the state of every object at least every [member keyframe_interval] ticks, even if it didn't change; in between, only the objects that changed.
+		</member>
 		<member name="max_event_size" type="int" setter="set_max_event_size" getter="get_max_event_size" default="4096">
 			Largest event payload, in bytes. With [constant TRUST_UNTRUSTED], larger events from clients are refused.
 		</member>
@@ -129,6 +138,9 @@
 		</member>
 		<member name="min_input_buffer" type="int" setter="set_min_input_buffer" getter="get_min_input_buffer" default="2">
 			Smallest number of inputs the client tries to keep buffered on the server; more jitter increases it up to [member max_input_buffer].
+		</member>
+		<member name="registry_peer" type="int" setter="set_registry_peer" getter="get_registry_peer" default="1">
+			With [constant AUTHORITY_DISTRIBUTED]: the node that keeps the registry of owners. Every change of owner goes through it and increases the object's version; state with an older version is discarded. Choose a node that stays up: the registry isn't replaced if it leaves.
 		</member>
 		<member name="root_path" type="NodePath" setter="set_root_path" getter="get_root_path" default="NodePath(&quot;..&quot;)">
 			Node the paths of the objects are relative to. The same object must have the same path on every peer.
@@ -144,6 +156,28 @@
 		</member>
 	</members>
 	<signals>
+		<signal name="authority_changed">
+			<param index="0" name="object" type="TickObject" />
+			<param index="1" name="old_owner" type="int" />
+			<param index="2" name="new_owner" type="int" />
+			<description>
+				With [constant AUTHORITY_DISTRIBUTED]: emitted on every node when the owner of [param object] changes ([param new_owner] is 0 when nobody owns it).
+			</description>
+		</signal>
+		<signal name="authority_orphaned">
+			<param index="0" name="object" type="TickObject" />
+			<param index="1" name="last_owner" type="int" />
+			<param index="2" name="last_frame" type="int" />
+			<description>
+				With [constant AUTHORITY_DISTRIBUTED]: emitted on every node when the owner of [param object] left (or released it to nobody). Nobody simulates it until the project assigns it, for example with [method TickObject.assign_authority]. [param last_frame] is the frame of its last known state.
+			</description>
+		</signal>
+		<signal name="authority_request_denied">
+			<param index="0" name="object" type="TickObject" />
+			<description>
+				With [constant AUTHORITY_DISTRIBUTED]: emitted when a request for [param object] is refused: another transfer of it was in progress, or its owner refused it.
+			</description>
+		</signal>
 		<signal name="event_received">
 			<param index="0" name="sender" type="int" />
 			<param index="1" name="event" type="StringName" />
@@ -191,6 +225,12 @@
 		</constant>
 		<constant name="TRUST_TRUSTED" value="1" enum="Trust">
 			The peers are trusted (for example, servers of the same cluster): no rate or size limits, and events are accepted from any peer.
+		</constant>
+		<constant name="AUTHORITY_SINGLE" value="0" enum="AuthorityMode">
+			One peer simulates every object.
+		</constant>
+		<constant name="AUTHORITY_DISTRIBUTED" value="1" enum="AuthorityMode">
+			Every object has an owner node, and ownership can change.
 		</constant>
 	</constants>
 </class>

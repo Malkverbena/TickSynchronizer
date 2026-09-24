@@ -8,14 +8,16 @@
 static const char *TICK_NETWORK_GROUP = "_tick_networks";
 
 TickNetwork::TickNetwork() {
-	core.set_listener(this);
+	single_core.set_listener(this);
+	mesh_core.set_listener(this);
 }
 
 TickNetwork::~TickNetwork() {
-	core.set_listener(nullptr);
 	if (running) {
-		core.stop();
+		engine->stop();
 	}
+	single_core.set_listener(nullptr);
+	mesh_core.set_listener(nullptr);
 }
 
 void TickNetwork::_notification(int p_what) {
@@ -80,7 +82,7 @@ void TickNetwork::on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_s
 	Node *root = get_root_node();
 	ERR_FAIL_NULL(root);
 	TickSpawner *spawner = Object::cast_to<TickSpawner>(root->get_node_or_null(NodePath(p_spawner)));
-	ERR_FAIL_NULL_MSG(spawner, vformat("The server spawned with \"%s\", but there's no TickSpawner at that path.", p_spawner));
+	ERR_FAIL_NULL_MSG(spawner, vformat("A peer spawned with \"%s\", but there's no TickSpawner at that path.", p_spawner));
 	spawner->client_spawn(p_spawn_id, p_scene, p_name, p_controller, p_data);
 }
 
@@ -88,8 +90,90 @@ void TickNetwork::on_despawn(const String &p_spawner, uint32_t p_spawn_id) {
 	Node *root = get_root_node();
 	ERR_FAIL_NULL(root);
 	TickSpawner *spawner = Object::cast_to<TickSpawner>(root->get_node_or_null(NodePath(p_spawner)));
-	ERR_FAIL_NULL_MSG(spawner, vformat("The server despawned with \"%s\", but there's no TickSpawner at that path.", p_spawner));
+	ERR_FAIL_NULL_MSG(spawner, vformat("A peer despawned with \"%s\", but there's no TickSpawner at that path.", p_spawner));
 	spawner->client_despawn(p_spawn_id);
+}
+
+static Object *get_instance(TickSyncObject *p_object) {
+	return p_object ? p_object->get_sync_instance() : nullptr;
+}
+
+void TickNetwork::on_authority_changed(TickSyncObject *p_object, int p_old_owner, int p_new_owner) {
+	emit_signal(SNAME("authority_changed"), get_instance(p_object), p_old_owner, p_new_owner);
+}
+
+void TickNetwork::on_authority_orphaned(TickSyncObject *p_object, int p_last_owner, uint32_t p_last_frame) {
+	emit_signal(SNAME("authority_orphaned"), get_instance(p_object), p_last_owner, int64_t(p_last_frame));
+}
+
+void TickNetwork::on_authority_request_denied(TickSyncObject *p_object) {
+	emit_signal(SNAME("authority_request_denied"), get_instance(p_object));
+}
+
+void TickNetwork::set_authority_mode(AuthorityMode p_mode) {
+	ERR_FAIL_COND_MSG(running, "Can't change the authority mode while the network is running.");
+	if (p_mode == authority_mode) {
+		return;
+	}
+	TickEngine *next = p_mode == AUTHORITY_DISTRIBUTED ? static_cast<TickEngine *>(&mesh_core) : static_cast<TickEngine *>(&single_core);
+	for (TickSyncObject *object : registered_objects) {
+		engine->unregister_object(object);
+		next->register_object(object);
+	}
+	engine = next;
+	authority_mode = p_mode;
+}
+
+void TickNetwork::set_registry_peer(int p_peer) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	ERR_FAIL_COND_MSG(p_peer <= 0, "The registry peer must be positive.");
+	settings.registry_peer = p_peer;
+}
+
+int TickNetwork::get_registry_peer() const {
+	return settings.registry_peer;
+}
+
+void TickNetwork::set_clock_master(int p_peer) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	ERR_FAIL_COND_MSG(p_peer <= 0, "The clock master must be positive.");
+	settings.clock_master = p_peer;
+}
+
+int TickNetwork::get_clock_master() const {
+	return settings.clock_master;
+}
+
+void TickNetwork::set_keyframe_interval(int p_ticks) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	ERR_FAIL_COND_MSG(p_ticks < 1, "The keyframe interval must be at least 1.");
+	settings.keyframe_interval = p_ticks;
+}
+
+int TickNetwork::get_keyframe_interval() const {
+	return settings.keyframe_interval;
+}
+
+int TickNetwork::get_object_owner(const TickSyncObject *p_object) const {
+	return engine->get_owner(p_object);
+}
+
+Error TickNetwork::request_authority(TickSyncObject *p_object) {
+	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
+	ERR_FAIL_COND_V_MSG(authority_mode != AUTHORITY_DISTRIBUTED, ERR_UNAVAILABLE, "Authority can only change in a network with distributed authority.");
+	return engine->request_authority(p_object);
+}
+
+Error TickNetwork::release_authority(TickSyncObject *p_object, int p_to_peer) {
+	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
+	ERR_FAIL_COND_V_MSG(authority_mode != AUTHORITY_DISTRIBUTED, ERR_UNAVAILABLE, "Authority can only change in a network with distributed authority.");
+	return engine->release_authority(p_object, p_to_peer);
+}
+
+Error TickNetwork::assign_authority(TickSyncObject *p_object, int p_peer) {
+	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
+	ERR_FAIL_COND_V_MSG(authority_mode != AUTHORITY_DISTRIBUTED, ERR_UNAVAILABLE, "Authority can only change in a network with distributed authority.");
+	return engine->assign_authority(p_object, p_peer);
 }
 
 void TickNetwork::set_authority_peer(int p_peer) {
@@ -151,21 +235,21 @@ Error TickNetwork::send_event(const StringName &p_event, const Variant &p_payloa
 
 Error TickNetwork::send_object_event(TickSyncObject *p_object, const StringName &p_event, const Variant &p_payload, int64_t p_frame, int p_peer) {
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
-	return core.send_event(p_object, p_event, p_payload, p_frame < 0 ? TICK_FRAME_NONE : uint32_t(p_frame), p_peer);
+	return engine->send_event(p_object, p_event, p_payload, p_frame < 0 ? TICK_FRAME_NONE : uint32_t(p_frame), p_peer);
 }
 
 int64_t TickNetwork::get_event_frame(double p_seconds) const {
-	return core.get_event_frame(p_seconds);
+	return engine->get_event_frame(p_seconds);
 }
 
 uint32_t TickNetwork::spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	ERR_FAIL_COND_V_MSG(!running, 0, "The network isn't running.");
-	return core.spawn(p_spawner, p_scene, p_name, p_controller, p_data);
+	return engine->spawn(p_spawner, p_scene, p_name, p_controller, p_data);
 }
 
 void TickNetwork::despawn(uint32_t p_spawn_id) {
 	if (running) {
-		core.despawn(p_spawn_id);
+		engine->despawn(p_spawn_id);
 	}
 }
 
@@ -176,7 +260,7 @@ void TickNetwork::set_ticks_per_second(int p_ticks_per_second) {
 }
 
 int TickNetwork::get_ticks_per_second() const {
-	return running ? core.get_settings().ticks_per_second : settings.ticks_per_second;
+	return running ? engine->get_settings().ticks_per_second : settings.ticks_per_second;
 }
 
 void TickNetwork::set_input_redundancy(int p_redundancy) {
@@ -257,15 +341,16 @@ Node *TickNetwork::get_root_node() const {
 Error TickNetwork::start(const Ref<TickTransport> &p_transport) {
 	ERR_FAIL_COND_V_MSG(running, ERR_ALREADY_IN_USE, "The network is already running.");
 	ERR_FAIL_COND_V_MSG(p_transport.is_null(), ERR_INVALID_PARAMETER, "The transport is null.");
-	core.set_settings(settings);
+	engine->set_settings(settings);
 	const TickNetwork *source = nullptr;
 	if (!clock_network.is_empty()) {
 		source = Object::cast_to<TickNetwork>(get_node_or_null(clock_network));
 		ERR_FAIL_COND_V_MSG(source == nullptr || source == this, ERR_INVALID_PARAMETER, "`clock_network` must point to another TickNetwork.");
-		ERR_FAIL_COND_V_MSG(p_transport->get_local_peer_id() != settings.authority_peer, ERR_INVALID_PARAMETER, "Only the authority of a network can follow another network's clock.");
+		const int timeline_owner = authority_mode == AUTHORITY_DISTRIBUTED ? settings.clock_master : settings.authority_peer;
+		ERR_FAIL_COND_V_MSG(p_transport->get_local_peer_id() != timeline_owner, ERR_INVALID_PARAMETER, "Only the clock master of a network can follow another network's clock.");
 	}
-	core.set_clock_source(source ? &source->get_core() : nullptr);
-	const Error err = core.start(p_transport, OS::get_singleton()->get_ticks_usec());
+	engine->set_clock_source(source ? &source->get_engine() : nullptr);
+	const Error err = engine->start(p_transport, OS::get_singleton()->get_ticks_usec());
 	ERR_FAIL_COND_V(err != OK, err);
 	transport = p_transport;
 	running = true;
@@ -280,22 +365,22 @@ void TickNetwork::stop() {
 	if (!running) {
 		return;
 	}
-	core.stop();
+	engine->stop();
 	transport.unref();
 	running = false;
 	_update_processing();
 }
 
 bool TickNetwork::is_server() const {
-	return core.is_server();
+	return engine->is_server();
 }
 
 bool TickNetwork::is_rewinding() const {
-	return core.is_rewinding();
+	return engine->is_rewinding();
 }
 
 bool TickNetwork::is_predicting() const {
-	return core.is_predicting();
+	return engine->is_predicting();
 }
 
 int TickNetwork::get_local_peer_id() const {
@@ -303,59 +388,42 @@ int TickNetwork::get_local_peer_id() const {
 }
 
 int64_t TickNetwork::get_frame() const {
-	return core.get_frame();
+	return engine->get_frame();
 }
 
 double TickNetwork::get_rtt() const {
-	return double(core.get_clock().get_rtt_usec()) / 1000000.0;
+	return double(engine->get_clock().get_rtt_usec()) / 1000000.0;
 }
 
 Dictionary TickNetwork::get_stats() const {
-	const TickSyncCore::Stats &stats = core.get_stats();
-	Dictionary result;
-	result["rewinds"] = stats.rewinds;
-	result["rewound_frames"] = stats.rewound_frames;
-	result["ghost_inputs"] = stats.ghost_inputs;
-	result["late_inputs"] = stats.late_inputs;
-	result["rejected_inputs"] = stats.rejected_inputs;
-	result["full_snapshots_sent"] = stats.full_snapshots_sent;
-	result["delta_snapshots_sent"] = stats.delta_snapshots_sent;
-	result["snapshots_received"] = stats.snapshots_received;
-	result["snapshots_dropped"] = stats.snapshots_dropped;
-	result["malformed_packets"] = stats.malformed_packets;
-	result["rate_limited_packets"] = stats.rate_limited_packets;
-	result["events_sent"] = stats.events_sent;
-	result["events_received"] = stats.events_received;
-	result["events_rejected"] = stats.events_rejected;
-	result["spawns"] = stats.spawns;
-	result["despawns"] = stats.despawns;
-	result["time_scale"] = core.get_time_scale();
-	result["timeline_frame"] = core.get_timeline_frame(OS::get_singleton()->get_ticks_usec());
-	result["latest_snapshot_frame"] = int64_t(core.get_latest_snapshot_frame());
-	return result;
+	return engine->get_stats_dictionary();
 }
 
 void TickNetwork::register_object(TickSyncObject *p_object) {
-	core.register_object(p_object);
+	if (!registered_objects.has(p_object)) {
+		registered_objects.push_back(p_object);
+	}
+	engine->register_object(p_object);
 }
 
 void TickNetwork::unregister_object(TickSyncObject *p_object) {
-	core.unregister_object(p_object);
+	registered_objects.erase(p_object);
+	engine->unregister_object(p_object);
 }
 
 int TickNetwork::get_net_id(const TickSyncObject *p_object) const {
-	return core.get_net_id(p_object);
+	return engine->get_net_id(p_object);
 }
 
 void TickNetwork::advance(double p_delta, uint64_t p_now_usec) {
 	if (running) {
-		core.process(p_delta, p_now_usec);
+		engine->process(p_delta, p_now_usec);
 	}
 }
 
 void TickNetwork::update_interpolation(uint64_t p_now_usec) {
 	if (running) {
-		core.update_interpolation(p_now_usec);
+		engine->update_interpolation(p_now_usec);
 	}
 }
 
@@ -374,6 +442,14 @@ void TickNetwork::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_min_input_buffer"), &TickNetwork::get_min_input_buffer);
 	ClassDB::bind_method(D_METHOD("set_max_input_buffer", "frames"), &TickNetwork::set_max_input_buffer);
 	ClassDB::bind_method(D_METHOD("get_max_input_buffer"), &TickNetwork::get_max_input_buffer);
+	ClassDB::bind_method(D_METHOD("set_authority_mode", "mode"), &TickNetwork::set_authority_mode);
+	ClassDB::bind_method(D_METHOD("get_authority_mode"), &TickNetwork::get_authority_mode);
+	ClassDB::bind_method(D_METHOD("set_registry_peer", "peer"), &TickNetwork::set_registry_peer);
+	ClassDB::bind_method(D_METHOD("get_registry_peer"), &TickNetwork::get_registry_peer);
+	ClassDB::bind_method(D_METHOD("set_clock_master", "peer"), &TickNetwork::set_clock_master);
+	ClassDB::bind_method(D_METHOD("get_clock_master"), &TickNetwork::get_clock_master);
+	ClassDB::bind_method(D_METHOD("set_keyframe_interval", "ticks"), &TickNetwork::set_keyframe_interval);
+	ClassDB::bind_method(D_METHOD("get_keyframe_interval"), &TickNetwork::get_keyframe_interval);
 	ClassDB::bind_method(D_METHOD("set_authority_peer", "peer"), &TickNetwork::set_authority_peer);
 	ClassDB::bind_method(D_METHOD("get_authority_peer"), &TickNetwork::get_authority_peer);
 	ClassDB::bind_method(D_METHOD("set_interpolate_remote", "enabled"), &TickNetwork::set_interpolate_remote);
@@ -413,7 +489,11 @@ void TickNetwork::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "min_input_buffer", PROPERTY_HINT_RANGE, "0,64,1"), "set_min_input_buffer", "get_min_input_buffer");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_input_buffer", PROPERTY_HINT_RANGE, "0,64,1"), "set_max_input_buffer", "get_max_input_buffer");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "root_path"), "set_root_path", "get_root_path");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "authority_mode", PROPERTY_HINT_ENUM, "Single,Distributed"), "set_authority_mode", "get_authority_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "authority_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_authority_peer", "get_authority_peer");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "registry_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_registry_peer", "get_registry_peer");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "clock_master", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_clock_master", "get_clock_master");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "keyframe_interval", PROPERTY_HINT_RANGE, "1,600,1"), "set_keyframe_interval", "get_keyframe_interval");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "interpolate_remote"), "set_interpolate_remote", "is_interpolating_remote");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "clock_network", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "TickNetwork"), "set_clock_network", "get_clock_network");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "trust", PROPERTY_HINT_ENUM, "Untrusted,Trusted"), "set_trust", "get_trust");
@@ -423,11 +503,16 @@ void TickNetwork::_bind_methods() {
 
 	BIND_ENUM_CONSTANT(TRUST_UNTRUSTED);
 	BIND_ENUM_CONSTANT(TRUST_TRUSTED);
+	BIND_ENUM_CONSTANT(AUTHORITY_SINGLE);
+	BIND_ENUM_CONSTANT(AUTHORITY_DISTRIBUTED);
 
 	ADD_SIGNAL(MethodInfo("peer_ready", PropertyInfo(Variant::INT, "peer")));
 	ADD_SIGNAL(MethodInfo("peer_left", PropertyInfo(Variant::INT, "peer")));
 	ADD_SIGNAL(MethodInfo("rejected", PropertyInfo(Variant::STRING, "reason")));
 	ADD_SIGNAL(MethodInfo("prediction_started", PropertyInfo(Variant::INT, "frame")));
 	ADD_SIGNAL(MethodInfo("rewound", PropertyInfo(Variant::INT, "frame"), PropertyInfo(Variant::INT, "frame_count")));
+	ADD_SIGNAL(MethodInfo("authority_changed", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::INT, "old_owner"), PropertyInfo(Variant::INT, "new_owner")));
+	ADD_SIGNAL(MethodInfo("authority_orphaned", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::INT, "last_owner"), PropertyInfo(Variant::INT, "last_frame")));
+	ADD_SIGNAL(MethodInfo("authority_request_denied", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject")));
 	ADD_SIGNAL(MethodInfo("event_received", PropertyInfo(Variant::INT, "sender"), PropertyInfo(Variant::STRING_NAME, "event"), PropertyInfo(Variant::NIL, "payload", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT), PropertyInfo(Variant::INT, "frame")));
 }

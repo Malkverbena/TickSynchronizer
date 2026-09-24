@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/templates/hash_set.h"
 #include "core/variant/typed_array.h"
 #include "scene/main/node.h"
 
@@ -19,6 +20,8 @@ class TickSpawner : public Node {
 	Callable spawn_function;
 
 	HashMap<uint32_t, ObjectID> nodes_by_spawn;
+	// Spawns made by this peer: removing their node despawns them on the others.
+	HashSet<uint32_t> local_spawns;
 
 	TickNetwork *find_network() const;
 	Node *instantiate(int p_scene, const Variant &p_data) const;
@@ -41,7 +44,8 @@ public:
 	void set_spawn_function(const Callable &p_function) { spawn_function = p_function; }
 	Callable get_spawn_function() const { return spawn_function; }
 
-	// Server only. `p_controller` becomes the controller of every `TickObject` of the new node.
+	// The server of a single authority network, or any node of a distributed one. `p_controller` becomes the
+	// controller of every `TickObject` of the new node (0: this peer).
 	Node *spawn(const String &p_scene, const String &p_name, int p_controller, const Variant &p_data);
 	Node *spawn_custom(const Variant &p_data, const String &p_name, int p_controller);
 	TypedArray<Node> get_spawned_nodes() const;

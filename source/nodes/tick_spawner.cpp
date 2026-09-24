@@ -70,8 +70,9 @@ Node *TickSpawner::add_spawned(Node *p_node, uint32_t p_spawn_id, const String &
 Node *TickSpawner::server_spawn(int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	TickNetwork *network = find_network();
 	ERR_FAIL_NULL_V_MSG(network, nullptr, "TickSpawner can't find a TickNetwork.");
-	ERR_FAIL_COND_V_MSG(!network->is_running() || !network->is_server(), nullptr, "Only a running server can spawn.");
-	ERR_FAIL_COND_V_MSG(p_controller <= 0, nullptr, "The controller peer must be positive (1 is the server).");
+	ERR_FAIL_COND_V_MSG(!network->can_spawn(), nullptr, "Only the server of a running network (or any node of a distributed one) can spawn.");
+	ERR_FAIL_COND_V_MSG(p_controller < 0, nullptr, "The controller peer can't be negative (0 is this peer).");
+	const int controller = p_controller == 0 ? network->get_local_peer_id() : p_controller;
 	Node *network_root = network->get_root_node();
 	ERR_FAIL_NULL_V(network_root, nullptr);
 	Node *parent = get_node_or_null(spawn_path);
@@ -88,10 +89,11 @@ Node *TickSpawner::server_spawn(int p_scene, const String &p_name, int p_control
 		memdelete(node);
 		ERR_FAIL_V_MSG(nullptr, vformat("A node named \"%s\" already exists under the spawn path.", name));
 	}
-	apply_controller(node, p_controller);
+	apply_controller(node, controller);
 
 	// The spawn message goes before the objects of the node register.
-	const uint32_t spawn_id = network->spawn(String(network_root->get_path_to(this)), p_scene, name, p_controller, p_data);
+	const uint32_t spawn_id = network->spawn(String(network_root->get_path_to(this)), p_scene, name, controller, p_data);
+	local_spawns.insert(spawn_id);
 	return add_spawned(node, spawn_id, name);
 }
 
@@ -121,8 +123,11 @@ void TickSpawner::_on_spawned_exiting(uint32_t p_spawn_id) {
 	Node *node = id ? ObjectDB::get_instance<Node>(*id) : nullptr;
 	nodes_by_spawn.erase(p_spawn_id);
 	TickNetwork *network = find_network();
-	if (network && network->is_running() && network->is_server()) {
-		network->despawn(p_spawn_id);
+	if (local_spawns.has(p_spawn_id)) {
+		local_spawns.erase(p_spawn_id);
+		if (network && network->is_running()) {
+			network->despawn(p_spawn_id);
+		}
 	}
 	if (node) {
 		emit_signal(SNAME("despawned"), node);
@@ -159,8 +164,8 @@ void TickSpawner::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_spawnable_scene", "path"), &TickSpawner::add_spawnable_scene);
 	ClassDB::bind_method(D_METHOD("set_spawn_function", "function"), &TickSpawner::set_spawn_function);
 	ClassDB::bind_method(D_METHOD("get_spawn_function"), &TickSpawner::get_spawn_function);
-	ClassDB::bind_method(D_METHOD("spawn", "scene", "name", "controller_peer", "data"), &TickSpawner::spawn, DEFVAL(String()), DEFVAL(1), DEFVAL(Variant()));
-	ClassDB::bind_method(D_METHOD("spawn_custom", "data", "name", "controller_peer"), &TickSpawner::spawn_custom, DEFVAL(String()), DEFVAL(1));
+	ClassDB::bind_method(D_METHOD("spawn", "scene", "name", "controller_peer", "data"), &TickSpawner::spawn, DEFVAL(String()), DEFVAL(0), DEFVAL(Variant()));
+	ClassDB::bind_method(D_METHOD("spawn_custom", "data", "name", "controller_peer"), &TickSpawner::spawn_custom, DEFVAL(String()), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("get_spawned_nodes"), &TickSpawner::get_spawned_nodes);
 
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "spawn_path"), "set_spawn_path", "get_spawn_path");

@@ -1,11 +1,13 @@
 #pragma once
 
+#include "../sync/tick_mesh_core.h"
 #include "../sync/tick_sync_core.h"
 
 #include "scene/main/node.h"
 
-// Runs a `TickSyncCore` in the scene: STAR network with a single authority (the server).
-class TickNetwork : public Node, public TickSyncCore::Listener {
+// Runs a synchronization engine in the scene (ADR-040): a single authority (`TickSyncCore`: a star, or a mesh with
+// one authority) or an owner per object (`TickMeshCore`: a mesh with distributed authority).
+class TickNetwork : public Node, public TickEngine::Listener {
 	GDCLASS(TickNetwork, Node);
 
 public:
@@ -14,9 +16,19 @@ public:
 		TRUST_TRUSTED,
 	};
 
+	enum AuthorityMode {
+		AUTHORITY_SINGLE,
+		AUTHORITY_DISTRIBUTED,
+	};
+
 private:
-	TickSyncCore core;
-	TickSyncCore::Settings settings;
+	TickSyncCore single_core;
+	TickMeshCore mesh_core;
+	TickEngine *engine = &single_core;
+	AuthorityMode authority_mode = AUTHORITY_SINGLE;
+	TickEngine::Settings settings;
+	// Objects registered, kept to move them when the authority mode changes.
+	LocalVector<TickSyncObject *> registered_objects;
 	NodePath root_path = NodePath("..");
 	NodePath clock_network;
 	Ref<TickTransport> transport;
@@ -40,6 +52,9 @@ public:
 	virtual void on_network_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override;
 	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override;
 	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override;
+	virtual void on_authority_changed(TickSyncObject *p_object, int p_old_owner, int p_new_owner) override;
+	virtual void on_authority_orphaned(TickSyncObject *p_object, int p_last_owner, uint32_t p_last_frame) override;
+	virtual void on_authority_request_denied(TickSyncObject *p_object) override;
 
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const;
@@ -69,7 +84,15 @@ public:
 	bool is_interpolating_remote() const;
 	void set_clock_network(const NodePath &p_path);
 	NodePath get_clock_network() const { return clock_network; }
-	const TickSyncCore &get_core() const { return core; }
+	const TickEngine &get_engine() const { return *engine; }
+	void set_authority_mode(AuthorityMode p_mode);
+	AuthorityMode get_authority_mode() const { return authority_mode; }
+	void set_registry_peer(int p_peer);
+	int get_registry_peer() const;
+	void set_clock_master(int p_peer);
+	int get_clock_master() const;
+	void set_keyframe_interval(int p_ticks);
+	int get_keyframe_interval() const;
 	void set_root_path(const NodePath &p_path);
 	NodePath get_root_path() const;
 	// Node the object paths are relative to.
@@ -95,7 +118,14 @@ public:
 
 	uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data);
 	void despawn(uint32_t p_spawn_id);
-	uint32_t get_next_spawn_id() const { return core.get_next_spawn_id(); }
+	uint32_t get_next_spawn_id() const { return engine->get_next_spawn_id(); }
+	bool can_spawn() const { return running && engine->can_spawn(); }
+
+	// Distributed authority (ADR-041).
+	int get_object_owner(const TickSyncObject *p_object) const;
+	Error request_authority(TickSyncObject *p_object);
+	Error release_authority(TickSyncObject *p_object, int p_to_peer);
+	Error assign_authority(TickSyncObject *p_object, int p_peer);
 
 	void register_object(TickSyncObject *p_object);
 	void unregister_object(TickSyncObject *p_object);
@@ -110,3 +140,4 @@ public:
 };
 
 VARIANT_ENUM_CAST(TickNetwork::Trust);
+VARIANT_ENUM_CAST(TickNetwork::AuthorityMode);

@@ -130,6 +130,41 @@ void TickObject::on_event(int p_sender, const StringName &p_event, const Variant
 	GDVIRTUAL_CALL(_on_event, p_sender, p_event, p_payload, int64_t(p_frame));
 }
 
+int TickObject::get_owner_peer() const {
+	return network && network->is_running() ? network->get_object_owner(this) : 0;
+}
+
+bool TickObject::is_owner() const {
+	return network && network->is_running() && network->get_object_owner(this) == network->get_local_peer_id();
+}
+
+Error TickObject::request_authority() {
+	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
+	return network->request_authority(this);
+}
+
+Error TickObject::release_authority(int p_to_peer) {
+	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
+	return network->release_authority(this, p_to_peer);
+}
+
+Error TickObject::assign_authority(int p_peer) {
+	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
+	return network->assign_authority(this, p_peer);
+}
+
+void TickObject::on_authority_changed(int p_old_owner, int p_new_owner) {
+	GDVIRTUAL_CALL(_on_authority_changed, p_old_owner, p_new_owner);
+}
+
+int TickObject::approve_authority_request(int p_requester) {
+	bool approved = true;
+	if (GDVIRTUAL_CALL(_approve_authority_request, p_requester, approved)) {
+		return approved ? 1 : 0;
+	}
+	return -1;
+}
+
 bool TickObject::is_rewinding() const {
 	return network && network->is_rewinding();
 }
@@ -186,6 +221,11 @@ void TickObject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_net_id"), &TickObject::get_net_id);
 	ClassDB::bind_method(D_METHOD("is_rewinding"), &TickObject::is_rewinding);
 	ClassDB::bind_method(D_METHOD("send_event", "event", "payload", "frame", "peer"), &TickObject::send_event, DEFVAL(Variant()), DEFVAL(-1), DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("get_owner_peer"), &TickObject::get_owner_peer);
+	ClassDB::bind_method(D_METHOD("is_owner"), &TickObject::is_owner);
+	ClassDB::bind_method(D_METHOD("request_authority"), &TickObject::request_authority);
+	ClassDB::bind_method(D_METHOD("release_authority", "to_peer"), &TickObject::release_authority, DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("assign_authority", "peer"), &TickObject::assign_authority);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "controller_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_controller_peer", "get_controller_peer");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "root_path"), "set_root_path", "get_root_path");
@@ -197,4 +237,6 @@ void TickObject::_bind_methods() {
 	GDVIRTUAL_BIND(_apply_interpolated_state, "state");
 	GDVIRTUAL_BIND(_validate_event, "sender", "event", "payload");
 	GDVIRTUAL_BIND(_on_event, "sender", "event", "payload", "frame");
+	GDVIRTUAL_BIND(_on_authority_changed, "old_owner", "new_owner");
+	GDVIRTUAL_BIND(_approve_authority_request, "requester");
 }
