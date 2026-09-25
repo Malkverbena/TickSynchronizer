@@ -81,6 +81,7 @@ class TickLocalNetwork {
 	HashMap<uint64_t, uint64_t> last_ordered_sequence;
 
 	uint64_t sent_packets = 0;
+	uint64_t sent_bytes = 0;
 	uint64_t lost_packets = 0;
 
 	static uint64_t make_link_key(int p_from, int p_to, int p_channel);
@@ -119,6 +120,7 @@ public:
 
 	uint64_t get_time_usec() const { return time_usec; }
 	uint64_t get_sent_packets() const { return sent_packets; }
+	uint64_t get_sent_bytes() const { return sent_bytes; }
 	uint64_t get_lost_packets() const { return lost_packets; }
 	int get_in_flight_count() const { return int(in_flight.size()); }
 

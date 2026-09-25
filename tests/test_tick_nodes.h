@@ -138,6 +138,86 @@ func _process_tick(delta: float, _input: DataBuffer):
 	client.network->stop();
 }
 
+TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickNetwork] Interest and history through the nodes") {
+	const Ref<GDScript> player_script = make_script(R"(
+extends TickObject
+
+func _setup_sync():
+	declare_var("position", TickCodec.vector2(TickCodec.PRECISION_SINGLE))
+)");
+	const Ref<GDScript> npc_script = make_script(R"(
+extends TickObject
+
+var relevance_changes := []
+
+func _setup_sync():
+	declare_var("position", TickCodec.vector2(TickCodec.PRECISION_SINGLE))
+
+func _process_tick(delta: float, _input: DataBuffer):
+	get_root_node().position.y += 2.0 * delta
+
+func _on_relevance_changed(relevant: bool):
+	relevance_changes.append(relevant)
+)");
+	// The game's interest filter: nothing but the NPC is filtered, and the NPC only while `hide_npc` is set.
+	const Ref<GDScript> filter_script = make_script(R"(
+extends RefCounted
+
+var hide_npc := true
+
+func filter(_peer: int, object: TickObject):
+	if object.get_parent().name != "Npc":
+		return null
+	return not hide_npc
+)");
+	Ref<RefCounted> filter;
+	filter.instantiate();
+	filter->set_script(filter_script);
+
+	TickLocalNetwork local_network;
+	local_network.set_latency_usec(20000);
+	Ref<TickLocalTransport> server_transport = local_network.add_peer();
+	Ref<TickLocalTransport> client_transport = local_network.add_peer();
+	TestNodeWorld server("InterestServer", player_script, npc_script);
+	TestNodeWorld client("InterestClient", player_script, npc_script);
+	server.network->set("interest_filter", Callable(filter.ptr(), "filter"));
+	server.network->set("interest_interval", 5);
+	CHECK(server.network->start(server_transport) == OK);
+	CHECK(client.network->start(client_transport) == OK);
+	local_network.connect_peers(1, 2);
+	for (int i = 0; i < 120; i++) {
+		local_network.process(1.0 / 60.0);
+		server.network->advance(1.0 / 60.0, local_network.get_time_usec());
+		client.network->advance(1.0 / 60.0, local_network.get_time_usec());
+	}
+	// Hidden from the start: the client never got it.
+	CHECK_FALSE(bool(client.npc_sync->call("is_relevant")));
+	CHECK(Array(client.npc_sync->get("relevance_changes")).size() == 1);
+	CHECK(client.npc->get_position() == Vector2());
+	CHECK_FALSE(bool(server.network->call("is_object_relevant", server.npc_sync, 2)));
+
+	filter->set("hide_npc", false);
+	for (int i = 0; i < 60; i++) {
+		local_network.process(1.0 / 60.0);
+		server.network->advance(1.0 / 60.0, local_network.get_time_usec());
+		client.network->advance(1.0 / 60.0, local_network.get_time_usec());
+	}
+	CHECK(bool(client.npc_sync->call("is_relevant")));
+	CHECK(client.npc->get_position().y > 1.0);
+
+	// The server's history, and the frame the client shows.
+	const double frame = double(server.network->get_frame() - 10);
+	const Dictionary past = server.network->call("get_state_at", server.npc_sync, frame);
+	CHECK(Vector2(past["position"]).y < server.npc->get_position().y);
+	CHECK(Dictionary(server.npc_sync->call("get_state_at", frame)) == past);
+	const double view = client.network->call("get_view_frame");
+	CHECK(view > 0.0);
+	CHECK(view < double(server.network->get_frame()));
+
+	server.network->stop();
+	client.network->stop();
+}
+
 #endif // MODULE_GDSCRIPT_ENABLED
 
 TEST_CASE("[Modules][TickSynchronizer][TickObject] Variables can only be declared during the setup") {

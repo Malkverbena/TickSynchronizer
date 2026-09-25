@@ -56,6 +56,8 @@ public:
 	// Distributed authority: `p_requester` asks for this object, owned here. 1 approves, 0 refuses, -1 (the
 	// default) approves.
 	virtual int approve_authority_request(int p_requester) { return -1; }
+	// Client: the server started or stopped sending this object's state (interest, ADR-053).
+	virtual void on_relevance_changed(bool p_relevant) {}
 	// The `Object` behind this synchronized object, if any; used to report it in signals.
 	virtual Object *get_sync_instance() { return nullptr; }
 };

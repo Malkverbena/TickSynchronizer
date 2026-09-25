@@ -701,7 +701,9 @@ uint64_t TickDataBuffer::fetch_bits(int p_bits) {
 void TickDataBuffer::make_room_in_bits(int p_bits) {
 	const int min_size = bit_offset + p_bits;
 	if (min_size > buffer.size_in_bits()) {
-		buffer.resize_in_bits(min_size);
+		// Grows geometrically, with at least 64 bits to spare: fewer reallocations, and writes take the 64-bit window
+		// path of `TickBitArray`. `dry()` trims the buffer to the written size before it's sent.
+		buffer.resize_in_bits(MAX(min_size + 64, buffer.size_in_bits() * 2));
 	}
 	if (min_size - metadata_size > bit_size) {
 		bit_size = min_size - metadata_size;

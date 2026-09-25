@@ -4,7 +4,8 @@
 
 // Wire protocol of `TickSyncCore`. Every message starts with its type, in 8 bits.
 
-static constexpr uint16_t TICK_PROTOCOL_VERSION = 1;
+// 2: interest (`RELEVANCE`) and snapshots split in parts (F8).
+static constexpr uint16_t TICK_PROTOCOL_VERSION = 2;
 
 // Frame index meaning "none".
 static constexpr uint32_t TICK_FRAME_NONE = UINT32_MAX;
@@ -35,6 +36,8 @@ enum TickMessageType {
 	TICK_MESSAGE_AUTH_RELEASE,
 	TICK_MESSAGE_AUTH_DENIED,
 	TICK_MESSAGE_MESH_EVENT,
+	// Interest (F8).
+	TICK_MESSAGE_RELEVANCE,
 };
 
 enum TickChannel {

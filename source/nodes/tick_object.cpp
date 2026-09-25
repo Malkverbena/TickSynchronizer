@@ -170,6 +170,22 @@ int TickObject::approve_authority_request(int p_requester) {
 	return -1;
 }
 
+void TickObject::on_relevance_changed(bool p_relevant) {
+	GDVIRTUAL_CALL(_on_relevance_changed, p_relevant);
+}
+
+bool TickObject::is_relevant() const {
+	if (network == nullptr || !network->is_running() || network->is_server()) {
+		return true;
+	}
+	return network->is_object_relevant(this, network->get_local_peer_id());
+}
+
+Dictionary TickObject::get_state_at(double p_frame) const {
+	ERR_FAIL_NULL_V_MSG(network, Dictionary(), "The object isn't registered in a TickNetwork.");
+	return network->get_state_at(this, p_frame);
+}
+
 bool TickObject::is_rewinding() const {
 	return network && network->is_rewinding();
 }
@@ -227,6 +243,8 @@ void TickObject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_declared_vars"), &TickObject::get_declared_vars);
 	ClassDB::bind_method(D_METHOD("get_net_id"), &TickObject::get_net_id);
 	ClassDB::bind_method(D_METHOD("is_rewinding"), &TickObject::is_rewinding);
+	ClassDB::bind_method(D_METHOD("is_relevant"), &TickObject::is_relevant);
+	ClassDB::bind_method(D_METHOD("get_state_at", "frame"), &TickObject::get_state_at);
 	ClassDB::bind_method(D_METHOD("send_event", "event", "payload", "frame", "peer"), &TickObject::send_event, DEFVAL(Variant()), DEFVAL(-1), DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("get_owner_peer"), &TickObject::get_owner_peer);
 	ClassDB::bind_method(D_METHOD("is_owner"), &TickObject::is_owner);
@@ -250,4 +268,5 @@ void TickObject::_bind_methods() {
 	GDVIRTUAL_BIND(_on_event, "sender", "event", "payload", "frame");
 	GDVIRTUAL_BIND(_on_authority_changed, "old_owner", "new_owner");
 	GDVIRTUAL_BIND(_approve_authority_request, "requester");
+	GDVIRTUAL_BIND(_on_relevance_changed, "relevant");
 }

@@ -6,6 +6,7 @@
 #include "tick_protocol.h"
 
 #include "core/templates/hash_map.h"
+#include "core/templates/hash_set.h"
 
 // Star network with a single authority (the server, peer 1): the F2 engine. Design in `notes/f2-design.md`.
 //
@@ -50,6 +51,10 @@ public:
 		uint64_t doll_corrections = 0;
 		uint64_t doll_resyncs = 0;
 		uint64_t doll_ghost_inputs = 0;
+		// Delta snapshots sent in more than one part (bigger than a datagram), and partial ones the client dropped.
+		uint64_t split_snapshots = 0;
+		uint64_t incomplete_snapshots = 0;
+		uint64_t relevance_changes = 0;
 	};
 
 private:
@@ -85,6 +90,18 @@ private:
 		int controller = 0;
 		uint32_t schema_hash = 0;
 		TickSyncObject *object = nullptr;
+		// Whether the server sends its state to this client (interest, ADR-053).
+		bool relevant = true;
+	};
+
+	// Client: the parts of a split delta snapshot received so far.
+	// Client: the snapshot being decoded into its record of `received` (in parts, when split).
+	struct PendingSnapshot {
+		uint32_t frame = TICK_FRAME_NONE;
+		int part_count = 0;
+		uint64_t parts_received = 0;
+		int server_buffer = 0;
+		bool missing_state = false;
 	};
 
 	struct RateLimiter {
@@ -151,6 +168,10 @@ private:
 		HashMap<uint16_t, TickDataBuffer> tick_inputs;
 		RateLimiter input_limiter;
 		RateLimiter event_limiter;
+		// Interest (ADR-053): the objects whose state this client gets, and the frame each became relevant at, until
+		// the client acknowledges a snapshot that has it (the deltas need a base the client knows).
+		HashSet<uint16_t> relevant;
+		HashMap<uint16_t, uint32_t> relevant_since;
 	};
 
 	Settings settings;
@@ -198,6 +219,12 @@ private:
 	uint32_t last_reconciled = TICK_FRAME_NONE;
 	bool ack_pending = false;
 	LocalVector<SnapshotRecord> received;
+	PendingSnapshot pending_snapshot;
+	// Objects written in the pending snapshot's record; the others are stale and removed once it's complete.
+	LocalVector<uint16_t> written_ids;
+	// Scratch buffers, kept to avoid allocating for every object of every snapshot.
+	mutable TickDataBuffer scratch_payload;
+	TickDataBuffer read_payload;
 	LocalVector<PredictionRecord> predictions;
 	// Whether the local predicted objects are dolls on the other peers: their inputs go to every peer.
 	bool shares_inputs = false;
@@ -231,10 +258,16 @@ private:
 	void server_handle_event(int p_peer, TickDataBuffer &p_message);
 	void server_send_spawn(int p_peer, uint32_t p_spawn_id);
 	void server_send_own_inputs(uint32_t p_frame);
+	// Registers an object with a client and decides whether it's relevant to it.
+	void server_register_for_peer(int p_peer, PeerState &r_peer, uint16_t p_net_id);
+	void server_set_peer_relevant(int p_peer, PeerState &r_peer, uint16_t p_net_id, bool p_relevant);
+	void server_update_relevance();
 	// Local time of frame 0 of this server's timeline, from the frame it's at now (signed: a server following another
 	// network's clock has frames older than its process).
 	int64_t server_compute_epoch() const;
 	void write_object_state(TickDataBuffer &r_message, const ServerObject &p_object, const LocalVector<Variant> &p_values, const LocalVector<Variant> *p_base) const;
+	// The entry of one object in a snapshot: its id, whether it changed from the base, and the changed values.
+	void write_snapshot_entry(TickDataBuffer &r_message, uint16_t p_net_id, const LocalVector<Variant> *p_values, const LocalVector<Variant> *p_base) const;
 
 	// Client.
 	void client_handle_welcome(TickDataBuffer &p_message);
@@ -242,6 +275,11 @@ private:
 	void client_handle_register(TickDataBuffer &p_message);
 	void client_handle_unregister(TickDataBuffer &p_message);
 	void client_handle_snapshot(TickDataBuffer &p_message, bool p_full);
+	// Reads `p_count` object states of a snapshot into `r_states`; `false` if the message is malformed.
+	bool client_read_snapshot_objects(TickDataBuffer &p_message, int p_count, const SnapshotRecord *p_base, ObjectStates &r_states, bool &r_missing_state);
+	void client_finish_snapshot(uint32_t p_frame, bool p_full, int p_server_buffer, bool p_missing_state);
+	void client_handle_relevance(TickDataBuffer &p_message);
+	double client_get_render_frame() const;
 	void client_handle_pong(TickDataBuffer &p_message);
 	void client_handle_spawn(TickDataBuffer &p_message);
 	void client_handle_despawn(TickDataBuffer &p_message);
@@ -258,6 +296,9 @@ private:
 	void client_send_ping();
 	void client_update_interpolation();
 	SnapshotRecord *client_get_received(uint32_t p_frame);
+	const SnapshotRecord *client_get_received(uint32_t p_frame) const;
+	// The state of an object at an exact frame, from the history of this peer (ADR-054), or null.
+	const LocalVector<Variant> *find_state(uint16_t p_net_id, uint32_t p_frame) const;
 	// The newest snapshot received before `p_frame`, or `TICK_FRAME_NONE`.
 	uint32_t client_find_snapshot_before(uint32_t p_frame) const;
 
@@ -322,6 +363,15 @@ public:
 	virtual int get_owner(const TickSyncObject *p_object) const override { return settings.authority_peer; }
 	// Client: how many frames the dolls of `p_peer` are behind the local timeline, or -1 when there are none.
 	int get_doll_delay(int p_peer) const;
+
+	// Interest (ADR-053): server only; `p_peer` 0 changes it for every client. An object is always relevant to its
+	// controller.
+	virtual Error set_relevant(TickSyncObject *p_object, int p_peer, bool p_relevant) override;
+	virtual bool is_relevant(const TickSyncObject *p_object, int p_peer) const override;
+
+	// History (ADR-054).
+	virtual bool get_state_at(const TickSyncObject *p_object, double p_frame, LocalVector<Variant> &r_values) const override;
+	virtual double get_view_frame(uint64_t p_now_usec) const override;
 
 	// Server: records a spawn and sends it to the clients (and to the ones joining later). Call it before the
 	// spawned objects are registered, so the clients create them before binding them.

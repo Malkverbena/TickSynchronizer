@@ -1,5 +1,6 @@
 #include "tick_network.h"
 
+#include "tick_object.h"
 #include "tick_spawner.h"
 
 #include "core/config/engine.h"
@@ -108,6 +109,87 @@ void TickNetwork::on_authority_orphaned(TickSyncObject *p_object, int p_last_own
 
 void TickNetwork::on_authority_request_denied(TickSyncObject *p_object) {
 	emit_signal(SNAME("authority_request_denied"), get_instance(p_object));
+}
+
+int TickNetwork::filter_relevance(int p_peer, TickSyncObject *p_object) {
+	if (!interest_filter.is_valid()) {
+		return -1;
+	}
+	const Variant result = interest_filter.call(p_peer, get_instance(p_object));
+	return result.get_type() == Variant::BOOL ? (bool(result) ? 1 : 0) : -1;
+}
+
+void TickNetwork::on_relevance_changed(TickSyncObject *p_object, bool p_relevant) {
+	p_object->on_relevance_changed(p_relevant);
+	emit_signal(SNAME("relevance_changed"), get_instance(p_object), p_relevant);
+}
+
+void TickNetwork::set_default_relevance(bool p_relevant) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	settings.default_relevant = p_relevant;
+}
+
+bool TickNetwork::get_default_relevance() const {
+	return settings.default_relevant;
+}
+
+void TickNetwork::set_interest_interval(int p_ticks) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	ERR_FAIL_COND_MSG(p_ticks < 1, "The interest interval must be at least 1.");
+	settings.interest_interval = p_ticks;
+}
+
+int TickNetwork::get_interest_interval() const {
+	return settings.interest_interval;
+}
+
+Error TickNetwork::set_object_relevant(TickSyncObject *p_object, int p_peer, bool p_relevant) {
+	ERR_FAIL_NULL_V(p_object, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
+	return engine->set_relevant(p_object, p_peer, p_relevant);
+}
+
+bool TickNetwork::is_object_relevant(const TickSyncObject *p_object, int p_peer) const {
+	return running && p_object && engine->is_relevant(p_object, p_peer);
+}
+
+Dictionary TickNetwork::get_state_at(const TickSyncObject *p_object, double p_frame) const {
+	Dictionary state;
+	LocalVector<Variant> values;
+	if (!running || p_object == nullptr || !engine->get_state_at(p_object, p_frame, values)) {
+		return state;
+	}
+	const TickSchema &schema = p_object->get_sync_schema();
+	for (uint32_t i = 0; i < values.size() && int(i) < schema.size(); i++) {
+		state[schema.names[i]] = values[i];
+	}
+	return state;
+}
+
+static TickSyncObject *as_sync_object(Object *p_object) {
+	return Object::cast_to<TickObject>(p_object);
+}
+
+Error TickNetwork::_set_object_relevant(Object *p_object, int p_peer, bool p_relevant) {
+	TickSyncObject *object = as_sync_object(p_object);
+	ERR_FAIL_NULL_V_MSG(object, ERR_INVALID_PARAMETER, "The object must be a TickObject.");
+	return set_object_relevant(object, p_peer, p_relevant);
+}
+
+bool TickNetwork::_is_object_relevant(Object *p_object, int p_peer) const {
+	const TickSyncObject *object = as_sync_object(p_object);
+	ERR_FAIL_NULL_V_MSG(object, false, "The object must be a TickObject.");
+	return is_object_relevant(object, p_peer);
+}
+
+Dictionary TickNetwork::_get_state_at(Object *p_object, double p_frame) const {
+	const TickSyncObject *object = as_sync_object(p_object);
+	ERR_FAIL_NULL_V_MSG(object, Dictionary(), "The object must be a TickObject.");
+	return get_state_at(object, p_frame);
+}
+
+double TickNetwork::get_view_frame() const {
+	return running ? engine->get_view_frame(last_update_usec) : -1.0;
 }
 
 void TickNetwork::set_authority_mode(AuthorityMode p_mode) {
@@ -417,12 +499,14 @@ int TickNetwork::get_net_id(const TickSyncObject *p_object) const {
 
 void TickNetwork::advance(double p_delta, uint64_t p_now_usec) {
 	if (running) {
+		last_update_usec = p_now_usec;
 		engine->process(p_delta, p_now_usec);
 	}
 }
 
 void TickNetwork::update_interpolation(uint64_t p_now_usec) {
 	if (running) {
+		last_update_usec = p_now_usec;
 		engine->update_interpolation(p_now_usec);
 	}
 }
@@ -448,6 +532,12 @@ void TickNetwork::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_registry_peer"), &TickNetwork::get_registry_peer);
 	ClassDB::bind_method(D_METHOD("set_clock_master", "peer"), &TickNetwork::set_clock_master);
 	ClassDB::bind_method(D_METHOD("get_clock_master"), &TickNetwork::get_clock_master);
+	ClassDB::bind_method(D_METHOD("set_default_relevance", "relevant"), &TickNetwork::set_default_relevance);
+	ClassDB::bind_method(D_METHOD("get_default_relevance"), &TickNetwork::get_default_relevance);
+	ClassDB::bind_method(D_METHOD("set_interest_interval", "ticks"), &TickNetwork::set_interest_interval);
+	ClassDB::bind_method(D_METHOD("get_interest_interval"), &TickNetwork::get_interest_interval);
+	ClassDB::bind_method(D_METHOD("set_interest_filter", "filter"), &TickNetwork::set_interest_filter);
+	ClassDB::bind_method(D_METHOD("get_interest_filter"), &TickNetwork::get_interest_filter);
 	ClassDB::bind_method(D_METHOD("set_keyframe_interval", "ticks"), &TickNetwork::set_keyframe_interval);
 	ClassDB::bind_method(D_METHOD("get_keyframe_interval"), &TickNetwork::get_keyframe_interval);
 	ClassDB::bind_method(D_METHOD("set_authority_peer", "peer"), &TickNetwork::set_authority_peer);
@@ -479,6 +569,10 @@ void TickNetwork::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_local_peer_id"), &TickNetwork::get_local_peer_id);
 	ClassDB::bind_method(D_METHOD("get_frame"), &TickNetwork::get_frame);
 	ClassDB::bind_method(D_METHOD("get_rtt"), &TickNetwork::get_rtt);
+	ClassDB::bind_method(D_METHOD("set_object_relevant", "object", "peer", "relevant"), &TickNetwork::_set_object_relevant);
+	ClassDB::bind_method(D_METHOD("is_object_relevant", "object", "peer"), &TickNetwork::_is_object_relevant);
+	ClassDB::bind_method(D_METHOD("get_state_at", "object", "frame"), &TickNetwork::_get_state_at);
+	ClassDB::bind_method(D_METHOD("get_view_frame"), &TickNetwork::get_view_frame);
 	ClassDB::bind_method(D_METHOD("get_stats"), &TickNetwork::get_stats);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "ticks_per_second", PROPERTY_HINT_RANGE, "1,240,1"), "set_ticks_per_second", "get_ticks_per_second");
@@ -494,6 +588,11 @@ void TickNetwork::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "registry_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_registry_peer", "get_registry_peer");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "clock_master", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_clock_master", "get_clock_master");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "keyframe_interval", PROPERTY_HINT_RANGE, "1,600,1"), "set_keyframe_interval", "get_keyframe_interval");
+	ADD_GROUP("Interest", "");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "default_relevance"), "set_default_relevance", "get_default_relevance");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "interest_interval", PROPERTY_HINT_RANGE, "1,600,1"), "set_interest_interval", "get_interest_interval");
+	ADD_PROPERTY(PropertyInfo(Variant::CALLABLE, "interest_filter"), "set_interest_filter", "get_interest_filter");
+	ADD_GROUP("", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "interpolate_remote"), "set_interpolate_remote", "is_interpolating_remote");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "clock_network", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "TickNetwork"), "set_clock_network", "get_clock_network");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "trust", PROPERTY_HINT_ENUM, "Untrusted,Trusted"), "set_trust", "get_trust");
@@ -514,5 +613,6 @@ void TickNetwork::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("authority_changed", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::INT, "old_owner"), PropertyInfo(Variant::INT, "new_owner")));
 	ADD_SIGNAL(MethodInfo("authority_orphaned", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::INT, "last_owner"), PropertyInfo(Variant::INT, "last_frame")));
 	ADD_SIGNAL(MethodInfo("authority_request_denied", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject")));
+	ADD_SIGNAL(MethodInfo("relevance_changed", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::BOOL, "relevant")));
 	ADD_SIGNAL(MethodInfo("event_received", PropertyInfo(Variant::INT, "sender"), PropertyInfo(Variant::STRING_NAME, "event"), PropertyInfo(Variant::NIL, "payload", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT), PropertyInfo(Variant::INT, "frame")));
 }

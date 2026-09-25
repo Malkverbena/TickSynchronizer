@@ -209,6 +209,7 @@ Error TickLocalNetwork::send(int p_from, int p_to, int p_channel, TickTransport:
 	ERR_FAIL_COND_V_MSG(p_size > 0 && p_data == nullptr, ERR_INVALID_PARAMETER, "The packet data is null.");
 
 	sent_packets++;
+	sent_bytes += uint64_t(p_size);
 	if (p_mode != TickTransport::TRANSFER_MODE_RELIABLE && packet_loss > 0.0 && rng.randf() < packet_loss) {
 		lost_packets++;
 		return OK;

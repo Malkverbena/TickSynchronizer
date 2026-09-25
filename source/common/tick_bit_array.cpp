@@ -31,7 +31,8 @@ bool TickBitArray::resize_in_bits(int p_bits_count) {
 	return true;
 }
 
-bool TickBitArray::store_bits(int p_bit_offset, uint64_t p_value, int p_bits) {
+// The bits don't fit in one window at the end of the array: byte by byte, with the checks.
+bool TickBitArray::store_bits_slow(int p_bit_offset, uint64_t p_value, int p_bits) {
 	ERR_FAIL_COND_V_MSG(p_bit_offset < 0, false, "The bit offset can't be negative.");
 	ERR_FAIL_COND_V_MSG(p_bits <= 0 || p_bits > 64, false, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
 	ERR_FAIL_COND_V_MSG(p_bit_offset > size_in_bits() - p_bits, false, vformat("The bit array size is %d bits, while trying to write %d bits starting from bit %d.", size_in_bits(), p_bits, p_bit_offset));
@@ -58,7 +59,7 @@ bool TickBitArray::store_bits(int p_bit_offset, uint64_t p_value, int p_bits) {
 	return true;
 }
 
-bool TickBitArray::read_bits(int p_bit_offset, int p_bits, uint64_t &r_out) const {
+bool TickBitArray::read_bits_slow(int p_bit_offset, int p_bits, uint64_t &r_out) const {
 	ERR_FAIL_COND_V_MSG(p_bit_offset < 0, false, "The bit offset can't be negative.");
 	ERR_FAIL_COND_V_MSG(p_bits <= 0 || p_bits > 64, false, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
 	ERR_FAIL_COND_V_MSG(p_bit_offset > size_in_bits() - p_bits, false, vformat("The bit array size is %d bits, while trying to read %d bits starting from bit %d.", size_in_bits(), p_bits, p_bit_offset));

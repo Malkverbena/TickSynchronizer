@@ -38,6 +38,11 @@ public:
 		virtual void on_authority_orphaned(TickSyncObject *p_object, int p_last_owner, uint32_t p_last_frame) {}
 		// Mesh: a request for the authority of a local object was refused.
 		virtual void on_authority_request_denied(TickSyncObject *p_object) {}
+		// Server: whether `p_object` is relevant to `p_peer` (1 relevant, 0 not, -1 no opinion). Asked every
+		// `interest_interval` ticks for every client and object (ADR-053).
+		virtual int filter_relevance(int p_peer, TickSyncObject *p_object) { return -1; }
+		// Client: the server started or stopped sending the state of a local object.
+		virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) {}
 	};
 
 	struct Settings {
@@ -84,6 +89,10 @@ public:
 		int max_event_bytes = 4096;
 		// Largest delay, in seconds, of an event scheduled for a future frame.
 		double max_event_delay = 10.0;
+		// Interest (ADR-053): whether objects are relevant to every client until told otherwise, and how often, in
+		// ticks, the listener's filter is asked.
+		bool default_relevant = true;
+		int interest_interval = 10;
 	};
 
 	virtual ~TickEngine() {}
@@ -134,6 +143,15 @@ public:
 	virtual Error request_authority(TickSyncObject *p_object) { return ERR_UNAVAILABLE; }
 	virtual Error release_authority(TickSyncObject *p_object, int p_to_peer) { return ERR_UNAVAILABLE; }
 	virtual Error assign_authority(TickSyncObject *p_object, int p_peer) { return ERR_UNAVAILABLE; }
+
+	// Interest (ADR-053). Server: `p_peer` 0 means every client.
+	virtual Error set_relevant(TickSyncObject *p_object, int p_peer, bool p_relevant) { return ERR_UNAVAILABLE; }
+	virtual bool is_relevant(const TickSyncObject *p_object, int p_peer) const { return true; }
+
+	// History (ADR-054): the state of an object at a frame of the authority's timeline (with a fraction, interpolated),
+	// while it's in the history. On a client, the frame shown by the interpolated objects.
+	virtual bool get_state_at(const TickSyncObject *p_object, double p_frame, LocalVector<Variant> &r_values) const { return false; }
+	virtual double get_view_frame(uint64_t p_now_usec) const { return get_timeline_frame(p_now_usec); }
 
 	virtual Dictionary get_stats_dictionary() const = 0;
 };

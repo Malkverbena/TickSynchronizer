@@ -64,6 +64,13 @@
 				Runs an event sent to this object by [param sender] (see [method send_event]). [param frame] is the frame the event was sent for; on the server, a client event runs at that frame, or at the next one if it already passed.
 			</description>
 		</method>
+		<method name="_on_relevance_changed" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="relevant" type="bool" />
+			<description>
+				Client: called when the server starts or stops sending this object's state (see [member TickNetwork.interest_filter]).
+			</description>
+		</method>
 		<method name="_process_tick" qualifiers="virtual">
 			<return type="void" />
 			<param index="0" name="delta" type="float" />
@@ -132,10 +139,23 @@
 				Returns the node whose properties are synchronized.
 			</description>
 		</method>
+		<method name="get_state_at" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="frame" type="float" />
+			<description>
+				Returns this object's state at [param frame]; see [method TickNetwork.get_state_at].
+			</description>
+		</method>
 		<method name="is_owner" qualifiers="const">
 			<return type="bool" />
 			<description>
 				Returns [code]true[/code] if this peer simulates the object.
+			</description>
+		</method>
+		<method name="is_relevant" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if this peer gets this object's state; always [code]true[/code] on the server.
 			</description>
 		</method>
 		<method name="is_rewinding" qualifiers="const">

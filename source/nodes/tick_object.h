@@ -53,6 +53,7 @@ protected:
 	GDVIRTUAL4(_on_event, int, StringName, Variant, int64_t)
 	GDVIRTUAL2(_on_authority_changed, int, int)
 	GDVIRTUAL1R(bool, _approve_authority_request, int)
+	GDVIRTUAL1(_on_relevance_changed, bool)
 
 public:
 	void set_controller_peer(int p_peer);
@@ -81,6 +82,10 @@ public:
 	// Client: to the server. Server: to `p_peer`, or every client with 0. `p_frame` < 0 uses the default.
 	Error send_event(const StringName &p_event, const Variant &p_payload, int64_t p_frame, int p_peer);
 	bool is_rewinding() const;
+	// Interest: whether this peer gets the object's state (always on the server).
+	bool is_relevant() const;
+	// The object's state at a frame of the authority's timeline, while it's in the history.
+	Dictionary get_state_at(double p_frame) const;
 
 	// TickSyncObject.
 	virtual String get_sync_path() const override { return sync_path; }
@@ -96,6 +101,7 @@ public:
 	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override;
 	virtual void on_authority_changed(int p_old_owner, int p_new_owner) override;
 	virtual int approve_authority_request(int p_requester) override;
+	virtual void on_relevance_changed(bool p_relevant) override;
 	virtual Object *get_sync_instance() override { return this; }
 
 	TickObject();

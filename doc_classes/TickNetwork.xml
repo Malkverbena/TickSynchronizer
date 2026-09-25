@@ -36,16 +36,38 @@
 				Returns the round trip time to the server, in seconds, as measured by the clock synchronization (client only).
 			</description>
 		</method>
+		<method name="get_state_at" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="object" type="Object" />
+			<param index="1" name="frame" type="float" />
+			<description>
+				Returns the state of [param object] (a [TickObject]) at [param frame] of the authority's timeline, as a [Dictionary] of the declared properties, interpolated when [param frame] has a fraction. Empty when the frame isn't in the history (see [member history_size]). On the server, every simulated frame; on a client, the snapshots it received, its own predicted frames and its dolls' frames. Use it to validate an action in the past (lag compensation): the client sends [method get_view_frame] with the action, and the server checks it against the state it had at that frame. Only with [constant AUTHORITY_SINGLE].
+			</description>
+		</method>
 		<method name="get_stats" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code], [code]rate_limited_packets[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]time_scale[/code] (the client's speed adjustment), [code]timeline_frame[/code] (this peer's estimate of the authority's current frame, negative while unknown), [code]latest_snapshot_frame[/code], and for dolls (see [member TickObject.remote_mode]): [code]doll_rewinds[/code], [code]doll_rewound_frames[/code], [code]doll_corrections[/code], [code]doll_resyncs[/code], [code]doll_ghost_inputs[/code] and [code]doll_delays[/code] (a [Dictionary] with how many frames the dolls of each peer are behind this peer's timeline). With [constant AUTHORITY_DISTRIBUTED]: [code]states_sent[/code], [code]states_received[/code], [code]stale_states[/code], [code]malformed_packets[/code], [code]transfers[/code], [code]orphans[/code], [code]denied_requests[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_forwarded[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code] and [code]timeline_frame[/code].
+				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code], [code]rate_limited_packets[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]time_scale[/code] (the client's speed adjustment), [code]timeline_frame[/code] (this peer's estimate of the authority's current frame, negative while unknown), [code]latest_snapshot_frame[/code], and for dolls (see [member TickObject.remote_mode]): [code]doll_rewinds[/code], [code]doll_rewound_frames[/code], [code]doll_corrections[/code], [code]doll_resyncs[/code], [code]doll_ghost_inputs[/code], [code]doll_delays[/code] (a [Dictionary] with how many frames the dolls of each peer are behind this peer's timeline), [code]split_snapshots[/code] (server: deltas sent in more than one datagram), [code]incomplete_snapshots[/code] (client: split deltas dropped because a part was lost) and [code]relevance_changes[/code] (see [member interest_filter]). With [constant AUTHORITY_DISTRIBUTED]: [code]states_sent[/code], [code]states_received[/code], [code]stale_states[/code], [code]malformed_packets[/code], [code]transfers[/code], [code]orphans[/code], [code]denied_requests[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_forwarded[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code] and [code]timeline_frame[/code].
 			</description>
 		</method>
 		<method name="get_transport" qualifiers="const">
 			<return type="TickTransport" />
 			<description>
 				Returns the transport passed to [method start].
+			</description>
+		</method>
+		<method name="get_view_frame" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the frame of the authority's timeline shown now by the interpolated objects, with a fraction: on a client, behind the authority by [member interpolation_delay]; on the server, its current frame. Negative while unknown.
+			</description>
+		</method>
+		<method name="is_object_relevant" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="object" type="Object" />
+			<param index="1" name="peer" type="int" />
+			<description>
+				Returns [code]true[/code] if the state of [param object] is sent to [param peer]. On a client, [param peer] is ignored: it tells whether this client gets it.
 			</description>
 		</method>
 		<method name="is_predicting" qualifiers="const">
@@ -82,6 +104,15 @@
 				Sends an event without target object, received with [signal event_received]. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts). From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The [param payload] can't contain objects and is limited to [member max_event_size] bytes. Events aren't repeated during rewinds.
 			</description>
 		</method>
+		<method name="set_object_relevant">
+			<return type="int" enum="Error" />
+			<param index="0" name="object" type="Object" />
+			<param index="1" name="peer" type="int" />
+			<param index="2" name="relevant" type="bool" />
+			<description>
+				Server: starts or stops sending [param object] to [param peer] (0: every client). An object is always relevant to its controller. With an [member interest_filter], the filter's next answer overrides this. Only with [constant AUTHORITY_SINGLE].
+			</description>
+		</method>
 		<method name="start">
 			<return type="int" enum="Error" />
 			<param index="0" name="transport" type="TickTransport" />
@@ -109,6 +140,9 @@
 		<member name="clock_network" type="NodePath" setter="set_clock_network" getter="get_clock_network" default="NodePath(&quot;&quot;)">
 			Another [TickNetwork] of this process whose timeline this one follows (only for the [member authority_peer] of this network). A game server's star with its clients follows the cluster's network, so the clients, the game server and the cluster's authority use the same frames. Place the followed network before this one in the tree.
 		</member>
+		<member name="default_relevance" type="bool" setter="set_default_relevance" getter="get_default_relevance" default="true">
+			Whether every object is relevant to every client until told otherwise ([method set_object_relevant], [member interest_filter]). With [code]false[/code], a client only gets the objects it controls until others are made relevant.
+		</member>
 		<member name="event_validator" type="Callable" setter="set_event_validator" getter="get_event_validator" default="Callable()">
 			Called on the server as [code]validator(sender: int, event: StringName, payload: Variant) -&gt; bool[/code] for each event without target object sent by a client; returning [code]false[/code] refuses it. Without a validator, those events are accepted.
 		</member>
@@ -117,6 +151,12 @@
 		</member>
 		<member name="input_redundancy" type="int" setter="set_input_redundancy" getter="get_input_redundancy" default="5">
 			Number of past inputs repeated in each input packet, against packet loss.
+		</member>
+		<member name="interest_filter" type="Callable" setter="set_interest_filter" getter="get_interest_filter" default="Callable()">
+			Server: a [Callable] that receives a peer id and a [TickObject] and returns [code]true[/code] if the object is relevant to that peer, [code]false[/code] if not, or anything else for no change. Called for every client and object every [member interest_interval] ticks, and when an object is registered with a client. Relevance is decided by the game (distance, rooms, teams); the network only stops sending what isn't relevant.
+		</member>
+		<member name="interest_interval" type="int" setter="set_interest_interval" getter="get_interest_interval" default="10">
+			Ticks between calls to the [member interest_filter].
 		</member>
 		<member name="interpolate_remote" type="bool" setter="set_interpolate_remote" getter="is_interpolating_remote" default="true">
 			If [code]false[/code], the objects this peer doesn't simulate get the state of the latest snapshot without interpolation. Use it on game servers that relay a cluster's objects to their own clients, so only the final clients interpolate.
@@ -209,6 +249,13 @@
 			<param index="0" name="reason" type="String" />
 			<description>
 				Emitted on a client when the server refuses it, for example because of a different protocol version or precision build.
+			</description>
+		</signal>
+		<signal name="relevance_changed">
+			<param index="0" name="object" type="TickObject" />
+			<param index="1" name="relevant" type="bool" />
+			<description>
+				Client: the server started or stopped sending the state of [param object]. A hidden object keeps its last state; hide or remove it as the game needs.
 			</description>
 		</signal>
 		<signal name="rewound">

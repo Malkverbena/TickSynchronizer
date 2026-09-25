@@ -34,8 +34,15 @@ private:
 	Ref<TickTransport> transport;
 	bool running = false;
 	Callable event_validator;
+	Callable interest_filter;
+	// Time of the last update of the interpolated objects: what they show now.
+	uint64_t last_update_usec = 0;
 
 	void _update_processing();
+	// Script wrappers: the objects are `TickObject`s.
+	Error _set_object_relevant(Object *p_object, int p_peer, bool p_relevant);
+	bool _is_object_relevant(Object *p_object, int p_peer) const;
+	Dictionary _get_state_at(Object *p_object, double p_frame) const;
 
 protected:
 	void _notification(int p_what);
@@ -55,6 +62,8 @@ public:
 	virtual void on_authority_changed(TickSyncObject *p_object, int p_old_owner, int p_new_owner) override;
 	virtual void on_authority_orphaned(TickSyncObject *p_object, int p_last_owner, uint32_t p_last_frame) override;
 	virtual void on_authority_request_denied(TickSyncObject *p_object) override;
+	virtual int filter_relevance(int p_peer, TickSyncObject *p_object) override;
+	virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) override;
 
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const;
@@ -95,6 +104,20 @@ public:
 	int get_keyframe_interval() const;
 	void set_root_path(const NodePath &p_path);
 	NodePath get_root_path() const;
+
+	// Interest (ADR-053).
+	void set_default_relevance(bool p_relevant);
+	bool get_default_relevance() const;
+	void set_interest_interval(int p_ticks);
+	int get_interest_interval() const;
+	void set_interest_filter(const Callable &p_filter) { interest_filter = p_filter; }
+	Callable get_interest_filter() const { return interest_filter; }
+	Error set_object_relevant(TickSyncObject *p_object, int p_peer, bool p_relevant);
+	bool is_object_relevant(const TickSyncObject *p_object, int p_peer) const;
+
+	// History (ADR-054).
+	Dictionary get_state_at(const TickSyncObject *p_object, double p_frame) const;
+	double get_view_frame() const;
 	// Node the object paths are relative to.
 	Node *get_root_node() const;
 
