@@ -42,6 +42,13 @@
 				Returns the port this node listens on.
 			</description>
 		</method>
+		<method name="get_node_simulated_latency" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="id" type="int" />
+			<description>
+				Returns the simulated latency towards the node [param id] (see [method set_node_simulated_latency]).
+			</description>
+		</method>
 		<method name="get_nodes" qualifiers="const">
 			<return type="PackedInt32Array" />
 			<description>
@@ -53,6 +60,14 @@
 			<param index="0" name="id" type="int" />
 			<description>
 				Removes a node from the mesh, closing its connection.
+			</description>
+		</method>
+		<method name="set_node_simulated_latency">
+			<return type="void" />
+			<param index="0" name="id" type="int" />
+			<param index="1" name="seconds" type="float" />
+			<description>
+				For debugging: delays what this node sends to the node [param id] by [param seconds] (one way). 0 disables it.
 			</description>
 		</method>
 	</methods>

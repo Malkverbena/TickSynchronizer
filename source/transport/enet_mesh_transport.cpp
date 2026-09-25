@@ -130,10 +130,7 @@ int EnetMeshTransport::get_max_payload_size() const {
 	return ENET_MESH_MAX_PAYLOAD;
 }
 
-Error EnetMeshTransport::send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
-	ERR_FAIL_INDEX_V(p_channel, TICK_CHANNEL_COUNT, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(p_size <= 0 || p_data == nullptr, ERR_INVALID_PARAMETER);
-
+Error EnetMeshTransport::send_now(int p_node, MeshNode &r_node, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
 	enet_uint32 flags = 0;
 	if (p_mode == TRANSFER_MODE_RELIABLE) {
 		flags = ENET_PACKET_FLAG_RELIABLE;
@@ -142,22 +139,83 @@ Error EnetMeshTransport::send(int p_peer, int p_channel, TransferMode p_mode, co
 	} else {
 		flags = ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT;
 	}
+	ENetPacketPeer *peer = as_peer(r_node.peer);
+	ERR_FAIL_NULL_V(peer, ERR_UNAVAILABLE);
+	ENetPacket *packet = enet_packet_create(p_data, p_size, flags);
+	ERR_FAIL_NULL_V(packet, ERR_OUT_OF_MEMORY);
+	if (peer->send(uint8_t(p_channel), packet) < 0) {
+		enet_packet_destroy(packet);
+		ERR_FAIL_V_MSG(ERR_CANT_CONNECT, vformat("Can't send to mesh node %d.", p_node));
+	}
+	return OK;
+}
 
+Error EnetMeshTransport::send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
+	ERR_FAIL_INDEX_V(p_channel, TICK_CHANNEL_COUNT, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(p_size <= 0 || p_data == nullptr, ERR_INVALID_PARAMETER);
+
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
 	for (KeyValue<int, MeshNode> &E : nodes) {
 		if (!E.value.connected || (p_peer != PEER_BROADCAST && p_peer != E.key)) {
 			continue;
 		}
-		ENetPacketPeer *peer = as_peer(E.value.peer);
-		ERR_CONTINUE(peer == nullptr);
-		ENetPacket *packet = enet_packet_create(p_data, p_size, flags);
-		ERR_FAIL_NULL_V(packet, ERR_OUT_OF_MEMORY);
-		if (peer->send(uint8_t(p_channel), packet) < 0) {
-			enet_packet_destroy(packet);
-			ERR_FAIL_V_MSG(ERR_CANT_CONNECT, vformat("Can't send to mesh node %d.", E.key));
+		if (E.value.simulated_latency_usec == 0) {
+			const Error err = send_now(E.key, E.value, p_channel, p_mode, p_data, p_size);
+			ERR_FAIL_COND_V(err != OK, err);
+			continue;
 		}
+		// The latency of a node is constant, so its packets keep their order.
+		Outgoing packet;
+		packet.send_at_usec = now + E.value.simulated_latency_usec;
+		packet.sequence = next_sequence++;
+		packet.node = E.key;
+		packet.channel = p_channel;
+		packet.mode = p_mode;
+		packet.data.resize(p_size);
+		memcpy(packet.data.ptrw(), p_data, p_size);
+		delayed_packets.push_back(packet);
 	}
 	ERR_FAIL_COND_V_MSG(p_peer != PEER_BROADCAST && !is_peer_connected(p_peer), ERR_UNAVAILABLE, vformat("Mesh node %d isn't connected.", p_peer));
 	return OK;
+}
+
+void EnetMeshTransport::flush_simulated() {
+	if (delayed_packets.is_empty()) {
+		return;
+	}
+	delayed_packets.sort();
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
+	uint32_t sent = 0;
+	while (sent < delayed_packets.size() && delayed_packets[sent].send_at_usec <= now) {
+		const Outgoing &packet = delayed_packets[sent];
+		MeshNode *node = nodes.getptr(packet.node);
+		if (node && node->connected) {
+			send_now(packet.node, *node, packet.channel, packet.mode, packet.data.ptr(), packet.data.size());
+		}
+		sent++;
+	}
+	if (sent == delayed_packets.size()) {
+		delayed_packets.clear();
+	} else if (sent > 0) {
+		LocalVector<Outgoing> remaining;
+		for (uint32_t i = sent; i < delayed_packets.size(); i++) {
+			remaining.push_back(delayed_packets[i]);
+		}
+		delayed_packets = remaining;
+	}
+}
+
+void EnetMeshTransport::set_node_simulated_latency(int p_id, double p_seconds) {
+	MeshNode *node = nodes.getptr(p_id);
+	ERR_FAIL_NULL_MSG(node, vformat("Mesh node %d wasn't added.", p_id));
+	ERR_FAIL_COND_MSG(!(p_seconds >= 0.0), "The simulated latency can't be negative.");
+	node->simulated_latency_usec = uint64_t(p_seconds * 1000000.0);
+}
+
+double EnetMeshTransport::get_node_simulated_latency(int p_id) const {
+	const MeshNode *node = nodes.getptr(p_id);
+	ERR_FAIL_NULL_V_MSG(node, 0.0, vformat("Mesh node %d wasn't added.", p_id));
+	return double(node->simulated_latency_usec) / 1000000.0;
 }
 
 void EnetMeshTransport::disconnect_peer(int p_peer) {
@@ -292,6 +350,7 @@ void EnetMeshTransport::service_host(const Ref<RefCounted> &p_host, bool p_accep
 void EnetMeshTransport::poll() {
 	ERR_FAIL_COND_MSG(host.is_null(), "The mesh transport isn't created; use `create()`.");
 	connect_pending_nodes(OS::get_singleton()->get_ticks_usec());
+	flush_simulated();
 
 	service_host(host, true);
 	LocalVector<Ref<RefCounted>> outgoing_hosts;
@@ -338,6 +397,8 @@ void EnetMeshTransport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_node", "id", "address", "port"), &EnetMeshTransport::add_node);
 	ClassDB::bind_method(D_METHOD("remove_node", "id"), &EnetMeshTransport::remove_node);
 	ClassDB::bind_method(D_METHOD("get_nodes"), &EnetMeshTransport::get_nodes);
+	ClassDB::bind_method(D_METHOD("set_node_simulated_latency", "id", "seconds"), &EnetMeshTransport::set_node_simulated_latency);
+	ClassDB::bind_method(D_METHOD("get_node_simulated_latency", "id"), &EnetMeshTransport::get_node_simulated_latency);
 	ClassDB::bind_method(D_METHOD("set_retry_interval", "seconds"), &EnetMeshTransport::set_retry_interval);
 	ClassDB::bind_method(D_METHOD("get_retry_interval"), &EnetMeshTransport::get_retry_interval);
 	ClassDB::bind_method(D_METHOD("get_local_port"), &EnetMeshTransport::get_local_port);

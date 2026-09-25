@@ -41,6 +41,9 @@ public:
 
 	// Applies an interpolated state to an object that isn't simulated locally. The default sets the variables.
 	virtual void apply_interpolated_state(const LocalVector<Variant> &p_values);
+	// Whether the peers that don't control this object simulate it with its controller's inputs (a doll, ADR-045)
+	// instead of interpolating it. Needs the controller's inputs, sent directly in a mesh.
+	virtual bool is_doll_enabled() const { return false; }
 
 	// Validates an event sent by `p_sender` to this object: 1 accepts, 0 refuses, -1 (the default) lets the
 	// network's trust policy decide.

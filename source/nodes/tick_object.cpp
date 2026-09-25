@@ -77,6 +77,11 @@ void TickObject::set_controller_peer(int p_peer) {
 	controller_peer = p_peer;
 }
 
+void TickObject::set_remote_mode(RemoteMode p_mode) {
+	ERR_FAIL_COND_MSG(network, "The remote mode can't change while the object is registered.");
+	remote_mode = p_mode;
+}
+
 void TickObject::set_root_path(const NodePath &p_path) {
 	ERR_FAIL_COND_MSG(network, "The root path can't change while the object is registered.");
 	root_path = p_path;
@@ -210,6 +215,8 @@ void TickObject::apply_interpolated_state(const LocalVector<Variant> &p_values) 
 void TickObject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_controller_peer", "peer"), &TickObject::set_controller_peer);
 	ClassDB::bind_method(D_METHOD("get_controller_peer"), &TickObject::get_controller_peer_id);
+	ClassDB::bind_method(D_METHOD("set_remote_mode", "mode"), &TickObject::set_remote_mode);
+	ClassDB::bind_method(D_METHOD("get_remote_mode"), &TickObject::get_remote_mode);
 	ClassDB::bind_method(D_METHOD("set_root_path", "path"), &TickObject::set_root_path);
 	ClassDB::bind_method(D_METHOD("get_root_path"), &TickObject::get_root_path);
 	ClassDB::bind_method(D_METHOD("set_network_path", "path"), &TickObject::set_network_path);
@@ -228,8 +235,12 @@ void TickObject::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("assign_authority", "peer"), &TickObject::assign_authority);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "controller_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_controller_peer", "get_controller_peer");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "remote_mode", PROPERTY_HINT_ENUM, "Interpolate,Doll"), "set_remote_mode", "get_remote_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "root_path"), "set_root_path", "get_root_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "network_path", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "TickNetwork"), "set_network_path", "get_network_path");
+
+	BIND_ENUM_CONSTANT(REMOTE_MODE_INTERPOLATE);
+	BIND_ENUM_CONSTANT(REMOTE_MODE_DOLL);
 
 	GDVIRTUAL_BIND(_setup_sync);
 	GDVIRTUAL_BIND(_collect_input, "input");

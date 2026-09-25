@@ -10,6 +10,8 @@
 // Every node has a fixed id and knows the others (`add_node()`); the node with the higher id connects to the lower
 // one and retries while the connection is down (the LAN mesh builder). A connection is accepted only from a known
 // id, declared in the connection request: use it in trusted networks only.
+//
+// For debugging, a latency can be simulated per node on the sending side (ADR-029).
 class EnetMeshTransport : public TickTransport {
 	GDCLASS(EnetMeshTransport, TickTransport);
 
@@ -34,6 +36,20 @@ private:
 		Ref<RefCounted> outgoing_host;
 		bool connected = false;
 		uint64_t next_attempt_usec = 0;
+		uint64_t simulated_latency_usec = 0;
+	};
+
+	struct Outgoing {
+		uint64_t send_at_usec = 0;
+		uint64_t sequence = 0;
+		int node = 0;
+		int channel = 0;
+		TransferMode mode = TRANSFER_MODE_RELIABLE;
+		Vector<uint8_t> data;
+
+		bool operator<(const Outgoing &p_other) const {
+			return send_at_usec != p_other.send_at_usec ? send_at_usec < p_other.send_at_usec : sequence < p_other.sequence;
+		}
 	};
 
 	// Accepts the incoming connections.
@@ -48,7 +64,11 @@ private:
 	LocalVector<Packet> packets;
 	uint32_t next_event = 0;
 	uint32_t next_packet = 0;
+	LocalVector<Outgoing> delayed_packets;
+	uint64_t next_sequence = 0;
 
+	Error send_now(int p_node, MeshNode &r_node, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size);
+	void flush_simulated();
 	void connect_pending_nodes(uint64_t p_now_usec);
 	void on_connected(int p_id, const Ref<RefCounted> &p_peer);
 	void on_disconnected(const Ref<RefCounted> &p_peer);
@@ -66,6 +86,10 @@ public:
 	Error add_node(int p_id, const String &p_address, int p_port);
 	void remove_node(int p_id);
 	PackedInt32Array get_nodes() const;
+
+	// Delays what this node sends to `p_id` (one way), for debugging; 0 disables it.
+	void set_node_simulated_latency(int p_id, double p_seconds);
+	double get_node_simulated_latency(int p_id) const;
 
 	void set_retry_interval(double p_seconds);
 	double get_retry_interval() const { return retry_interval; }

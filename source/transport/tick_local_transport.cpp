@@ -173,6 +173,10 @@ void TickLocalNetwork::set_packet_loss(double p_packet_loss) {
 	packet_loss = p_packet_loss;
 }
 
+void TickLocalNetwork::set_link_latency_usec(int p_peer_a, int p_peer_b, uint64_t p_latency_usec) {
+	link_latencies.insert(make_link_key(MIN(p_peer_a, p_peer_b), MAX(p_peer_a, p_peer_b), 0), p_latency_usec);
+}
+
 void TickLocalNetwork::set_seed(uint64_t p_seed) {
 	rng.seed(p_seed);
 }
@@ -221,7 +225,8 @@ Error TickLocalNetwork::send(int p_from, int p_to, int p_channel, TickTransport:
 		memcpy(in_flight_packet.packet.data.ptr(), p_data, p_size);
 	}
 
-	uint64_t delay = latency_usec;
+	const uint64_t *link_latency = link_latencies.getptr(make_link_key(MIN(p_from, p_to), MAX(p_from, p_to), 0));
+	uint64_t delay = link_latency ? *link_latency : latency_usec;
 	if (jitter_usec > 0) {
 		delay += uint64_t(rng.rand()) % (jitter_usec + 1);
 	}

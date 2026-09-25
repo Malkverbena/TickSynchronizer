@@ -10,6 +10,15 @@ static constexpr uint64_t REJECT_DISCONNECT_DELAY_USEC = 1000000;
 static constexpr uint64_t FULL_SNAPSHOT_RESEND_USEC = 500000;
 // A client keeps an event for an object it doesn't know yet for this long (E5).
 static constexpr uint64_t PENDING_EVENT_TIMEOUT_USEC = 5000000;
+// A doll whose controller sent no input for this long is interpolated again.
+static constexpr uint64_t DOLL_STALE_USEC = 500000;
+// Arrivals kept to estimate the jitter of a doll's inputs.
+static constexpr uint32_t DOLL_ARRIVAL_WINDOW = 32;
+// Speed control of a doll's timeline: speed change per frame of buffer error, and the largest change.
+static constexpr double DOLL_SPEED_GAIN = 0.05;
+static constexpr double DOLL_MAX_SPEED_DELTA = 0.2;
+// Most frames a doll simulates in one local tick.
+static constexpr int DOLL_MAX_STEPS = 3;
 
 struct PendingEventOrder {
 	template <typename T>
@@ -70,6 +79,8 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 		clock.set_master_epoch_usec(server_epoch_usec);
 		server_history.clear();
 		server_history.resize(settings.history_size);
+		authority_inputs.clear();
+		authority_inputs.resize(settings.history_size);
 
 		next_net_id = 1;
 		for (const KeyValue<String, TickSyncObject *> &E : local_objects) {
@@ -90,6 +101,8 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 		received.resize(settings.history_size);
 		predictions.clear();
 		predictions.resize(settings.history_size);
+		dolls.clear();
+		shares_inputs = false;
 		welcomed = false;
 		rejected = false;
 		predicting = false;
@@ -123,6 +136,9 @@ void TickSyncCore::stop() {
 	pending_events.clear();
 	received.clear();
 	predictions.clear();
+	authority_inputs.clear();
+	dolls.clear();
+	shares_inputs = false;
 	for (KeyValue<uint16_t, RemoteObject> &E : remote_objects) {
 		E.value.object = nullptr;
 	}
@@ -284,6 +300,25 @@ bool TickSyncCore::parse_frame_input(TickDataBuffer &p_frame_input, HashMap<uint
 	return true;
 }
 
+void TickSyncCore::write_input_groups(TickDataBuffer &r_message, uint32_t p_first_frame, const LocalVector<const TickDataBuffer *> &p_frames) {
+	LocalVector<const TickDataBuffer *> groups;
+	LocalVector<int> duplicates;
+	for (const TickDataBuffer *input : p_frames) {
+		if (!groups.is_empty() && *groups[groups.size() - 1] == *input && duplicates[duplicates.size() - 1] < 255) {
+			duplicates[duplicates.size() - 1]++;
+		} else {
+			groups.push_back(input);
+			duplicates.push_back(0);
+		}
+	}
+	r_message.add_uint_bits(groups.size(), 8);
+	r_message.add_uint_bits(p_first_frame, 32);
+	for (uint32_t i = 0; i < groups.size(); i++) {
+		r_message.add_uint_bits(uint64_t(duplicates[i]), 8);
+		r_message.add_data_buffer(*groups[i]);
+	}
+}
+
 void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 	ERR_FAIL_COND_MSG(role == ROLE_NONE, "The network isn't running.");
 	now_usec = p_now_usec;
@@ -401,11 +436,16 @@ void TickSyncCore::handle_events() {
 					E.value.object = nullptr;
 				}
 				remote_objects.clear();
+				dolls.clear();
 				predicted_ids_dirty = true;
 				if (listener) {
 					listener->on_peer_left(settings.authority_peer);
 				}
 			}
+		} else if (event.type == TickTransport::EVENT_PEER_DISCONNECTED) {
+			// Another peer of a mesh: its dolls are interpolated again.
+			dolls.erase(event.peer);
+			predicted_ids_dirty = true;
 		}
 	}
 }
@@ -440,6 +480,11 @@ void TickSyncCore::handle_packet(const TickTransport::Packet &p_packet) {
 		return;
 	}
 
+	if (type == TICK_MESSAGE_INPUTS) {
+		// Inputs for dolls, from their controller (any peer of a mesh, or the server for its own objects).
+		client_handle_doll_inputs(p_packet.from_peer, message);
+		return;
+	}
 	// The client only trusts the server (H2): state never comes from another peer.
 	if (p_packet.from_peer != settings.authority_peer) {
 		stats.malformed_packets++;
@@ -690,12 +735,18 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 	record.frame = p_frame;
 	record.states.clear();
 
+	LocalVector<uint16_t> own_doll_ids;
+	LocalVector<TickDataBuffer> own_doll_inputs;
 	for (const uint16_t net_id : server_object_ids) {
 		ServerObject &object = server_objects[net_id];
 		TickDataBuffer input;
 		input.begin_write();
 		if (object.controller == settings.authority_peer) {
 			object.object->collect_input(input);
+			if (object.object->is_doll_enabled() && own_doll_ids.size() < 255) {
+				own_doll_ids.push_back(net_id);
+				own_doll_inputs.push_back(input);
+			}
 		} else {
 			// Only the controller's own input moves the object (H1): inputs are looked up per sending peer.
 			PeerState *peer = peers.getptr(object.controller);
@@ -714,11 +765,53 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 		record.states.insert(net_id, values);
 	}
 
+	InputRecord &own_inputs = authority_inputs[history_index(p_frame)];
+	if (own_doll_ids.is_empty()) {
+		own_inputs.frame = TICK_FRAME_NONE;
+	} else {
+		own_inputs.frame = p_frame;
+		own_inputs.input.begin_write();
+		own_inputs.input.add_uint_bits(own_doll_ids.size(), 8);
+		for (uint32_t i = 0; i < own_doll_ids.size(); i++) {
+			own_inputs.input.add_uint_bits(own_doll_ids[i], 16);
+			own_inputs.input.add_data_buffer(own_doll_inputs[i]);
+		}
+		server_send_own_inputs(p_frame);
+	}
+
 	if (p_frame % uint32_t(settings.snapshot_interval) == 0) {
 		for (KeyValue<int, PeerState> &E : peers) {
 			if (E.value.accepted) {
 				server_send_snapshot(E.key, E.value, p_frame);
 			}
+		}
+	}
+}
+
+void TickSyncCore::server_send_own_inputs(uint32_t p_frame) {
+	// The same format as a client's inputs, with the last `input_redundancy` frames.
+	uint32_t first_frame = p_frame;
+	for (int i = 1; i < settings.input_redundancy; i++) {
+		const uint32_t frame = p_frame - uint32_t(i);
+		// `TICK_FRAME_NONE` (before frame 0) would match the empty records.
+		if (frame == TICK_FRAME_NONE || authority_inputs[history_index(frame)].frame != frame) {
+			break;
+		}
+		first_frame = frame;
+	}
+	LocalVector<const TickDataBuffer *> frames;
+	for (uint32_t frame = first_frame; frame != p_frame + 1; frame++) {
+		frames.push_back(&authority_inputs[history_index(frame)].input);
+	}
+	TickDataBuffer message;
+	message.begin_write();
+	message.add_uint_bits(TICK_MESSAGE_INPUTS, 8);
+	message.add_uint_bits(TICK_FRAME_NONE, 32);
+	message.add_bool(false);
+	write_input_groups(message, first_frame, frames);
+	for (const KeyValue<int, PeerState> &E : peers) {
+		if (E.value.accepted) {
+			send(E.key, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
 		}
 	}
 }
@@ -892,13 +985,29 @@ void TickSyncCore::client_update_predicted_ids() {
 	}
 	predicted_ids_dirty = false;
 	predicted_ids.clear();
+	shares_inputs = false;
+	for (KeyValue<int, DollPeer> &E : dolls) {
+		E.value.ids.clear();
+	}
 	const int local_peer = transport.is_valid() ? transport->get_local_peer_id() : 0;
 	for (const KeyValue<uint16_t, RemoteObject> &E : remote_objects) {
-		if (E.value.object && E.value.controller == local_peer) {
+		if (E.value.object == nullptr) {
+			continue;
+		}
+		if (E.value.controller == local_peer) {
 			predicted_ids.push_back(E.key);
+			shares_inputs = shares_inputs || E.value.object->is_doll_enabled();
+		} else if (E.value.object->is_doll_enabled()) {
+			client_get_doll(E.value.controller).ids.push_back(E.key);
 		}
 	}
 	predicted_ids.sort();
+	for (KeyValue<int, DollPeer> &E : dolls) {
+		E.value.ids.sort();
+		if (E.value.ids.is_empty()) {
+			E.value.started = false;
+		}
+	}
 }
 
 bool TickSyncCore::client_is_predicted(uint16_t p_net_id) const {
@@ -911,6 +1020,19 @@ bool TickSyncCore::client_is_predicted(uint16_t p_net_id) const {
 		}
 	}
 	return false;
+}
+
+uint32_t TickSyncCore::client_find_snapshot_before(uint32_t p_frame) const {
+	uint32_t found = TICK_FRAME_NONE;
+	for (const SnapshotRecord &record : received) {
+		if (record.frame == TICK_FRAME_NONE || !tick_frame_after(p_frame, record.frame)) {
+			continue;
+		}
+		if (found == TICK_FRAME_NONE || tick_frame_after(record.frame, found)) {
+			found = record.frame;
+		}
+	}
+	return found;
 }
 
 TickSyncCore::SnapshotRecord *TickSyncCore::client_get_received(uint32_t p_frame) {
@@ -1013,6 +1135,7 @@ void TickSyncCore::client_handle_snapshot(TickDataBuffer &p_message, bool p_full
 
 	client_adjust_speed(server_buffer);
 	client_reconcile(frame);
+	client_reconcile_dolls(frame);
 }
 
 void TickSyncCore::client_handle_pong(TickDataBuffer &p_message) {
@@ -1055,6 +1178,7 @@ void TickSyncCore::client_start_prediction() {
 		record.frame = TICK_FRAME_NONE;
 	}
 	last_reconciled = TICK_FRAME_NONE;
+	client_reset_dolls();
 
 	// The predicted objects start from the server's latest state.
 	SnapshotRecord *record = client_get_received(latest_snapshot);
@@ -1091,6 +1215,8 @@ void TickSyncCore::client_adjust_speed(int p_server_buffer) {
 		for (PredictionRecord &record : predictions) {
 			record.frame = TICK_FRAME_NONE;
 		}
+		// The local timeline jumped: the dolls' delays are measured again.
+		client_reset_dolls();
 		return;
 	}
 	const double delta = CLAMP(double(error) * settings.time_scale_gain, -settings.max_time_scale_delta, settings.max_time_scale_delta);
@@ -1224,6 +1350,8 @@ void TickSyncCore::client_tick(uint32_t p_frame) {
 		read_states(object, values);
 		record.states.insert(net_id, values);
 	}
+
+	client_advance_dolls();
 }
 
 void TickSyncCore::client_send_inputs() {
@@ -1246,7 +1374,7 @@ void TickSyncCore::client_send_inputs() {
 	uint32_t first_frame = last_frame;
 	for (int i = 1; i < settings.input_redundancy; i++) {
 		const uint32_t frame = last_frame - uint32_t(i);
-		if (predictions[history_index(frame)].frame != frame) {
+		if (frame == TICK_FRAME_NONE || predictions[history_index(frame)].frame != frame) {
 			break;
 		}
 		first_frame = frame;
@@ -1258,25 +1386,24 @@ void TickSyncCore::client_send_inputs() {
 		return;
 	}
 
-	LocalVector<const TickDataBuffer *> groups;
-	LocalVector<int> duplicates;
+	LocalVector<const TickDataBuffer *> frames;
 	for (uint32_t frame = first_frame; frame != last_frame + 1; frame++) {
-		const TickDataBuffer &input = predictions[history_index(frame)].input;
-		if (!groups.is_empty() && *groups[groups.size() - 1] == input && duplicates[duplicates.size() - 1] < 255) {
-			duplicates[duplicates.size() - 1]++;
-		} else {
-			groups.push_back(&input);
-			duplicates.push_back(0);
+		frames.push_back(&predictions[history_index(frame)].input);
+	}
+	write_input_groups(message, first_frame, frames);
+	send(settings.authority_peer, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
+
+	if (shares_inputs) {
+		// Mesh: the other peers simulate this peer's objects as dolls (ADR-045). A star client is only connected to
+		// the server.
+		LocalVector<int> connected;
+		transport->get_connected_peers(connected);
+		for (const int peer : connected) {
+			if (peer != settings.authority_peer) {
+				send(peer, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
+			}
 		}
 	}
-
-	message.add_uint_bits(groups.size(), 8);
-	message.add_uint_bits(first_frame, 32);
-	for (uint32_t i = 0; i < groups.size(); i++) {
-		message.add_uint_bits(uint64_t(duplicates[i]), 8);
-		message.add_data_buffer(*groups[i]);
-	}
-	send(settings.authority_peer, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, message);
 }
 
 double TickSyncCore::get_timeline_frame(uint64_t p_now_usec) const {
@@ -1331,7 +1458,7 @@ void TickSyncCore::client_update_interpolation() {
 	LocalVector<Variant> values;
 	for (const KeyValue<uint16_t, RemoteObject> &E : remote_objects) {
 		TickSyncObject *object = E.value.object;
-		if (object == nullptr || client_is_predicted(E.key)) {
+		if (object == nullptr || client_is_predicted(E.key) || client_is_active_doll(E.key)) {
 			continue;
 		}
 		const LocalVector<Variant> *past_values = past ? past->states.getptr(E.key) : nullptr;
@@ -1350,6 +1477,331 @@ void TickSyncCore::client_update_interpolation() {
 		} else if (future_values) {
 			object->apply_interpolated_state(*future_values);
 		}
+	}
+}
+
+// ------------------------------------------------------------------------------------------------------ Dolls
+
+TickSyncCore::DollPeer &TickSyncCore::client_get_doll(int p_peer) {
+	DollPeer *doll = dolls.getptr(p_peer);
+	if (doll) {
+		return *doll;
+	}
+	DollPeer created;
+	created.inputs.resize(settings.history_size);
+	created.history.resize(settings.history_size);
+	dolls.insert(p_peer, created);
+	return dolls[p_peer];
+}
+
+void TickSyncCore::client_reset_dolls() {
+	for (KeyValue<int, DollPeer> &E : dolls) {
+		E.value.started = false;
+		E.value.arrival_offsets.clear();
+		E.value.next_offset = 0;
+	}
+}
+
+void TickSyncCore::client_handle_doll_inputs(int p_peer, TickDataBuffer &p_message) {
+	if (!welcomed) {
+		return;
+	}
+	DollPeer &doll = client_get_doll(p_peer);
+	if (!settings.trusted && !doll.input_limiter.take(settings.max_input_packets_per_second, now_usec)) {
+		stats.rate_limited_packets++;
+		return;
+	}
+	// The acknowledgment and the full snapshot request are for the server.
+	p_message.read_uint_bits(32);
+	p_message.read_bool();
+	const int group_count = int(p_message.read_uint_bits(8));
+	const uint32_t first_frame = uint32_t(p_message.read_uint_bits(32));
+	if (p_message.is_buffer_failed()) {
+		stats.malformed_packets++;
+		return;
+	}
+	if (group_count == 0) {
+		return;
+	}
+
+	// Frames are kept only near the local timeline (the controller predicts about as far ahead as this peer).
+	const uint32_t ring = uint32_t(settings.history_size);
+	const uint32_t reference = predicting ? stepper.get_next_frame_index() : first_frame;
+	uint32_t newest = TICK_FRAME_NONE;
+	uint32_t index = 0;
+	for (int group = 0; group < group_count; group++) {
+		const int duplicates = int(p_message.read_uint_bits(8));
+		TickDataBuffer input;
+		p_message.read_data_buffer(input);
+		if (p_message.is_buffer_failed()) {
+			stats.malformed_packets++;
+			return;
+		}
+		for (int copy = 0; copy <= duplicates; copy++) {
+			const uint32_t frame = first_frame + index++;
+			if (frame == TICK_FRAME_NONE) {
+				stats.rejected_inputs++;
+				continue;
+			}
+			const int32_t distance = int32_t(frame - reference);
+			if (distance >= int32_t(ring / 2)) {
+				stats.rejected_inputs++;
+				continue;
+			}
+			if (distance <= -int32_t(ring / 2)) {
+				continue;
+			}
+			InputRecord &record = doll.inputs[frame % ring];
+			if (record.frame != frame) {
+				record.frame = frame;
+				record.input = input;
+			}
+			if (newest == TICK_FRAME_NONE || tick_frame_after(frame, newest)) {
+				newest = frame;
+			}
+		}
+	}
+	if (newest == TICK_FRAME_NONE || (doll.last_received_frame != TICK_FRAME_NONE && !tick_frame_after(newest, doll.last_received_frame))) {
+		return;
+	}
+	doll.last_received_frame = newest;
+	doll.last_received_usec = now_usec;
+	if (predicting) {
+		const double offset = double(int32_t(stepper.get_next_frame_index() - newest)) + stepper.get_interpolation_fraction();
+		if (doll.arrival_offsets.size() < DOLL_ARRIVAL_WINDOW) {
+			doll.arrival_offsets.push_back(offset);
+		} else {
+			doll.arrival_offsets[doll.next_offset] = offset;
+		}
+		doll.next_offset = (doll.next_offset + 1) % DOLL_ARRIVAL_WINDOW;
+	}
+}
+
+int TickSyncCore::client_get_doll_target(const DollPeer &p_doll) const {
+	// Inputs kept ahead of the doll: the minimum plus the jitter of their arrival.
+	double spread = 0.0;
+	if (!p_doll.arrival_offsets.is_empty()) {
+		double lowest = p_doll.arrival_offsets[0];
+		double highest = lowest;
+		for (const double offset : p_doll.arrival_offsets) {
+			lowest = MIN(lowest, offset);
+			highest = MAX(highest, offset);
+		}
+		spread = highest - lowest;
+	}
+	return CLAMP(settings.min_input_buffer + int(Math::ceil(spread)), settings.min_input_buffer, settings.max_input_buffer);
+}
+
+bool TickSyncCore::client_is_active_doll(uint16_t p_net_id) const {
+	const RemoteObject *remote = remote_objects.getptr(p_net_id);
+	if (remote == nullptr || remote->object == nullptr || !remote->object->is_doll_enabled()) {
+		return false;
+	}
+	const DollPeer *doll = dolls.getptr(remote->controller);
+	return doll && doll->started && predicting;
+}
+
+int TickSyncCore::get_doll_delay(int p_peer) const {
+	const DollPeer *doll = dolls.getptr(p_peer);
+	if (doll == nullptr || !doll->started || !predicting || doll->ids.is_empty()) {
+		return -1;
+	}
+	return int(int32_t(stepper.get_next_frame_index() - doll->next_frame));
+}
+
+void TickSyncCore::client_simulate_doll(DollPeer &r_doll, uint32_t p_frame) {
+	// The controller's input for the frame, or its latest one before it (ghost input).
+	const uint32_t ring = uint32_t(settings.history_size);
+	const uint32_t lookback = uint32_t(settings.max_input_buffer + settings.input_redundancy);
+	TickDataBuffer frame_input;
+	bool found = false;
+	for (uint32_t back = 0; back <= lookback && !found; back++) {
+		const uint32_t frame = p_frame - back;
+		const InputRecord &record = r_doll.inputs[frame % ring];
+		if (frame != TICK_FRAME_NONE && record.frame == frame) {
+			frame_input = record.input;
+			found = true;
+			if (back > 0 && !rewinding) {
+				stats.doll_ghost_inputs++;
+			}
+		}
+	}
+	HashMap<uint16_t, TickDataBuffer> inputs;
+	if (found) {
+		frame_input.begin_read();
+		if (!parse_frame_input(frame_input, inputs)) {
+			stats.malformed_packets++;
+		}
+	} else if (!rewinding) {
+		stats.doll_ghost_inputs++;
+	}
+
+	const double delta = get_tick_delta();
+	DollRecord &record = r_doll.history[p_frame % ring];
+	record.frame = p_frame;
+	record.states.clear();
+	for (const uint16_t net_id : r_doll.ids) {
+		RemoteObject *remote = remote_objects.getptr(net_id);
+		if (remote == nullptr || remote->object == nullptr) {
+			continue;
+		}
+		// The inputs came from the object's controller: dolls are grouped by the peer that sent them (H1).
+		TickDataBuffer input;
+		const TickDataBuffer *stored = inputs.getptr(net_id);
+		if (stored && (settings.trusted || stored->total_size() <= settings.max_input_bits)) {
+			input = *stored;
+		} else {
+			input.begin_write();
+		}
+		input.begin_read();
+		remote->object->process_tick(delta, input);
+		quantize_object(remote->object);
+		LocalVector<Variant> values;
+		read_states(remote->object, values);
+		record.states.insert(net_id, values);
+	}
+
+	// A doll behind the authority: the snapshot of this frame arrived before the doll simulated it.
+	const SnapshotRecord *snapshot = client_get_received(p_frame);
+	if (snapshot == nullptr || client_doll_matches(r_doll, record.states, *snapshot)) {
+		return;
+	}
+	for (const uint16_t net_id : r_doll.ids) {
+		const LocalVector<Variant> *values = snapshot->states.getptr(net_id);
+		RemoteObject *remote = remote_objects.getptr(net_id);
+		if (values == nullptr || remote == nullptr || remote->object == nullptr) {
+			continue;
+		}
+		for (uint32_t i = 0; i < values->size(); i++) {
+			remote->object->set_sync_var(int(i), (*values)[i]);
+		}
+		record.states.insert(net_id, *values);
+	}
+	stats.doll_corrections++;
+}
+
+bool TickSyncCore::client_doll_matches(const DollPeer &p_doll, const ObjectStates &p_doll_states, const SnapshotRecord &p_snapshot) const {
+	for (const uint16_t net_id : p_doll.ids) {
+		const LocalVector<Variant> *authority_values = p_snapshot.states.getptr(net_id);
+		const RemoteObject *remote = remote_objects.getptr(net_id);
+		if (authority_values == nullptr || remote == nullptr || remote->object == nullptr) {
+			continue;
+		}
+		const LocalVector<Variant> *doll_values = p_doll_states.getptr(net_id);
+		if (doll_values == nullptr || doll_values->size() != authority_values->size()) {
+			return false;
+		}
+		const TickSchema &schema = remote->object->get_sync_schema();
+		for (uint32_t v = 0; v < authority_values->size() && int(v) < schema.size(); v++) {
+			if (!schema.codecs[v]->is_equal((*doll_values)[v], (*authority_values)[v])) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+bool TickSyncCore::client_restore_doll(DollPeer &r_doll, uint32_t p_snapshot_frame, uint32_t p_next_frame) {
+	SnapshotRecord *snapshot = client_get_received(p_snapshot_frame);
+	if (snapshot == nullptr) {
+		return false;
+	}
+	const uint32_t ring = uint32_t(settings.history_size);
+	uint32_t next_frame = p_next_frame;
+	if (!tick_frame_after(next_frame, p_snapshot_frame) || next_frame - p_snapshot_frame >= ring / 2) {
+		// Too far ahead of the state to simulate the frames in between: the doll continues from the state.
+		next_frame = p_snapshot_frame + 1;
+	}
+
+	rewinding = true;
+	DollRecord &record = r_doll.history[p_snapshot_frame % ring];
+	record.frame = p_snapshot_frame;
+	record.states.clear();
+	for (const uint16_t net_id : r_doll.ids) {
+		const LocalVector<Variant> *values = snapshot->states.getptr(net_id);
+		RemoteObject *remote = remote_objects.getptr(net_id);
+		if (values == nullptr || remote == nullptr || remote->object == nullptr) {
+			continue;
+		}
+		for (uint32_t i = 0; i < values->size(); i++) {
+			remote->object->set_sync_var(int(i), (*values)[i]);
+		}
+		record.states.insert(net_id, *values);
+	}
+	for (uint32_t frame = p_snapshot_frame + 1; frame != next_frame; frame++) {
+		client_simulate_doll(r_doll, frame);
+	}
+	rewinding = false;
+
+	r_doll.next_frame = next_frame;
+	r_doll.started = true;
+	return true;
+}
+
+void TickSyncCore::client_advance_dolls() {
+	const int resync_threshold = MAX(20, settings.ticks_per_second / 2);
+	for (KeyValue<int, DollPeer> &E : dolls) {
+		DollPeer &doll = E.value;
+		if (doll.ids.is_empty()) {
+			continue;
+		}
+		if (doll.last_received_frame == TICK_FRAME_NONE || now_usec - doll.last_received_usec >= DOLL_STALE_USEC) {
+			// The controller stopped sending inputs: the doll is interpolated from the snapshots.
+			doll.started = false;
+			continue;
+		}
+		const int target = client_get_doll_target(doll);
+		if (!doll.started) {
+			// Starts `target` inputs behind the newest one, from the authority's latest state before that frame.
+			const uint32_t start_frame = doll.last_received_frame - uint32_t(target) + 1;
+			doll.step_accumulator = 0.0;
+			client_restore_doll(doll, client_find_snapshot_before(start_frame), start_frame);
+			continue;
+		}
+
+		const int buffered = int(int32_t(doll.last_received_frame - doll.next_frame)) + 1;
+		const int error = buffered - target;
+		if (Math::abs(error) > resync_threshold) {
+			// Too far off to recover by changing the speed: start again.
+			doll.started = false;
+			stats.doll_resyncs++;
+			continue;
+		}
+		// Faster when too many inputs are waiting, slower when they run out, so the buffer stays at the target.
+		doll.step_accumulator += 1.0 + CLAMP(double(error) * DOLL_SPEED_GAIN, -DOLL_MAX_SPEED_DELTA, DOLL_MAX_SPEED_DELTA);
+		for (int step = 0; step < DOLL_MAX_STEPS && doll.step_accumulator >= 1.0; step++) {
+			client_simulate_doll(doll, doll.next_frame);
+			doll.next_frame++;
+			doll.step_accumulator -= 1.0;
+		}
+		doll.step_accumulator = MIN(doll.step_accumulator, 1.0);
+	}
+}
+
+void TickSyncCore::client_reconcile_dolls(uint32_t p_frame) {
+	if (!predicting || dolls.is_empty()) {
+		return;
+	}
+	const SnapshotRecord *snapshot = client_get_received(p_frame);
+	if (snapshot == nullptr) {
+		return;
+	}
+	const uint32_t ring = uint32_t(settings.history_size);
+	for (KeyValue<int, DollPeer> &E : dolls) {
+		DollPeer &doll = E.value;
+		// A doll behind the authority checks this state when it simulates the frame (`client_simulate_doll()`).
+		if (!doll.started || doll.ids.is_empty() || !tick_frame_after(doll.next_frame, p_frame)) {
+			continue;
+		}
+		const DollRecord &record = doll.history[p_frame % ring];
+		if (record.frame == p_frame && client_doll_matches(doll, record.states, *snapshot)) {
+			continue;
+		}
+		// Rewind: the authority's state at `p_frame`, then the doll's frames after it again.
+		const uint32_t next_frame = doll.next_frame;
+		client_restore_doll(doll, p_frame, next_frame);
+		stats.doll_rewinds++;
+		stats.doll_rewound_frames += uint64_t(next_frame - p_frame - 1);
 	}
 }
 
@@ -1670,6 +2122,19 @@ Dictionary TickSyncCore::get_stats_dictionary() const {
 	result["events_rejected"] = stats.events_rejected;
 	result["spawns"] = stats.spawns;
 	result["despawns"] = stats.despawns;
+	result["doll_rewinds"] = stats.doll_rewinds;
+	result["doll_rewound_frames"] = stats.doll_rewound_frames;
+	result["doll_corrections"] = stats.doll_corrections;
+	result["doll_resyncs"] = stats.doll_resyncs;
+	result["doll_ghost_inputs"] = stats.doll_ghost_inputs;
+	Dictionary doll_delays;
+	for (const KeyValue<int, DollPeer> &E : dolls) {
+		const int delay = get_doll_delay(E.key);
+		if (delay >= 0) {
+			doll_delays[E.key] = delay;
+		}
+	}
+	result["doll_delays"] = doll_delays;
 	result["time_scale"] = stepper.get_time_scale();
 	result["timeline_frame"] = get_timeline_frame(now_usec);
 	result["latest_snapshot_frame"] = int64_t(latest_snapshot);

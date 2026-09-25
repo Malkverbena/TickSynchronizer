@@ -67,6 +67,8 @@ class TickLocalNetwork {
 
 	uint64_t time_usec = 0;
 	uint64_t latency_usec = 0;
+	// One way latency of specific links (both directions), overriding `latency_usec`.
+	HashMap<uint64_t, uint64_t> link_latencies;
 	uint64_t jitter_usec = 0;
 	double packet_loss = 0.0;
 	RandomPCG rng;
@@ -108,6 +110,8 @@ public:
 
 	// One way latency; each packet gets a uniform random extra delay in [0, jitter].
 	void set_latency_usec(uint64_t p_latency_usec) { latency_usec = p_latency_usec; }
+	// One way latency between two peers, in both directions, instead of the network's.
+	void set_link_latency_usec(int p_peer_a, int p_peer_b, uint64_t p_latency_usec);
 	void set_jitter_usec(uint64_t p_jitter_usec) { jitter_usec = p_jitter_usec; }
 	// Probability, in [0, 1], of losing an unreliable packet. Reliable packets are never lost.
 	void set_packet_loss(double p_packet_loss);

@@ -12,7 +12,8 @@
 // - Server: simulates every object; the input of each client's objects comes from that client, and the input of
 //   the server's objects is collected locally. Sends snapshots (delta over the last acknowledged one).
 // - Client: predicts the objects it controls and rewinds them when the server disagrees; interpolates every
-//   other object between snapshots.
+//   other object between snapshots, or simulates it as a doll with its controller's inputs (F6, ADR-045: in a mesh,
+//   the controllers send their inputs to every peer).
 //
 // The core doesn't read the clock: `process()` receives the current time, so it runs the same with a real
 // network and with the simulated one of the tests.
@@ -41,6 +42,14 @@ public:
 		uint64_t events_rejected = 0;
 		uint64_t spawns = 0;
 		uint64_t despawns = 0;
+		// Dolls: rewinds after an authority snapshot of a frame already simulated disagreed; corrections of a frame
+		// simulated after its snapshot arrived; restarts of the doll's timeline; frames simulated without the
+		// controller's input.
+		uint64_t doll_rewinds = 0;
+		uint64_t doll_rewound_frames = 0;
+		uint64_t doll_corrections = 0;
+		uint64_t doll_resyncs = 0;
+		uint64_t doll_ghost_inputs = 0;
 	};
 
 private:
@@ -105,6 +114,28 @@ private:
 		Variant data;
 	};
 
+	struct DollRecord {
+		uint32_t frame = TICK_FRAME_NONE;
+		ObjectStates states;
+	};
+
+	// Client: the objects controlled by another peer that are simulated here as dolls, on a timeline of their own:
+	// behind the local one by the latency to that peer plus an input buffer that absorbs its jitter (ADR-046).
+	struct DollPeer {
+		LocalVector<uint16_t> ids;
+		LocalVector<InputRecord> inputs;
+		LocalVector<DollRecord> history;
+		bool started = false;
+		uint32_t next_frame = TICK_FRAME_NONE;
+		uint32_t last_received_frame = TICK_FRAME_NONE;
+		uint64_t last_received_usec = 0;
+		double step_accumulator = 0.0;
+		// Local timeline frame minus the frame of the newest input, when it arrived; their spread is the jitter.
+		LocalVector<double> arrival_offsets;
+		uint32_t next_offset = 0;
+		RateLimiter input_limiter;
+	};
+
 	struct PeerState {
 		bool accepted = false;
 		uint64_t reject_usec = 0;
@@ -146,6 +177,8 @@ private:
 	HashMap<uint32_t, SpawnRecord> spawns;
 	LocalVector<uint32_t> spawn_order;
 	uint32_t next_spawn_id = 1;
+	// The server's input for the objects it controls that are dolls on the clients.
+	LocalVector<InputRecord> authority_inputs;
 
 	// Events waiting for their frame (both roles) or for their target object (client).
 	LocalVector<PendingEvent> pending_events;
@@ -166,6 +199,9 @@ private:
 	bool ack_pending = false;
 	LocalVector<SnapshotRecord> received;
 	LocalVector<PredictionRecord> predictions;
+	// Whether the local predicted objects are dolls on the other peers: their inputs go to every peer.
+	bool shares_inputs = false;
+	HashMap<int, DollPeer> dolls;
 
 	int history_index(uint32_t p_frame) const { return int(p_frame % uint32_t(settings.history_size)); }
 	double get_tick_delta() const { return 1.0 / double(settings.ticks_per_second); }
@@ -174,6 +210,9 @@ private:
 	void read_states(TickSyncObject *p_object, LocalVector<Variant> &r_values) const;
 	void quantize_object(TickSyncObject *p_object) const;
 	static bool parse_frame_input(TickDataBuffer &p_frame_input, HashMap<uint16_t, TickDataBuffer> &r_inputs);
+	// Writes the inputs of consecutive frames starting at `p_first_frame`; consecutive identical inputs are sent once
+	// with a duplicate count (NetworkSynchronizer `encode_inputs`).
+	static void write_input_groups(TickDataBuffer &r_message, uint32_t p_first_frame, const LocalVector<const TickDataBuffer *> &p_frames);
 
 	void handle_events();
 	void handle_packet(const TickTransport::Packet &p_packet);
@@ -191,6 +230,7 @@ private:
 	void server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t p_frame);
 	void server_handle_event(int p_peer, TickDataBuffer &p_message);
 	void server_send_spawn(int p_peer, uint32_t p_spawn_id);
+	void server_send_own_inputs(uint32_t p_frame);
 	// Local time of frame 0 of this server's timeline, from the frame it's at now (signed: a server following another
 	// network's clock has frames older than its process).
 	int64_t server_compute_epoch() const;
@@ -218,6 +258,22 @@ private:
 	void client_send_ping();
 	void client_update_interpolation();
 	SnapshotRecord *client_get_received(uint32_t p_frame);
+	// The newest snapshot received before `p_frame`, or `TICK_FRAME_NONE`.
+	uint32_t client_find_snapshot_before(uint32_t p_frame) const;
+
+	// Dolls (ADR-045, ADR-046).
+	DollPeer &client_get_doll(int p_peer);
+	void client_handle_doll_inputs(int p_peer, TickDataBuffer &p_message);
+	int client_get_doll_target(const DollPeer &p_doll) const;
+	bool client_is_active_doll(uint16_t p_net_id) const;
+	// Applies the snapshot of `p_snapshot_frame` to the doll, then simulates it up to `p_next_frame`.
+	bool client_restore_doll(DollPeer &r_doll, uint32_t p_snapshot_frame, uint32_t p_next_frame);
+	// Simulates one frame of the doll; if the authority's state of that frame already arrived, the doll takes it.
+	void client_simulate_doll(DollPeer &r_doll, uint32_t p_frame);
+	bool client_doll_matches(const DollPeer &p_doll, const ObjectStates &p_doll_states, const SnapshotRecord &p_snapshot) const;
+	void client_advance_dolls();
+	void client_reconcile_dolls(uint32_t p_frame);
+	void client_reset_dolls();
 
 	// Events.
 	bool read_event(TickDataBuffer &p_message, PendingEvent &r_event, int &r_payload_bytes);
@@ -264,6 +320,8 @@ public:
 	virtual uint16_t get_net_id(const TickSyncObject *p_object) const override;
 	// The authority simulates every object.
 	virtual int get_owner(const TickSyncObject *p_object) const override { return settings.authority_peer; }
+	// Client: how many frames the dolls of `p_peer` are behind the local timeline, or -1 when there are none.
+	int get_doll_delay(int p_peer) const;
 
 	// Server: records a spawn and sends it to the clients (and to the ones joining later). Call it before the
 	// spawned objects are registered, so the clients create them before binding them.

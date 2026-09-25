@@ -3,6 +3,7 @@
 #include "../sync/tick_sync_object.h"
 #include "data_buffer.h"
 
+#include "core/object/class_db.h"
 #include "scene/main/node.h"
 
 class TickNetwork;
@@ -11,11 +12,20 @@ class TickNetwork;
 //
 // Extend it with a script: declare the variables in `_setup_sync()`, write the controller's input in
 // `_collect_input()` and advance the object in `_process_tick()`. The server simulates it; the controlling client
-// predicts it; every other peer interpolates it.
+// predicts it; every other peer interpolates it, or simulates it as a doll with the controller's inputs
+// (`remote_mode`).
 class TickObject : public Node, public TickSyncObject {
 	GDCLASS(TickObject, Node);
 
+public:
+	enum RemoteMode {
+		REMOTE_MODE_INTERPOLATE,
+		REMOTE_MODE_DOLL,
+	};
+
+private:
 	int controller_peer = 1;
+	RemoteMode remote_mode = REMOTE_MODE_INTERPOLATE;
 	NodePath root_path = NodePath("..");
 	NodePath network_path;
 
@@ -47,6 +57,8 @@ protected:
 public:
 	void set_controller_peer(int p_peer);
 	int get_controller_peer_id() const { return controller_peer; }
+	void set_remote_mode(RemoteMode p_mode);
+	RemoteMode get_remote_mode() const { return remote_mode; }
 	void set_root_path(const NodePath &p_path);
 	NodePath get_root_path() const { return root_path; }
 	void set_network_path(const NodePath &p_path);
@@ -79,6 +91,7 @@ public:
 	virtual void collect_input(TickDataBuffer &r_input) override;
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override;
 	virtual void apply_interpolated_state(const LocalVector<Variant> &p_values) override;
+	virtual bool is_doll_enabled() const override { return remote_mode == REMOTE_MODE_DOLL; }
 	virtual int validate_event(int p_sender, const StringName &p_event, const Variant &p_payload) override;
 	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override;
 	virtual void on_authority_changed(int p_old_owner, int p_new_owner) override;
@@ -87,3 +100,5 @@ public:
 
 	TickObject();
 };
+
+VARIANT_ENUM_CAST(TickObject::RemoteMode);
