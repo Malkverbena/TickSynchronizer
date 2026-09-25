@@ -501,4 +501,55 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority mi
 	}
 }
 
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player the host removes leaves without migrating") {
+	HostedMesh mesh(3);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.poll(20);
+
+	mesh.nodes[1]->disconnect_peer(3);
+	const int remaining[3] = { 1, 2, 4 };
+	CHECK(wait_peer_counts(mesh, remaining, 3, 2, 3000, 0));
+	for (int t = 0; t < 1000 && mesh.nodes[3]->get_status() != Mesh::STATUS_DISCONNECTED; t++) {
+		mesh.poll(1);
+	}
+	CHECK(mesh.nodes[3]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK_FALSE(mesh.nodes[3]->is_hosting());
+	CHECK(mesh.nodes[2]->get_host_peer() == 1);
+	CHECK(mesh.nodes[4]->get_host_peer() == 1);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player refused by the authority doesn't take over") {
+	HostedMesh mesh(2);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	TickSyncCore host;
+	TickTransport::Event event;
+	while (mesh.nodes[1]->pop_event(event)) {
+	}
+	REQUIRE(host.start(mesh.nodes[1], OS::get_singleton()->get_ticks_usec()) == OK);
+
+	// Player 3 speaks another protocol version: the authority refuses it and removes it a second later.
+	TickDataBuffer hello;
+	hello.begin_write();
+	hello.add_uint_bits(TICK_MESSAGE_HELLO, 8);
+	hello.add_uint_bits(999, 16);
+	hello.add_bool(sizeof(real_t) == sizeof(double));
+	hello.dry();
+	REQUIRE(mesh.nodes[3]->send(1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, hello.get_buffer().get_bytes().ptr(), int(hello.get_buffer().get_bytes().size())) == OK);
+	uint64_t last = OS::get_singleton()->get_ticks_usec();
+	for (int t = 0; t < 3000 && mesh.nodes[3]->get_status() != Mesh::STATUS_DISCONNECTED; t++) {
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		host.process(double(now - last) / 1000000.0, now);
+		last = now;
+		mesh.nodes[2]->poll();
+		mesh.nodes[3]->poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(mesh.nodes[3]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK_FALSE(mesh.nodes[3]->is_hosting());
+	CHECK(mesh.nodes[2]->get_host_peer() == 1);
+	host.stop();
+}
+
 } // namespace TestEnetHostedMesh

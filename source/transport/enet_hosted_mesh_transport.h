@@ -117,6 +117,8 @@ private:
 	bool host_migration = true;
 	double host_timeout = 5.0;
 	LocalVector<int> succession;
+	// This player asked to leave the host: its disconnection isn't the host leaving.
+	bool leaving = false;
 	Status status = STATUS_DISCONNECTED;
 	Compression compression = COMPRESSION_RANGE_CODER;
 	double punch_timeout = 3.0;
@@ -202,7 +204,8 @@ private:
 	void player_close_pair(Pair &r_pair);
 	void player_report_connected(int p_peer, Pair &r_pair);
 	void player_report_disconnected(int p_peer, Pair &r_pair);
-	void player_lost_host();
+	// `p_migrate`: `false` when the host removed this player, or the player left: then the mesh ends for it.
+	void player_lost_host(bool p_migrate);
 	// The host left: the first living player of the succession takes over. `false` when there's none to reach.
 	bool player_migrate(int p_old_host);
 	void player_become_host(int p_old_host);

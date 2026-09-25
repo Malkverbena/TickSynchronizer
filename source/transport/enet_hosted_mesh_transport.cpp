@@ -14,6 +14,8 @@ static_assert(int(EnetHostedMeshTransport::COMPRESSION_ZSTD) == int(ENetConnecti
 
 // Connection data of a player joining the host ("TKM1"); any other value is a registration token.
 static constexpr uint32_t JOIN_MAGIC = 0x544B4D31;
+// Disconnection data of a player the host removes (refused by the host or by the game): it doesn't migrate.
+static constexpr int DISCONNECT_REMOVED = 0x544B5258;
 
 // ENet channels: 0 is the transport's own control channel; then every logical channel (the engines' ones, then two
 // per multiplayer channel: reliable and unreliable) twice, direct and relayed.
@@ -457,13 +459,14 @@ void EnetHostedMeshTransport::disconnect_peer(int p_peer) {
 		ERR_FAIL_NULL_MSG(member, vformat("Player %d isn't connected.", p_peer));
 		ENetPacketPeer *link = as_link(*member);
 		if (link && link->is_active()) {
-			link->peer_disconnect();
+			link->peer_disconnect(DISCONNECT_REMOVED);
 		}
 		return;
 	}
 	ERR_FAIL_COND_MSG(p_peer != host_id, "A player can only disconnect from the host; the host disconnects players.");
 	ENetPacketPeer *link = as_link(host_link);
 	if (link && link->is_active()) {
+		leaving = true;
 		link->peer_disconnect();
 	}
 }
@@ -636,7 +639,7 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 		// Players join on the main socket (DTLS when encrypted), never on the rendezvous one.
 		if (p_kind == 1 || int(members.size()) >= max_players - 1) {
 			rejected_connections++;
-			link->peer_disconnect();
+			link->peer_disconnect(DISCONNECT_REMOVED);
 			return;
 		}
 		const int id = next_player_id++;
@@ -933,7 +936,8 @@ void EnetHostedMeshTransport::player_service_host() {
 			break;
 		}
 		if (type == ENetConnection::EVENT_DISCONNECT) {
-			player_lost_host();
+			// A player removed by the host, or leaving, doesn't take the host's place.
+			player_lost_host(!leaving && int(event.data) != DISCONNECT_REMOVED);
 			return;
 		}
 		if (type != ENetConnection::EVENT_RECEIVE) {
@@ -1297,9 +1301,9 @@ void EnetHostedMeshTransport::player_report_disconnected(int p_peer, Pair &r_pai
 	}
 }
 
-void EnetHostedMeshTransport::player_lost_host() {
+void EnetHostedMeshTransport::player_lost_host(bool p_migrate) {
 	const bool was_connected = status == STATUS_CONNECTED;
-	if (was_connected && host_migration && player_migrate(host_id)) {
+	if (was_connected && p_migrate && host_migration && player_migrate(host_id)) {
 		return;
 	}
 	for (KeyValue<int, Pair> &E : pairs) {
