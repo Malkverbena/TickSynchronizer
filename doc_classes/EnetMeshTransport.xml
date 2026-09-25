@@ -5,7 +5,7 @@
 	</brief_description>
 	<description>
 		Connects the nodes of a mesh directly, without [SceneMultiplayer], which stays free for the star with the clients. Every node has a fixed id and the list of the other nodes; the node with the higher id connects to the lower one and retries while the connection is down.
-		A connection is accepted only from a node in the list, identified by the id it declares when connecting, and only once per id: use it in trusted networks (for example, servers in a LAN), with [member TickNetwork.trust] set to [constant TickNetwork.TRUST_TRUSTED]. It has no DTLS.
+		A connection is accepted only from a node in the list, identified by the id it declares when connecting, and only once per id: use it in trusted networks (for example, servers in a LAN), with [member TickNetwork.trust] set to [constant TickNetwork.TRUST_TRUSTED]. It has no DTLS. Between players over the internet, use [EnetHostedMeshTransport].
 		[codeblock]
 		var mesh := EnetMeshTransport.create(2, 9002)
 		mesh.add_node(1, "10.0.0.1", 9001)

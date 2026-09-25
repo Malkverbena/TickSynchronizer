@@ -1,0 +1,286 @@
+#pragma once
+
+#include "../source/sync/tick_sync_core.h"
+#include "../source/transport/enet_hosted_mesh_transport.h"
+#include "../source/transport/tick_multiplayer_peer.h"
+#include "test_tick_mesh_dolls.h"
+
+#include "core/object/class_db.h"
+#include "core/os/os.h"
+#include "tests/test_macros.h"
+
+namespace TestEnetHostedMesh {
+
+typedef EnetHostedMeshTransport Mesh;
+
+// A host (1) and players joining one at a time on localhost, so their ids follow the order (2, 3, ...).
+struct HostedMesh {
+	int port = 0;
+	int count = 0;
+	Ref<Mesh> nodes[6];
+
+	HostedMesh(int p_players, int p_relay_only_player = 0) {
+		port = 43000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
+		nodes[1] = Mesh::create_host(port, 8);
+		CHECK(nodes[1].is_valid());
+		count = 1;
+		for (int id = 2; id <= p_players + 1; id++) {
+			nodes[id] = Mesh::create_player("127.0.0.1", port);
+			CHECK(nodes[id].is_valid());
+			nodes[id]->set_direct_connections(id != p_relay_only_player);
+			count = id;
+			for (int t = 0; t < 3000 && nodes[id]->get_status() != Mesh::STATUS_CONNECTED; t++) {
+				poll(1);
+			}
+		}
+	}
+
+	~HostedMesh() {
+		for (int i = 1; i <= count; i++) {
+			if (nodes[i].is_valid()) {
+				nodes[i]->close();
+			}
+		}
+	}
+
+	void poll(int p_rounds) {
+		for (int round = 0; round < p_rounds; round++) {
+			for (int i = 1; i <= count; i++) {
+				if (nodes[i].is_valid()) {
+					nodes[i]->poll();
+				}
+			}
+			OS::get_singleton()->delay_usec(1000);
+		}
+	}
+
+	bool everyone_connected() const {
+		for (int i = 1; i <= count; i++) {
+			LocalVector<int> connected;
+			nodes[i]->get_connected_peers(connected);
+			if (int(connected.size()) != count - 1) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	void wait_everyone_connected() {
+		for (int t = 0; t < 8000 && !everyone_connected(); t++) {
+			poll(1);
+		}
+	}
+
+	// Waits for a packet from `p_from` on `p_channel` at node `p_node`, dropping the others.
+	bool receive(int p_node, int p_from, int p_channel) {
+		for (int t = 0; t < 2000; t++) {
+			poll(1);
+			TickTransport::Packet packet;
+			while (nodes[p_node]->pop_packet(packet)) {
+				if (packet.from_peer == p_from && packet.channel == p_channel) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+};
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Players join through the host and punch direct links") {
+	HostedMesh mesh(2);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+
+	// The host gives the ids.
+	CHECK(mesh.nodes[1]->get_local_peer_id() == 1);
+	CHECK(mesh.nodes[2]->get_local_peer_id() == 2);
+	CHECK(mesh.nodes[3]->get_local_peer_id() == 3);
+	CHECK(mesh.nodes[1]->get_peer_path(2) == Mesh::PATH_HOST);
+	CHECK(mesh.nodes[2]->get_peer_path(1) == Mesh::PATH_HOST);
+	// On localhost, the punched links always succeed.
+	CHECK(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_DIRECT);
+	CHECK(mesh.nodes[3]->get_peer_path(2) == Mesh::PATH_DIRECT);
+
+	// The sender comes from the connection, on every path.
+	const uint8_t payload[3] = { 7, 1, 2 };
+	CHECK(mesh.nodes[3]->send(2, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, payload, 3) == OK);
+	CHECK(mesh.receive(2, 3, TICK_CHANNEL_INPUTS));
+	CHECK(mesh.nodes[2]->send(1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK);
+	CHECK(mesh.receive(1, 2, TICK_CHANNEL_CONTROL));
+	CHECK(mesh.nodes[1]->send(TickTransport::PEER_BROADCAST, TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK);
+	CHECK(mesh.receive(3, 1, TICK_CHANNEL_STATE));
+
+	const Dictionary stats = mesh.nodes[1]->get_stats();
+	CHECK(int(stats["relayed_pairs"]) == 0);
+	CHECK(int(mesh.nodes[2]->get_stats()["direct_pairs"]) == 1);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A pair without a direct link is relayed by the host") {
+	// Player 3 never tries direct links: the pairs 2-3 and 3-4 are relayed, 2-4 is direct.
+	HostedMesh mesh(3, 3);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	CHECK(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_RELAYED);
+	CHECK(mesh.nodes[3]->get_peer_path(2) == Mesh::PATH_RELAYED);
+	CHECK(mesh.nodes[4]->get_peer_path(3) == Mesh::PATH_RELAYED);
+	CHECK(mesh.nodes[2]->get_peer_path(4) == Mesh::PATH_DIRECT);
+
+	// Relayed packets keep their origin, channel and order.
+	uint8_t payload[2] = { 0, 0 };
+	for (uint8_t i = 0; i < 20; i++) {
+		payload[0] = i;
+		CHECK(mesh.nodes[2]->send(3, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 2) == OK);
+	}
+	int next = 0;
+	for (int t = 0; t < 2000 && next < 20; t++) {
+		mesh.poll(1);
+		TickTransport::Packet packet;
+		while (mesh.nodes[3]->pop_packet(packet)) {
+			CHECK(packet.from_peer == 2);
+			CHECK(packet.channel == TICK_CHANNEL_CONTROL);
+			CHECK(packet.mode == TickTransport::TRANSFER_MODE_RELIABLE);
+			CHECK(int(packet.data[0]) == next);
+			next++;
+		}
+	}
+	CHECK(next == 20);
+	CHECK(mesh.nodes[3]->send(TickTransport::PEER_BROADCAST, TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_UNRELIABLE, payload, 2) == OK);
+	CHECK(mesh.receive(4, 3, TICK_CHANNEL_STATE));
+	CHECK(int(mesh.nodes[1]->get_stats()["relayed_packets"]) >= 21);
+	CHECK(int(mesh.nodes[1]->get_stats()["relayed_pairs"]) == 2);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Strangers are refused and leaving players are reported") {
+	HostedMesh mesh(2);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+
+	// A connection with an unknown registration token (`ENetConnection` through the class database: the tests don't
+	// include ENet's headers).
+	Ref<RefCounted> stranger = Object::cast_to<RefCounted>(ClassDB::instantiate("ENetConnection"));
+	REQUIRE(stranger.is_valid());
+	REQUIRE(int(stranger->call("create_host", 1, 27, 0, 0)) == OK);
+	stranger->call("compress", 1);
+	stranger->call("connect_to_host", "127.0.0.1", mesh.port, 27, 12345);
+	for (int t = 0; t < 500 && int(mesh.nodes[1]->get_stats()["rejected_connections"]) == 0; t++) {
+		stranger->call("service", 0);
+		mesh.poll(1);
+	}
+	CHECK(int(mesh.nodes[1]->get_stats()["rejected_connections"]) == 1);
+	CHECK(mesh.nodes[1]->get_peers().size() == 2);
+	stranger->call("destroy");
+
+	// Player 3 leaves: the host and player 2 see it.
+	TickTransport::Event event;
+	while (mesh.nodes[2]->pop_event(event)) {
+	}
+	mesh.nodes[3]->close();
+	bool left = false;
+	for (int t = 0; t < 3000 && !left; t++) {
+		mesh.poll(1);
+		while (mesh.nodes[2]->pop_event(event)) {
+			left = left || (event.type == TickTransport::EVENT_PEER_DISCONNECTED && event.peer == 3);
+		}
+	}
+	CHECK(left);
+	CHECK_FALSE(mesh.nodes[1]->is_peer_connected(3));
+	CHECK(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_NONE);
+	CHECK(mesh.nodes[2]->is_peer_connected(1));
+}
+
+TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer reaches direct and relayed players") {
+	HostedMesh mesh(3, 4);
+	Ref<TickMultiplayerPeer> peers[5];
+	for (int i = 1; i <= 4; i++) {
+		peers[i] = mesh.nodes[i]->get_multiplayer_peer();
+		// The same peer every time.
+		CHECK(peers[i] == mesh.nodes[i]->get_multiplayer_peer());
+	}
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	CHECK(peers[1]->is_server());
+	CHECK_FALSE(peers[2]->is_server());
+	CHECK(peers[3]->get_unique_id() == 3);
+	CHECK(peers[3]->get_connection_status() == MultiplayerPeer::CONNECTION_CONNECTED);
+
+	// Player 2 to everyone but player 3, on channel 2, unreliable: the host (direct) and player 4 (relayed).
+	const uint8_t payload[4] = { 9, 8, 7, 6 };
+	peers[2]->set_target_peer(-3);
+	peers[2]->set_transfer_channel(2);
+	peers[2]->set_transfer_mode(MultiplayerPeer::TRANSFER_MODE_UNRELIABLE);
+	CHECK(peers[2]->put_packet(payload, 4) == OK);
+	bool got[5] = {};
+	for (int t = 0; t < 2000 && !(got[1] && got[4]); t++) {
+		for (int i = 1; i <= 4; i++) {
+			peers[i]->poll();
+			while (peers[i]->get_available_packet_count() > 0) {
+				CHECK(peers[i]->get_packet_peer() == 2);
+				CHECK(peers[i]->get_packet_channel() == 2);
+				CHECK(peers[i]->get_packet_mode() == MultiplayerPeer::TRANSFER_MODE_UNRELIABLE);
+				const uint8_t *buffer = nullptr;
+				int size = 0;
+				CHECK(peers[i]->get_packet(&buffer, size) == OK);
+				CHECK(size == 4);
+				got[i] = true;
+			}
+		}
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(got[1]);
+	CHECK(got[4]);
+	CHECK_FALSE(got[3]);
+
+	// The engines' packets don't reach the multiplayer peer, and the other way around.
+	TickTransport::Packet packet;
+	CHECK_FALSE(mesh.nodes[4]->pop_packet(packet));
+	CHECK(mesh.nodes[4]->send(2, TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_RELIABLE, payload, 4) == OK);
+	CHECK(mesh.receive(2, 4, TICK_CHANNEL_STATE));
+	CHECK(peers[2]->get_available_packet_count() == 0);
+	CHECK(peers[3]->put_packet(payload, 4) == OK);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Dolls work across a relayed pair") {
+	HostedMesh mesh(2, 3);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	REQUIRE(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_RELAYED);
+
+	TickSyncCore cores[4];
+	TestTickMeshDolls::DollMover *movers[4][4] = {};
+	for (int peer = 1; peer <= 3; peer++) {
+		for (int controller = 1; controller <= 3; controller++) {
+			movers[peer][controller] = memnew(TestTickMeshDolls::DollMover(vformat("mover_%d", controller), controller));
+			movers[peer][controller]->script_length = 100000;
+			cores[peer].register_object(movers[peer][controller]);
+		}
+		TickTransport::Event event;
+		while (mesh.nodes[peer]->pop_event(event)) {
+		}
+		REQUIRE(cores[peer].start(mesh.nodes[peer], OS::get_singleton()->get_ticks_usec()) == OK);
+	}
+	uint64_t last = OS::get_singleton()->get_ticks_usec();
+	const uint64_t end = last + 3000000;
+	while (OS::get_singleton()->get_ticks_usec() < end) {
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		const double delta = double(now - last) / 1000000.0;
+		last = now;
+		for (int peer = 1; peer <= 3; peer++) {
+			cores[peer].process(delta, now);
+		}
+		OS::get_singleton()->delay_usec(2000);
+	}
+	// Player 3's inputs reach player 2 through the host: its mover is a doll there.
+	CHECK(cores[2].is_predicting());
+	CHECK(cores[2].get_doll_delay(3) >= 0);
+	CHECK(cores[3].get_doll_delay(2) >= 0);
+	CHECK(cores[2].get_stats().malformed_packets == 0);
+	CHECK(int(mesh.nodes[1]->get_stats()["relayed_packets"]) > 60);
+	for (int peer = 1; peer <= 3; peer++) {
+		cores[peer].stop();
+		for (int controller = 1; controller <= 3; controller++) {
+			memdelete(movers[peer][controller]);
+		}
+	}
+}
+
+} // namespace TestEnetHostedMesh

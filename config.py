@@ -25,10 +25,12 @@ def configure(env):
 def get_doc_classes():
     return [
         "DataBuffer",
+        "EnetHostedMeshTransport",
         "EnetMeshTransport",
         "EnetStarTransport",
         "TickCodec",
         "TickNetwork",
+        "TickMultiplayerPeer",
         "TickObject",
         "TickSpawner",
         "TickTransport",
