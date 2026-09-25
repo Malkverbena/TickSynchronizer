@@ -27,6 +27,17 @@ static constexpr int ENET_CHANNEL_COUNT = FIRST_RELAY_CHANNEL + LOGICAL_CHANNEL_
 static constexpr int RELAY_HEADER_SIZE = 4;
 // ENet's default MTU minus the ENet headers (protocol and send command) and the relay header.
 static constexpr int HOSTED_MESH_MAX_PAYLOAD = 1400 - 6 - 12 - RELAY_HEADER_SIZE;
+// Record header and authentication tag of a DTLS 1.2 datagram with AES-GCM (as in `EnetStarTransport`).
+static constexpr int DTLS_OVERHEAD = 37;
+// Common name of the players' self-signed certificates; the connecting player checks it with the pinned certificate.
+static const char *PLAYER_COMMON_NAME = "tick-mesh-player";
+// With DTLS, the accepting player punches its NAT with this many datagrams before its socket switches to DTLS.
+static constexpr int DTLS_PUNCHES = 3;
+// With DTLS, the connecting player waits this long for those datagrams before its socket switches to DTLS.
+static constexpr uint64_t DTLS_CONNECT_DELAY_USEC = 500000;
+// With DTLS, a socket waits this long after its registration closed before switching to DTLS: the acknowledgment of
+// the disconnection must reach the host, or the host's retries would hit the DTLS socket.
+static constexpr uint64_t DTLS_SETTLE_USEC = 200000;
 
 // While punching, the accepting side sends a datagram this often, so its NAT lets the other side's packets in.
 static constexpr uint64_t PUNCH_INTERVAL_USEC = 100000;
@@ -41,6 +52,7 @@ enum HostedMeshControl {
 	CONTROL_PAIR_FAILED,
 	CONTROL_MEMBER_LEFT,
 	CONTROL_PAIR_READY,
+	CONTROL_CERTIFICATE,
 };
 
 static ENetConnection *as_socket(const Ref<RefCounted> &p_socket) {
@@ -121,7 +133,8 @@ struct HostedMeshReader {
 	}
 	String get_string() {
 		const uint32_t length = get_u32();
-		if (failed || length > 1024 || offset + int(length) > size) {
+		// Addresses, and certificates (PEM) with DTLS.
+		if (failed || length > 16384 || offset + int(length) > size) {
 			failed = true;
 			return String();
 		}
@@ -133,19 +146,33 @@ struct HostedMeshReader {
 
 // ------------------------------------------------------------------------------------------------------ Creation
 
-Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_host(int p_port, int p_max_players, const String &p_bind_address, Compression p_compression) {
+Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_host(int p_port, int p_max_players, const String &p_bind_address, Compression p_compression, const Ref<TLSOptions> &p_tls_options, int p_rendezvous_port) {
 	ERR_FAIL_COND_V_MSG(p_max_players < 2 || p_max_players > 1024, Ref<EnetHostedMeshTransport>(), "The number of players must be between 2 and 1024.");
 	Ref<ENetConnection> socket;
 	socket.instantiate();
 	// Every player keeps one connection; each pair being introduced adds two short registrations. Bandwidth limits stay
 	// at 0 (unlimited): see ADR-030.
 	const int max_peers = MIN(4095, p_max_players * 3);
-	const Error err = socket->create_host_bound(IPAddress(p_bind_address), p_port, max_peers, ENET_CHANNEL_COUNT, 0, 0);
+	Error err = socket->create_host_bound(IPAddress(p_bind_address), p_port, max_peers, ENET_CHANNEL_COUNT, 0, 0);
 	ERR_FAIL_COND_V_MSG(err != OK, Ref<EnetHostedMeshTransport>(), vformat("Can't host a mesh on port %d.", p_port));
 	socket->compress(ENetConnection::CompressionMode(p_compression));
 
 	Ref<EnetHostedMeshTransport> transport;
 	transport.instantiate();
+	if (p_tls_options.is_valid()) {
+		err = socket->dtls_server_setup(p_tls_options);
+		ERR_FAIL_COND_V_MSG(err != OK, Ref<EnetHostedMeshTransport>(), "Can't set up DTLS on the mesh host.");
+		// A DTLS socket only takes DTLS: the pairs register their endpoints on a plain one.
+		Ref<ENetConnection> rendezvous;
+		rendezvous.instantiate();
+		const int rendezvous_port = p_rendezvous_port > 0 ? p_rendezvous_port : p_port + 1;
+		err = rendezvous->create_host_bound(IPAddress(p_bind_address), rendezvous_port, max_peers, ENET_CHANNEL_COUNT, 0, 0);
+		ERR_FAIL_COND_V_MSG(err != OK, Ref<EnetHostedMeshTransport>(), vformat("Can't open the rendezvous port %d.", rendezvous_port));
+		rendezvous->compress(ENetConnection::CompressionMode(p_compression));
+		transport->rendezvous = rendezvous;
+		transport->tls_options = p_tls_options;
+		transport->encrypted = true;
+	}
 	transport->is_host = true;
 	transport->local_id = 1;
 	transport->status = STATUS_CONNECTED;
@@ -155,16 +182,30 @@ Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_host(int p_port, in
 	return transport;
 }
 
-Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_player(const String &p_address, int p_port, Compression p_compression) {
+Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_player(const String &p_address, int p_port, Compression p_compression, const Ref<TLSOptions> &p_tls_options, const String &p_tls_hostname) {
 	Ref<ENetConnection> socket;
 	socket.instantiate();
 	ERR_FAIL_COND_V_MSG(socket->create_host(1, ENET_CHANNEL_COUNT, 0, 0) != OK, Ref<EnetHostedMeshTransport>(), "Can't create the socket for the host.");
 	socket->compress(ENetConnection::CompressionMode(p_compression));
-	Ref<ENetPacketPeer> link = socket->connect_to_host(p_address, p_port, ENET_CHANNEL_COUNT, int(JOIN_MAGIC));
-	ERR_FAIL_COND_V_MSG(link.is_null(), Ref<EnetHostedMeshTransport>(), vformat("Can't connect to the host at %s:%d.", p_address, p_port));
 
 	Ref<EnetHostedMeshTransport> transport;
 	transport.instantiate();
+	if (p_tls_options.is_valid()) {
+		const Error err = socket->dtls_client_setup(p_tls_hostname.is_empty() ? p_address : p_tls_hostname, p_tls_options);
+		ERR_FAIL_COND_V_MSG(err != OK, Ref<EnetHostedMeshTransport>(), "Can't set up DTLS for the mesh host.");
+		// The certificate of the direct links this player accepts; the host hands it to the other players.
+		Ref<Crypto> crypto = Ref<Crypto>(Crypto::create());
+		ERR_FAIL_COND_V_MSG(crypto.is_null(), Ref<EnetHostedMeshTransport>(), "DTLS needs the crypto module.");
+		transport->player_key = crypto->generate_rsa(2048);
+		ERR_FAIL_COND_V_MSG(transport->player_key.is_null(), Ref<EnetHostedMeshTransport>(), "Can't generate the player's key.");
+		transport->player_certificate = crypto->generate_self_signed_certificate(transport->player_key, vformat("CN=%s,O=TickSynchronizer,C=US", PLAYER_COMMON_NAME), "20000101000000", "20991231235959");
+		ERR_FAIL_COND_V_MSG(transport->player_certificate.is_null(), Ref<EnetHostedMeshTransport>(), "Can't generate the player's certificate.");
+		transport->tls_options = p_tls_options;
+		transport->encrypted = true;
+	}
+	Ref<ENetPacketPeer> link = socket->connect_to_host(p_address, p_port, ENET_CHANNEL_COUNT, int(JOIN_MAGIC));
+	ERR_FAIL_COND_V_MSG(link.is_null(), Ref<EnetHostedMeshTransport>(), vformat("Can't connect to the host at %s:%d.", p_address, p_port));
+
 	transport->status = STATUS_CONNECTING;
 	transport->host_address = p_address;
 	transport->host_port = p_port;
@@ -211,6 +252,12 @@ void EnetHostedMeshTransport::close() {
 		listening->destroy();
 	}
 	listener.unref();
+	ENetConnection *rendezvous_socket = as_socket(rendezvous);
+	if (rendezvous_socket) {
+		rendezvous_socket->destroy();
+	}
+	rendezvous.unref();
+	member_certificates.clear();
 	status = STATUS_DISCONNECTED;
 }
 
@@ -390,7 +437,7 @@ int EnetHostedMeshTransport::get_channel_count() const {
 }
 
 int EnetHostedMeshTransport::get_max_payload_size() const {
-	return HOSTED_MESH_MAX_PAYLOAD;
+	return HOSTED_MESH_MAX_PAYLOAD - (encrypted ? DTLS_OVERHEAD : 0);
 }
 
 void EnetHostedMeshTransport::disconnect_peer(int p_peer) {
@@ -471,28 +518,12 @@ bool EnetHostedMeshTransport::pop_packet(Packet &r_packet) {
 // ------------------------------------------------------------------------------------------------------ Host
 
 void EnetHostedMeshTransport::host_poll() {
-	ENetConnection *socket = as_socket(listener);
-	if (socket == nullptr) {
+	if (listener.is_null()) {
 		return;
 	}
-	// Bounded, so a flood can't stall the frame.
-	for (int i = 0; i < 4096; i++) {
-		ENetConnection::Event event;
-		const ENetConnection::EventType type = socket->service(0, event);
-		if (type == ENetConnection::EVENT_NONE || type == ENetConnection::EVENT_ERROR) {
-			break;
-		}
-		if (type == ENetConnection::EVENT_CONNECT) {
-			host_on_connect(event.peer, event.data);
-		} else if (type == ENetConnection::EVENT_DISCONNECT) {
-			host_on_disconnect(event.peer);
-		} else if (type == ENetConnection::EVENT_RECEIVE) {
-			const int *id = members_by_link.getptr(event.peer->get_instance_id());
-			if (id) {
-				host_on_receive(*id, event.channel_id, event.packet->data, int(event.packet->dataLength), event.packet->flags);
-			}
-			enet_packet_destroy(event.packet);
-		}
+	host_service(listener);
+	if (rendezvous.is_valid()) {
+		host_service(rendezvous);
 	}
 
 	// Pairs that didn't register their endpoints in time are relayed.
@@ -506,14 +537,41 @@ void EnetHostedMeshTransport::host_poll() {
 	for (const uint64_t key : expired) {
 		host_relay_pair(key);
 	}
-	socket->flush();
+	as_socket(listener)->flush();
+	if (rendezvous.is_valid()) {
+		as_socket(rendezvous)->flush();
+	}
 }
 
-void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data) {
+void EnetHostedMeshTransport::host_service(const Ref<RefCounted> &p_socket) {
+	ENetConnection *socket = as_socket(p_socket);
+	// Bounded, so a flood can't stall the frame.
+	for (int i = 0; socket && i < 4096; i++) {
+		ENetConnection::Event event;
+		const ENetConnection::EventType type = socket->service(0, event);
+		if (type == ENetConnection::EVENT_NONE || type == ENetConnection::EVENT_ERROR) {
+			break;
+		}
+		if (type == ENetConnection::EVENT_CONNECT) {
+			host_on_connect(event.peer, event.data, p_socket == rendezvous);
+		} else if (type == ENetConnection::EVENT_DISCONNECT) {
+			host_on_disconnect(event.peer);
+		} else if (type == ENetConnection::EVENT_RECEIVE) {
+			const int *id = members_by_link.getptr(event.peer->get_instance_id());
+			if (id) {
+				host_on_receive(*id, event.channel_id, event.packet->data, int(event.packet->dataLength), event.packet->flags);
+			}
+			enet_packet_destroy(event.packet);
+		}
+	}
+}
+
+void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data, bool p_rendezvous) {
 	ENetPacketPeer *link = as_link(p_link);
 	ERR_FAIL_NULL(link);
 	if (p_data == JOIN_MAGIC) {
-		if (int(members.size()) >= max_players - 1) {
+		// Players join on the main socket (DTLS when encrypted), never on the rendezvous one.
+		if (p_rendezvous || int(members.size()) >= max_players - 1) {
 			rejected_connections++;
 			link->peer_disconnect();
 			return;
@@ -523,6 +581,8 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 		members_by_link.insert(p_link->get_instance_id(), id);
 		HostedMeshWriter welcome(CONTROL_WELCOME);
 		welcome.put_u32(uint32_t(id));
+		// Where the pairs register their endpoints (0: this port).
+		welcome.put_u32(rendezvous.is_valid() ? uint32_t(as_socket(rendezvous)->get_local_port()) : 0);
 		send_control(p_link, welcome.bytes);
 		push_event(EVENT_PEER_CONNECTED, id);
 		for (const KeyValue<int, Ref<RefCounted>> &E : members) {
@@ -549,22 +609,34 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 	// Closed gracefully, so the player's socket is free to connect to the other player.
 	link->peer_disconnect();
 
-	if (introduction->registered[0] && introduction->registered[1]) {
-		introduction->punching = true;
-		for (int i = 0; i < 2; i++) {
-			const int member = i == 0 ? introduction->first : introduction->second;
-			const int other = 1 - i;
-			const Ref<RefCounted> *member_link = members.getptr(member);
-			if (member_link == nullptr) {
-				continue;
-			}
-			HostedMeshWriter punch(CONTROL_PAIR_PUNCH);
-			punch.put_u32(uint32_t(other == 0 ? introduction->first : introduction->second));
-			punch.put_u32(introduction->connect_token);
-			punch.put_u32(uint32_t(introduction->ports[other]));
-			punch.put_string(introduction->addresses[other]);
-			send_control(*member_link, punch.bytes);
+	host_try_punch(*key);
+}
+
+void EnetHostedMeshTransport::host_try_punch(uint64_t p_key) {
+	Introduction *introduction = introductions.getptr(p_key);
+	if (introduction == nullptr || introduction->punching || introduction->relayed || !introduction->registered[0] || !introduction->registered[1]) {
+		return;
+	}
+	// With DTLS, the connecting player (the higher id) pins the accepting player's certificate.
+	const String *certificate = member_certificates.getptr(introduction->first);
+	if (encrypted && certificate == nullptr) {
+		return;
+	}
+	introduction->punching = true;
+	for (int i = 0; i < 2; i++) {
+		const int member = i == 0 ? introduction->first : introduction->second;
+		const int other = 1 - i;
+		const Ref<RefCounted> *member_link = members.getptr(member);
+		if (member_link == nullptr) {
+			continue;
 		}
+		HostedMeshWriter punch(CONTROL_PAIR_PUNCH);
+		punch.put_u32(uint32_t(other == 0 ? introduction->first : introduction->second));
+		punch.put_u32(introduction->connect_token);
+		punch.put_u32(uint32_t(introduction->ports[other]));
+		punch.put_string(introduction->addresses[other]);
+		punch.put_string(i == 1 && certificate ? *certificate : String());
+		send_control(*member_link, punch.bytes);
 	}
 }
 
@@ -577,6 +649,7 @@ void EnetHostedMeshTransport::host_on_disconnect(const Ref<RefCounted> &p_link) 
 	const int id = *found;
 	members_by_link.erase(p_link->get_instance_id());
 	members.erase(id);
+	member_certificates.erase(id);
 	push_event(EVENT_PEER_DISCONNECTED, id);
 
 	HostedMeshWriter left(CONTROL_MEMBER_LEFT);
@@ -598,11 +671,27 @@ void EnetHostedMeshTransport::host_on_disconnect(const Ref<RefCounted> &p_link) 
 void EnetHostedMeshTransport::host_on_receive(int p_from, int p_channel, const uint8_t *p_data, int p_size, int p_flags) {
 	if (p_channel == CHANNEL_CONTROL) {
 		HostedMeshReader reader(p_data, p_size);
-		if (reader.get_u8() == CONTROL_PAIR_FAILED) {
+		const uint8_t type = reader.get_u8();
+		if (type == CONTROL_PAIR_FAILED) {
 			const int peer = int(reader.get_u32());
 			const uint64_t key = make_pair_key(p_from, peer);
 			if (!reader.failed && introductions.has(key)) {
 				host_relay_pair(key);
+			}
+		} else if (type == CONTROL_CERTIFICATE && encrypted) {
+			const String certificate = reader.get_string();
+			if (!reader.failed && !member_certificates.has(p_from)) {
+				member_certificates.insert(p_from, certificate);
+				// Introductions that waited for it.
+				LocalVector<uint64_t> keys;
+				for (const KeyValue<uint64_t, Introduction> &E : introductions) {
+					if (E.value.first == p_from || E.value.second == p_from) {
+						keys.push_back(E.key);
+					}
+				}
+				for (const uint64_t key : keys) {
+					host_try_punch(key);
+				}
 			}
 		}
 		return;
@@ -775,8 +864,18 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			if (status != STATUS_CONNECTING || peer <= PEER_SERVER) {
 				return;
 			}
+			const uint32_t rendezvous_port = reader.get_u32();
+			if (reader.failed) {
+				return;
+			}
 			local_id = peer;
+			host_rendezvous_port = int(rendezvous_port);
 			status = STATUS_CONNECTED;
+			if (encrypted) {
+				HostedMeshWriter certificate(CONTROL_CERTIFICATE);
+				certificate.put_string(player_certificate->save_to_string());
+				send_control(host_link, certificate.bytes);
+			}
 			push_event(EVENT_PEER_CONNECTED, PEER_SERVER);
 		} break;
 		case CONTROL_PAIR_OPEN: {
@@ -789,6 +888,7 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			const uint32_t token = reader.get_u32();
 			const int port = int(reader.get_u32());
 			const String address = reader.get_string();
+			const String certificate = reader.get_string();
 			Pair *pair = pairs.getptr(peer);
 			if (reader.failed || pair == nullptr || pair->state != PAIR_REGISTERING || port <= 0 || port > 65535) {
 				return;
@@ -797,8 +897,9 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			pair->address = address;
 			pair->port = port;
 			pair->connect_token = token;
+			pair->peer_certificate = certificate;
 			if (pair->registration.is_null()) {
-				player_start_punching(peer, *pair);
+				player_endpoint_ready(peer, *pair);
 			}
 		} break;
 		case CONTROL_PAIR_RELAY: {
@@ -838,7 +939,9 @@ void EnetHostedMeshTransport::player_open_pair(int p_peer, uint32_t p_registrati
 		return;
 	}
 	socket->compress(ENetConnection::CompressionMode(compression));
-	Ref<ENetPacketPeer> registration = socket->connect_to_host(host_address, host_port, ENET_CHANNEL_COUNT, int(p_registration_token));
+	// With DTLS, the registration goes to the host's plain rendezvous port; the socket switches to DTLS afterwards.
+	const int registration_port = host_rendezvous_port > 0 ? host_rendezvous_port : host_port;
+	Ref<ENetPacketPeer> registration = socket->connect_to_host(host_address, registration_port, ENET_CHANNEL_COUNT, int(p_registration_token));
 	if (registration.is_null()) {
 		socket->destroy();
 		player_fail_pair(p_peer, pair);
@@ -849,23 +952,74 @@ void EnetHostedMeshTransport::player_open_pair(int p_peer, uint32_t p_registrati
 	pair.state = PAIR_REGISTERING;
 }
 
+void EnetHostedMeshTransport::player_endpoint_ready(int p_peer, Pair &r_pair) {
+	if (!encrypted) {
+		player_start_punching(p_peer, r_pair);
+		return;
+	}
+	r_pair.punch_at_usec = OS::get_singleton()->get_ticks_usec() + DTLS_SETTLE_USEC;
+}
+
 void EnetHostedMeshTransport::player_start_punching(int p_peer, Pair &r_pair) {
+	r_pair.punch_at_usec = 0;
 	r_pair.state = PAIR_PUNCHING;
 	const uint64_t now = OS::get_singleton()->get_ticks_usec();
 	r_pair.deadline_usec = now + uint64_t(punch_timeout * 1000000.0);
 	r_pair.next_punch_usec = now;
-	if (local_id > p_peer) {
-		// The higher id connects; the lower one accepts and decides.
-		ENetConnection *socket = as_socket(r_pair.socket);
-		Ref<ENetPacketPeer> link = socket ? socket->connect_to_host(r_pair.address, r_pair.port, ENET_CHANNEL_COUNT, int(r_pair.connect_token)) : Ref<ENetPacketPeer>();
-		if (link.is_null()) {
+	ENetConnection *socket = as_socket(r_pair.socket);
+	if (socket == nullptr) {
+		player_fail_pair(p_peer, r_pair);
+		return;
+	}
+	if (local_id < p_peer) {
+		// The lower id accepts and decides.
+		if (encrypted) {
+			// A DTLS socket only sends DTLS: this side punches its NAT first. The socket keeps its port, so the NAT
+			// mapping stays.
+			PackedByteArray punch;
+			punch.push_back(0);
+			for (int i = 0; i < DTLS_PUNCHES; i++) {
+				socket->socket_send(r_pair.address, r_pair.port, punch);
+			}
+			if (socket->dtls_server_setup(TLSOptions::server(player_key, player_certificate)) != OK) {
+				player_fail_pair(p_peer, r_pair);
+			}
+		}
+		return;
+	}
+	if (encrypted) {
+		// The higher id waits for the other side's punches before switching to DTLS: a DTLS socket reports any other
+		// datagram as a handshake error.
+		r_pair.connect_at_usec = now + DTLS_CONNECT_DELAY_USEC;
+		r_pair.deadline_usec += DTLS_CONNECT_DELAY_USEC;
+		return;
+	}
+	player_connect_pair(p_peer, r_pair);
+}
+
+void EnetHostedMeshTransport::player_connect_pair(int p_peer, Pair &r_pair) {
+	r_pair.connect_at_usec = 0;
+	ENetConnection *socket = as_socket(r_pair.socket);
+	if (socket == nullptr) {
+		player_fail_pair(p_peer, r_pair);
+		return;
+	}
+	if (encrypted) {
+		// The accepting player's certificate, handed over by the host, is the only one trusted.
+		Ref<X509Certificate> certificate = Ref<X509Certificate>(X509Certificate::create());
+		if (certificate.is_null() || certificate->load_from_string(r_pair.peer_certificate) != OK || socket->dtls_client_setup(PLAYER_COMMON_NAME, TLSOptions::client(certificate, PLAYER_COMMON_NAME)) != OK) {
 			player_fail_pair(p_peer, r_pair);
 			return;
 		}
-		const int timeout_ms = int(punch_timeout * 1000.0);
-		link->set_timeout(32, timeout_ms, timeout_ms);
-		r_pair.link = link;
 	}
+	Ref<ENetPacketPeer> link = socket->connect_to_host(r_pair.address, r_pair.port, ENET_CHANNEL_COUNT, int(r_pair.connect_token));
+	if (link.is_null()) {
+		player_fail_pair(p_peer, r_pair);
+		return;
+	}
+	const int timeout_ms = int(punch_timeout * 1000.0);
+	link->set_timeout(32, timeout_ms, timeout_ms);
+	r_pair.link = link;
 }
 
 void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
@@ -901,7 +1055,7 @@ void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 			if (is_registration) {
 				r_pair.registration.unref();
 				if (r_pair.state == PAIR_REGISTERING && r_pair.has_endpoint) {
-					player_start_punching(p_peer, r_pair);
+					player_endpoint_ready(p_peer, r_pair);
 					return;
 				}
 			} else if (is_link) {
@@ -937,22 +1091,28 @@ void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 		}
 	}
 
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
+	if (r_pair.state == PAIR_REGISTERING && r_pair.punch_at_usec != 0 && now >= r_pair.punch_at_usec) {
+		player_start_punching(p_peer, r_pair);
+		return;
+	}
 	if (r_pair.state != PAIR_PUNCHING) {
 		return;
 	}
-	const uint64_t now = OS::get_singleton()->get_ticks_usec();
 	if (accepts) {
 		if (now >= r_pair.deadline_usec) {
 			player_fail_pair(p_peer, r_pair);
 			return;
 		}
-		if (now >= r_pair.next_punch_usec && socket) {
+		if (now >= r_pair.next_punch_usec && socket && !encrypted) {
 			// Opens this side's NAT for the other player's packets; ENet ignores a one byte datagram.
 			PackedByteArray punch;
 			punch.push_back(0);
 			socket->socket_send(r_pair.address, r_pair.port, punch);
 			r_pair.next_punch_usec = now + PUNCH_INTERVAL_USEC;
 		}
+	} else if (r_pair.connect_at_usec != 0 && now >= r_pair.connect_at_usec) {
+		player_connect_pair(p_peer, r_pair);
 	} else if (now >= r_pair.deadline_usec + CONNECTOR_GRACE_USEC) {
 		player_fail_pair(p_peer, r_pair);
 	}
@@ -1082,8 +1242,9 @@ Error EnetHostedMeshTransport::send_multiplayer(int p_target, int p_channel, Tra
 }
 
 void EnetHostedMeshTransport::_bind_methods() {
-	ClassDB::bind_static_method("EnetHostedMeshTransport", D_METHOD("create_host", "port", "max_players", "bind_address", "compression"), &EnetHostedMeshTransport::create_host, DEFVAL(32), DEFVAL("*"), DEFVAL(COMPRESSION_RANGE_CODER));
-	ClassDB::bind_static_method("EnetHostedMeshTransport", D_METHOD("create_player", "address", "port", "compression"), &EnetHostedMeshTransport::create_player, DEFVAL(COMPRESSION_RANGE_CODER));
+	ClassDB::bind_static_method("EnetHostedMeshTransport", D_METHOD("create_host", "port", "max_players", "bind_address", "compression", "tls_options", "rendezvous_port"), &EnetHostedMeshTransport::create_host, DEFVAL(32), DEFVAL("*"), DEFVAL(COMPRESSION_RANGE_CODER), DEFVAL(Ref<TLSOptions>()), DEFVAL(0));
+	ClassDB::bind_static_method("EnetHostedMeshTransport", D_METHOD("create_player", "address", "port", "compression", "tls_options", "tls_hostname"), &EnetHostedMeshTransport::create_player, DEFVAL(COMPRESSION_RANGE_CODER), DEFVAL(Ref<TLSOptions>()), DEFVAL(String()));
+	ClassDB::bind_method(D_METHOD("is_encrypted"), &EnetHostedMeshTransport::is_encrypted);
 	ClassDB::bind_method(D_METHOD("get_status"), &EnetHostedMeshTransport::get_status);
 	ClassDB::bind_method(D_METHOD("is_hosting"), &EnetHostedMeshTransport::is_hosting);
 	ClassDB::bind_method(D_METHOD("get_peer_path", "peer"), &EnetHostedMeshTransport::get_peer_path);

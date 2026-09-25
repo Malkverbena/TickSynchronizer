@@ -2,6 +2,7 @@
 
 #include "tick_transport.h"
 
+#include "core/crypto/crypto.h"
 #include "core/templates/hash_map.h"
 #include "core/variant/dictionary.h"
 
@@ -15,6 +16,10 @@ class TickMultiplayerPeer;
 // Each player has one socket for the host and one per other player; the host introduces a pair by learning the public
 // endpoint of both sockets and a token the pair uses to connect. The same mesh can also carry `SceneMultiplayer`
 // through `get_multiplayer_peer()`.
+//
+// With DTLS (ADR-061), the host link uses the game's `TLSOptions`, and each direct link the certificate its accepting
+// player generates, pinned by the other player through the host. The endpoints are then registered on a second port
+// of the host (the rendezvous port), because a DTLS socket only takes DTLS.
 class EnetHostedMeshTransport : public TickTransport {
 	GDCLASS(EnetHostedMeshTransport, TickTransport);
 	friend class TickMultiplayerPeer;
@@ -71,8 +76,14 @@ private:
 		String address;
 		int port = 0;
 		uint32_t connect_token = 0;
+		// DTLS: the accepting player's certificate, for the connecting player to pin.
+		String peer_certificate;
 		uint64_t deadline_usec = 0;
 		uint64_t next_punch_usec = 0;
+		// DTLS: when the connecting side switches to DTLS and connects (after the other side's punches arrived).
+		uint64_t connect_at_usec = 0;
+		// DTLS: when the punching starts, once the registration's disconnection is over on both sides.
+		uint64_t punch_at_usec = 0;
 		// The engines were told this peer is connected.
 		bool reported = false;
 	};
@@ -104,10 +115,15 @@ private:
 	Compression compression = COMPRESSION_RANGE_CODER;
 	double punch_timeout = 3.0;
 	bool direct_connections = true;
+	Ref<TLSOptions> tls_options;
+	bool encrypted = false;
 
 	// Host: the listening socket, its players and the introductions in progress.
 	Ref<RefCounted> listener;
+	// With DTLS, the plain socket where the pairs register their endpoints.
+	Ref<RefCounted> rendezvous;
 	int max_players = 32;
+	HashMap<int, String> member_certificates;
 	int next_player_id = 2;
 	HashMap<int, Ref<RefCounted>> members;
 	HashMap<ObjectID, int> members_by_link;
@@ -117,6 +133,10 @@ private:
 	// Player: the host's socket and link, and the other players.
 	String host_address;
 	int host_port = 0;
+	int host_rendezvous_port = 0;
+	// DTLS: this player's key and self-signed certificate, for the direct links it accepts.
+	Ref<CryptoKey> player_key;
+	Ref<X509Certificate> player_certificate;
 	Ref<RefCounted> host_socket;
 	Ref<RefCounted> host_link;
 	HashMap<int, Pair> pairs;
@@ -147,7 +167,10 @@ private:
 
 	// Host.
 	void host_poll();
-	void host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data);
+	void host_service(const Ref<RefCounted> &p_socket);
+	// Sends both players their partner's endpoint once both registered (and, with DTLS, the certificate is known).
+	void host_try_punch(uint64_t p_key);
+	void host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data, bool p_rendezvous);
 	void host_on_disconnect(const Ref<RefCounted> &p_link);
 	void host_on_receive(int p_from, int p_channel, const uint8_t *p_data, int p_size, int p_flags);
 	void host_introduce(int p_first, int p_second);
@@ -159,7 +182,10 @@ private:
 	void player_service_host();
 	void player_on_control(const uint8_t *p_data, int p_size);
 	void player_open_pair(int p_peer, uint32_t p_registration_token);
+	// The registration is closed and the endpoint known: punching starts (with DTLS, a moment later).
+	void player_endpoint_ready(int p_peer, Pair &r_pair);
 	void player_start_punching(int p_peer, Pair &r_pair);
+	void player_connect_pair(int p_peer, Pair &r_pair);
 	void player_service_pair(int p_peer, Pair &r_pair);
 	void player_fail_pair(int p_peer, Pair &r_pair);
 	void player_set_relayed(int p_peer);
@@ -177,12 +203,16 @@ protected:
 
 public:
 	// Hosts a mesh on `p_port`: this node is player 1, and the others join through it.
-	static Ref<EnetHostedMeshTransport> create_host(int p_port, int p_max_players = 32, const String &p_bind_address = "*", Compression p_compression = COMPRESSION_RANGE_CODER);
-	// Joins the mesh hosted at `p_address`; the host gives this node its id.
-	static Ref<EnetHostedMeshTransport> create_player(const String &p_address, int p_port, Compression p_compression = COMPRESSION_RANGE_CODER);
+	// With `p_tls_options` (`TLSOptions.server()`), the links are encrypted, and the pairs register on
+	// `p_rendezvous_port` (the next port by default), which must be reachable too.
+	static Ref<EnetHostedMeshTransport> create_host(int p_port, int p_max_players = 32, const String &p_bind_address = "*", Compression p_compression = COMPRESSION_RANGE_CODER, const Ref<TLSOptions> &p_tls_options = Ref<TLSOptions>(), int p_rendezvous_port = 0);
+	// Joins the mesh hosted at `p_address`; the host gives this node its id. With `p_tls_options` (`TLSOptions.client()`
+	// or `client_unsafe()`), the host must use DTLS too.
+	static Ref<EnetHostedMeshTransport> create_player(const String &p_address, int p_port, Compression p_compression = COMPRESSION_RANGE_CODER, const Ref<TLSOptions> &p_tls_options = Ref<TLSOptions>(), const String &p_tls_hostname = String());
 
 	Status get_status() const { return status; }
 	bool is_hosting() const { return is_host; }
+	bool is_encrypted() const { return encrypted; }
 	PeerPath get_peer_path(int p_peer) const;
 	PackedInt32Array get_peers() const;
 	Dictionary get_stats() const;

@@ -19,13 +19,20 @@ struct HostedMesh {
 	int count = 0;
 	Ref<Mesh> nodes[6];
 
-	HostedMesh(int p_players, int p_relay_only_player = 0) {
-		port = 43000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
-		nodes[1] = Mesh::create_host(port, 8);
-		CHECK(nodes[1].is_valid());
+	// With TLS options, the mesh uses DTLS (the host also opens `port + 1` for the rendezvous).
+	HostedMesh(int p_players, int p_relay_only_player = 0, const Ref<TLSOptions> &p_host_tls = Ref<TLSOptions>(), const Ref<TLSOptions> &p_player_tls = Ref<TLSOptions>()) {
+		// A random port pair, tried again if another program uses it (the caller's error printing is kept).
+		const bool printing = CoreGlobals::print_error_enabled;
+		CoreGlobals::print_error_enabled = false;
+		for (int attempt = 0; attempt < 10 && nodes[1].is_null(); attempt++) {
+			port = 43000 + 2 * int((OS::get_singleton()->get_ticks_usec() + uint64_t(attempt) * 7919) % 5000);
+			nodes[1] = Mesh::create_host(port, 8, "*", Mesh::COMPRESSION_RANGE_CODER, p_host_tls);
+		}
+		CoreGlobals::print_error_enabled = printing;
+		REQUIRE(nodes[1].is_valid());
 		count = 1;
 		for (int id = 2; id <= p_players + 1; id++) {
-			nodes[id] = Mesh::create_player("127.0.0.1", port);
+			nodes[id] = Mesh::create_player("127.0.0.1", port, Mesh::COMPRESSION_RANGE_CODER, p_player_tls, "localhost");
 			CHECK(nodes[id].is_valid());
 			nodes[id]->set_direct_connections(id != p_relay_only_player);
 			count = id;
@@ -36,9 +43,11 @@ struct HostedMesh {
 	}
 
 	~HostedMesh() {
-		for (int i = 1; i <= count; i++) {
+		// Players first, each after the others saw the previous one leave: a DTLS link to a closed port reports errors.
+		for (int i = count; i >= 1; i--) {
 			if (nodes[i].is_valid()) {
 				nodes[i]->close();
+				poll(50);
 			}
 		}
 	}
@@ -281,6 +290,56 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Dolls work acros
 			memdelete(movers[peer][controller]);
 		}
 	}
+}
+
+struct TestCertificate {
+	Ref<CryptoKey> key;
+	Ref<X509Certificate> certificate;
+
+	TestCertificate() {
+		Ref<Crypto> crypto = Ref<Crypto>(Crypto::create());
+		key = crypto->generate_rsa(2048);
+		certificate = crypto->generate_self_signed_certificate(key, "CN=localhost,O=TickSynchronizer,C=BR", "20250101000000", "20350101000000");
+	}
+};
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] DTLS on the host links, the direct links and the relay") {
+	TestCertificate host;
+	REQUIRE(host.certificate.is_valid());
+	// Player 4 is relayed: the pairs with it go through the host's encrypted links.
+	HostedMesh mesh(3, 4, TLSOptions::server(host.key, host.certificate), TLSOptions::client(host.certificate));
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	for (int i = 1; i <= 4; i++) {
+		CHECK(mesh.nodes[i]->is_encrypted());
+	}
+	// The DTLS overhead is subtracted from the payload size.
+	CHECK(mesh.nodes[2]->get_max_payload_size() < 1350);
+	// A punched DTLS link, each side pinning the other's certificate through the host.
+	CHECK(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_DIRECT);
+	CHECK(mesh.nodes[3]->get_peer_path(2) == Mesh::PATH_DIRECT);
+	CHECK(mesh.nodes[2]->get_peer_path(4) == Mesh::PATH_RELAYED);
+
+	const uint8_t payload[3] = { 5, 6, 7 };
+	CHECK(mesh.nodes[3]->send(2, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, payload, 3) == OK);
+	CHECK(mesh.receive(2, 3, TICK_CHANNEL_INPUTS));
+	CHECK(mesh.nodes[2]->send(4, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK);
+	CHECK(mesh.receive(4, 2, TICK_CHANNEL_CONTROL));
+	CHECK(mesh.nodes[4]->send(1, TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK);
+	CHECK(mesh.receive(1, 4, TICK_CHANNEL_STATE));
+	CHECK(int(mesh.nodes[1]->get_stats()["rejected_connections"]) == 0);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that doesn't trust the host's certificate can't join") {
+	TestCertificate host;
+	TestCertificate other;
+	REQUIRE(other.certificate.is_valid());
+	ERR_PRINT_OFF;
+	HostedMesh mesh(1, 0, TLSOptions::server(host.key, host.certificate), TLSOptions::client(other.certificate));
+	mesh.poll(500);
+	ERR_PRINT_ON;
+	CHECK(mesh.nodes[2]->get_status() != Mesh::STATUS_CONNECTED);
+	CHECK(mesh.nodes[1]->get_peers().is_empty());
 }
 
 } // namespace TestEnetHostedMesh

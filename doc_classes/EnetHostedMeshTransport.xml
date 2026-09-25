@@ -16,7 +16,8 @@
 		multiplayer.multiplayer_peer = mesh.get_multiplayer_peer()
 		$Game.start(mesh)
 		[/codeblock]
-		[b]Note:[/b] there's no DTLS: the connection tokens and the packets travel in the clear. The host doesn't migrate: if it leaves, the mesh ends.
+		[b]DTLS:[/b] pass [TLSOptions] to [method create_host] ([method TLSOptions.server]) and [method create_player] ([method TLSOptions.client], or [method TLSOptions.client_unsafe] for testing) to encrypt every link. The direct links between players use a certificate each player generates when it joins; the host hands it to the other player of the pair, who accepts only that certificate. A DTLS socket only takes DTLS, so the players register their endpoints on a second, plain port of the host (the rendezvous port, the next port by default), which must be reachable too; only single-use tokens go through it.
+		[b]Note:[/b] the host doesn't migrate: if it leaves, the mesh ends.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -33,8 +34,10 @@
 			<param index="1" name="max_players" type="int" default="32" />
 			<param index="2" name="bind_address" type="String" default="&quot;*&quot;" />
 			<param index="3" name="compression" type="int" enum="EnetHostedMeshTransport.Compression" default="1" />
+			<param index="4" name="tls_options" type="TLSOptions" default="null" />
+			<param index="5" name="rendezvous_port" type="int" default="0" />
 			<description>
-				Hosts a mesh on [param port] for up to [param max_players] players (the host included). The [param compression] mode must be the same on every node. Returns [code]null[/code] on failure.
+				Hosts a mesh on [param port] for up to [param max_players] players (the host included). The [param compression] mode must be the same on every node. With [param tls_options] ([method TLSOptions.server]), the mesh uses DTLS, and the pairs register on [param rendezvous_port] ([param port] + 1 when 0). Returns [code]null[/code] on failure.
 			</description>
 		</method>
 		<method name="create_player" qualifiers="static">
@@ -42,8 +45,10 @@
 			<param index="0" name="address" type="String" />
 			<param index="1" name="port" type="int" />
 			<param index="2" name="compression" type="int" enum="EnetHostedMeshTransport.Compression" default="1" />
+			<param index="3" name="tls_options" type="TLSOptions" default="null" />
+			<param index="4" name="tls_hostname" type="String" default="&quot;&quot;" />
 			<description>
-				Joins the mesh hosted at [param address]:[param port]; the id comes from the host (see [method get_status]). Returns [code]null[/code] on failure.
+				Joins the mesh hosted at [param address]:[param port]; the id comes from the host (see [method get_status]). With [param tls_options] ([method TLSOptions.client] or [method TLSOptions.client_unsafe]), the host must use DTLS too; [param tls_hostname] is the name checked in the host's certificate ([param address] when empty). Joining with DTLS generates an RSA key for the player, which can take a moment. Returns [code]null[/code] on failure.
 			</description>
 		</method>
 		<method name="get_multiplayer_peer">
@@ -75,6 +80,11 @@
 			<return type="int" enum="EnetHostedMeshTransport.Status" />
 			<description>
 				Returns the connection status. A player is [constant STATUS_CONNECTING] until the host gives it an id.
+			</description>
+		</method>
+		<method name="is_encrypted" qualifiers="const">
+			<return type="bool" />
+			<description>
 			</description>
 		</method>
 		<method name="is_hosting" qualifiers="const">
