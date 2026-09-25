@@ -17,7 +17,7 @@
 		$Game.start(mesh)
 		[/codeblock]
 		[b]DTLS:[/b] pass [TLSOptions] to [method create_host] ([method TLSOptions.server]) and [method create_player] ([method TLSOptions.client], or [method TLSOptions.client_unsafe] for testing) to encrypt every link. The direct links between players use a certificate each player generates when it joins; the host hands it to the other player of the pair, who accepts only that certificate. A DTLS socket only takes DTLS, so the players register their endpoints on a second, plain port of the host (the rendezvous port, the next port by default), which must be reachable too; only single-use tokens go through it.
-		[b]Note:[/b] the host doesn't migrate: if it leaves, the mesh ends.
+		[b]Host migration:[/b] the host keeps every player informed of a succession (players without relayed pairs first, then by id). When the host leaves or stops answering (see [member host_timeout]), the first player of the succession still in the mesh becomes the host: its direct links become the host links, and the others follow it through their direct link with it. A [TickNetwork] with [constant TickNetwork.AUTHORITY_SINGLE] moves its authority to the new host (see [signal TickNetwork.host_migrated]). A player that can't reach the new host directly leaves the mesh. The new host has no listening port, so no new players can join after a migration.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -51,6 +51,12 @@
 				Joins the mesh hosted at [param address]:[param port]; the id comes from the host (see [method get_status]). With [param tls_options] ([method TLSOptions.client] or [method TLSOptions.client_unsafe]), the host must use DTLS too; [param tls_hostname] is the name checked in the host's certificate ([param address] when empty). Joining with DTLS generates an RSA key for the player, which can take a moment. Returns [code]null[/code] on failure.
 			</description>
 		</method>
+		<method name="get_host_peer" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the id of the node that hosts the mesh now: 1, or its successor after a migration.
+			</description>
+		</method>
 		<method name="get_multiplayer_peer">
 			<return type="TickMultiplayerPeer" />
 			<description>
@@ -82,9 +88,16 @@
 				Returns the connection status. A player is [constant STATUS_CONNECTING] until the host gives it an id.
 			</description>
 		</method>
+		<method name="get_succession" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the order in which the players take over when the host leaves, as last sent by the host.
+			</description>
+		</method>
 		<method name="is_encrypted" qualifiers="const">
 			<return type="bool" />
 			<description>
+				Returns [code]true[/code] if the mesh uses DTLS.
 			</description>
 		</method>
 		<method name="is_hosting" qualifiers="const">
@@ -97,6 +110,12 @@
 	<members>
 		<member name="direct_connections" type="bool" setter="set_direct_connections" getter="is_direct_connections_enabled" default="true">
 			When [code]false[/code], this player never tries direct links: every other player is relayed by the host. Set it before joining.
+		</member>
+		<member name="host_migration" type="bool" setter="set_host_migration" getter="is_host_migration_enabled" default="true">
+			When [code]true[/code], a player takes the host's place when it leaves (see the class description); when [code]false[/code], the mesh ends with the host.
+		</member>
+		<member name="host_timeout" type="float" setter="set_host_timeout" getter="get_host_timeout" default="5.0">
+			Seconds without an answer from the host before a player considers it gone. A host that closes the mesh is noticed right away.
 		</member>
 		<member name="punch_timeout" type="float" setter="set_punch_timeout" getter="get_punch_timeout" default="3.0">
 			Seconds to establish a direct link between two players before relaying them.

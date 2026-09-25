@@ -12,6 +12,7 @@
 namespace TestEnetHostedMesh {
 
 typedef EnetHostedMeshTransport Mesh;
+using TestTickSyncCore::TestMover;
 
 // A host (1) and players joining one at a time on localhost, so their ids follow the order (2, 3, ...).
 struct HostedMesh {
@@ -340,6 +341,164 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that do
 	ERR_PRINT_ON;
 	CHECK(mesh.nodes[2]->get_status() != Mesh::STATUS_CONNECTED);
 	CHECK(mesh.nodes[1]->get_peers().is_empty());
+}
+
+// Waits until every node but the removed ones sees `p_expected` peers.
+static bool wait_peer_counts(HostedMesh &r_mesh, const int *p_nodes, int p_node_count, int p_expected, int p_rounds, int p_skip_node) {
+	for (int t = 0; t < p_rounds; t++) {
+		for (int i = 1; i <= r_mesh.count; i++) {
+			if (i != p_skip_node && r_mesh.nodes[i].is_valid()) {
+				r_mesh.nodes[i]->poll();
+			}
+		}
+		OS::get_singleton()->delay_usec(1000);
+		bool done = true;
+		for (int i = 0; i < p_node_count; i++) {
+			done = done && int(r_mesh.nodes[p_nodes[i]]->get_peers().size()) == p_expected;
+		}
+		if (done) {
+			return true;
+		}
+	}
+	return false;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player takes over when the host leaves") {
+	HostedMesh mesh(3);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	// Everyone got the same succession: all direct, so by id.
+	mesh.poll(20);
+	CHECK(mesh.nodes[3]->get_succession() == PackedInt32Array({ 2, 3, 4 }));
+	for (int i = 2; i <= 4; i++) {
+		TickTransport::Event event;
+		while (mesh.nodes[i]->pop_event(event)) {
+		}
+	}
+
+	mesh.nodes[1]->close();
+	const int remaining[3] = { 2, 3, 4 };
+	CHECK(wait_peer_counts(mesh, remaining, 3, 2, 3000, 1));
+	CHECK(mesh.nodes[2]->is_hosting());
+	CHECK(mesh.nodes[3]->get_host_peer() == 2);
+	CHECK(mesh.nodes[4]->get_host_peer() == 2);
+	CHECK(mesh.nodes[3]->get_peer_path(2) == Mesh::PATH_HOST);
+	CHECK(mesh.nodes[3]->get_peer_path(4) == Mesh::PATH_DIRECT);
+	CHECK(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_HOST);
+	// The engines are told the new host first, then that the old one left.
+	TickTransport::Event event;
+	REQUIRE(mesh.nodes[3]->pop_event(event));
+	CHECK(event.type == TickTransport::EVENT_HOST_MIGRATED);
+	CHECK(event.peer == 2);
+	REQUIRE(mesh.nodes[3]->pop_event(event));
+	CHECK(event.type == TickTransport::EVENT_PEER_DISCONNECTED);
+	CHECK(event.peer == 1);
+
+	const uint8_t payload[2] = { 1, 2 };
+	CHECK(mesh.nodes[4]->send(2, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 2) == OK);
+	CHECK(mesh.receive(2, 4, TICK_CHANNEL_CONTROL));
+	CHECK(mesh.nodes[2]->send(TickTransport::PEER_BROADCAST, TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_RELIABLE, payload, 2) == OK);
+	CHECK(mesh.receive(3, 2, TICK_CHANNEL_STATE));
+	CHECK(mesh.nodes[3]->send(4, TICK_CHANNEL_INPUTS, TickTransport::TRANSFER_MODE_UNRELIABLE, payload, 2) == OK);
+	CHECK(mesh.receive(4, 3, TICK_CHANNEL_INPUTS));
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that stops answering is replaced; relayed players are lost") {
+	// Player 4 is only relayed: it can't reach the successor.
+	HostedMesh mesh(3, 4);
+	for (int i = 2; i <= 4; i++) {
+		mesh.nodes[i]->set_host_timeout(1.0);
+	}
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.poll(20);
+	// The relayed player comes last.
+	CHECK(mesh.nodes[2]->get_succession() == PackedInt32Array({ 2, 3, 4 }));
+
+	// The host stops answering (a crash): the players time out and migrate.
+	const int remaining[2] = { 2, 3 };
+	CHECK(wait_peer_counts(mesh, remaining, 2, 1, 6000, 1));
+	CHECK(mesh.nodes[2]->is_hosting());
+	CHECK(mesh.nodes[3]->get_host_peer() == 2);
+	for (int t = 0; t < 1000 && mesh.nodes[4]->get_status() != Mesh::STATUS_DISCONNECTED; t++) {
+		mesh.nodes[4]->poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(mesh.nodes[4]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK_FALSE(mesh.nodes[2]->is_peer_connected(4));
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority migrates with the host") {
+	HostedMesh mesh(3);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+
+	// Every node has the host's NPC (controller 1) and the three players' movers.
+	TickSyncCore cores[5];
+	TestTickSyncCore::TestListener listeners[5];
+	TestMover *movers[5][5] = {};
+	for (int peer = 1; peer <= 4; peer++) {
+		for (int controller = 1; controller <= 4; controller++) {
+			TestMover *mover = memnew(TestMover(controller == 1 ? String("npc") : vformat("mover_%d", controller), controller, TickCodec::PRECISION_SINGLE));
+			mover->constant_direction = true;
+			mover->direction_override = 1;
+			movers[peer][controller] = mover;
+			cores[peer].register_object(mover);
+		}
+		TickTransport::Event event;
+		while (mesh.nodes[peer]->pop_event(event)) {
+		}
+		cores[peer].set_listener(&listeners[peer]);
+		REQUIRE(cores[peer].start(mesh.nodes[peer], OS::get_singleton()->get_ticks_usec()) == OK);
+	}
+	uint64_t last = OS::get_singleton()->get_ticks_usec();
+	int stopped = 0;
+	for (int phase = 0; phase < 2; phase++) {
+		const uint64_t end = last + 2500000;
+		while (OS::get_singleton()->get_ticks_usec() < end) {
+			const uint64_t now = OS::get_singleton()->get_ticks_usec();
+			const double delta = double(now - last) / 1000000.0;
+			last = now;
+			for (int peer = 1; peer <= 4; peer++) {
+				if (peer != stopped) {
+					cores[peer].process(delta, now);
+				}
+			}
+			OS::get_singleton()->delay_usec(2000);
+		}
+		if (phase == 0) {
+			REQUIRE(cores[3].is_predicting());
+			// The host leaves.
+			cores[1].stop();
+			mesh.nodes[1]->close();
+			stopped = 1;
+		}
+	}
+
+	// Player 2 is the authority now; the others joined it again and predict.
+	CHECK(cores[2].is_server());
+	CHECK(listeners[3].ready_peers >= 2);
+	for (int peer = 3; peer <= 4; peer++) {
+		CHECK(cores[peer].get_settings().authority_peer == 2);
+		CHECK(cores[peer].is_welcomed());
+		CHECK(cores[peer].is_predicting());
+		CHECK(cores[peer].get_stats().malformed_packets == 0);
+	}
+	// The old host's NPC is simulated by the new authority and interpolated by the others; the players' inputs reach
+	// the new authority.
+	const real_t npc = movers[2][1]->position.x;
+	const real_t mover_3 = movers[2][3]->position.x;
+	CHECK(npc > 20.0);
+	CHECK(Math::abs(movers[3][1]->position.x - npc) < 1.5);
+	CHECK(mover_3 > 20.0);
+	CHECK(Math::abs(movers[3][3]->position.x - mover_3) < 1.5);
+
+	for (int peer = 1; peer <= 4; peer++) {
+		cores[peer].stop();
+		for (int controller = 1; controller <= 4; controller++) {
+			memdelete(movers[peer][controller]);
+		}
+	}
 }
 
 } // namespace TestEnetHostedMesh

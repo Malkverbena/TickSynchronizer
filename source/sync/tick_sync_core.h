@@ -316,6 +316,11 @@ private:
 	void client_reconcile_dolls(uint32_t p_frame);
 	void client_reset_dolls();
 
+	// Host migration (ADR-062).
+	void handle_host_migrated(int p_new_host);
+	void client_become_server(int p_old_authority);
+	void client_follow_authority(int p_new_authority);
+
 	// Events.
 	bool read_event(TickDataBuffer &p_message, PendingEvent &r_event, int &r_payload_bytes);
 	void write_event(TickDataBuffer &r_message, uint16_t p_target, uint32_t p_frame, const StringName &p_name, const Variant &p_payload);

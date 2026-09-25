@@ -430,7 +430,11 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 
 void TickSyncCore::handle_events() {
 	TickTransport::Event event;
-	while (transport->pop_event(event)) {
+	while (role != ROLE_NONE && transport->pop_event(event)) {
+		if (event.type == TickTransport::EVENT_HOST_MIGRATED) {
+			handle_host_migrated(event.peer);
+			continue;
+		}
 		if (role == ROLE_SERVER) {
 			if (event.type == TickTransport::EVENT_PEER_CONNECTED) {
 				if (!peers.has(event.peer)) {
@@ -2167,6 +2171,143 @@ void TickSyncCore::client_reconcile_dolls(uint32_t p_frame) {
 	}
 }
 
+// ------------------------------------------------------------------------------------------------------ Migration
+
+void TickSyncCore::handle_host_migrated(int p_new_host) {
+	if (role != ROLE_CLIENT || p_new_host == settings.authority_peer) {
+		return;
+	}
+	const int old_authority = settings.authority_peer;
+	if (p_new_host == transport->get_local_peer_id()) {
+		client_become_server(old_authority);
+	} else {
+		client_follow_authority(p_new_host);
+	}
+	if (listener) {
+		listener->on_host_migrated(old_authority, p_new_host);
+	}
+}
+
+void TickSyncCore::client_follow_authority(int p_new_authority) {
+	// A new handshake with the new authority; the objects stay bound (it keeps the net ids).
+	settings.authority_peer = p_new_authority;
+	welcomed = false;
+	rejected = false;
+	predicting = false;
+	needs_full = false;
+	ack_pending = false;
+	latest_snapshot = TICK_FRAME_NONE;
+	last_reconciled = TICK_FRAME_NONE;
+	pending_snapshot = PendingSnapshot();
+	for (SnapshotRecord &record : received) {
+		record.frame = TICK_FRAME_NONE;
+	}
+	for (PredictionRecord &record : predictions) {
+		record.frame = TICK_FRAME_NONE;
+	}
+	client_reset_dolls();
+	clock.clear_samples();
+	last_ping_usec = 0;
+	predicted_ids_dirty = true;
+	if (transport->is_peer_connected(p_new_authority)) {
+		TickDataBuffer hello;
+		hello.begin_write();
+		hello.add_uint_bits(TICK_MESSAGE_HELLO, 8);
+		hello.add_uint_bits(TICK_PROTOCOL_VERSION, 16);
+		hello.add_bool(sizeof(real_t) == sizeof(double));
+		send(p_new_authority, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, hello);
+	}
+}
+
+void TickSyncCore::client_become_server(int p_old_authority) {
+	const int local_peer = transport->get_local_peer_id();
+	// The freshest authoritative state of each object: the last snapshot, except for the objects this peer predicted.
+	client_update_predicted_ids();
+	LocalVector<uint16_t> predicted;
+	predicted = predicted_ids;
+	const SnapshotRecord *latest = client_get_received(latest_snapshot);
+	// The timeline goes on from the old authority's current frame.
+	const bool synchronized = welcomed && clock.is_synchronized();
+	const uint32_t frame = synchronized ? clock.get_master_frame(now_usec) : stepper.get_next_frame_index();
+
+	role = ROLE_SERVER;
+	settings.authority_peer = local_peer;
+	stepper.reset();
+	stepper.set_ticks_per_second(settings.ticks_per_second);
+	stepper.set_time_scale(1.0);
+	stepper.set_next_frame_index(frame);
+	clock.set_master(true);
+	server_epoch_usec = int64_t(now_usec);
+	clock.set_master_epoch_usec(server_compute_epoch());
+	server_history.clear();
+	server_history.resize(settings.history_size);
+	authority_inputs.clear();
+	authority_inputs.resize(settings.history_size);
+	server_objects.clear();
+	server_object_ids.clear();
+	server_ids_by_object.clear();
+	quarantined_ids.clear();
+
+	// The objects keep their net ids; the old authority's own objects (NPCs, its player) are now this peer's.
+	LocalVector<uint16_t> ids;
+	for (const KeyValue<uint16_t, RemoteObject> &E : remote_objects) {
+		if (E.value.object) {
+			ids.push_back(E.key);
+		}
+	}
+	ids.sort();
+	uint16_t highest = 0;
+	for (const uint16_t net_id : ids) {
+		const RemoteObject &remote = remote_objects[net_id];
+		ServerObject object;
+		object.object = remote.object;
+		object.path = remote.path;
+		object.controller = remote.controller == p_old_authority ? local_peer : remote.controller;
+		object.schema_hash = remote.schema_hash;
+		const LocalVector<Variant> *values = latest ? latest->states.getptr(net_id) : nullptr;
+		if (values && !predicted.has(net_id)) {
+			for (uint32_t i = 0; i < values->size(); i++) {
+				remote.object->set_sync_var(int(i), (*values)[i]);
+			}
+		}
+		server_objects.insert(net_id, object);
+		server_ids_by_object.insert(remote.object, net_id);
+		server_object_ids.push_back(net_id);
+		highest = MAX(highest, net_id);
+	}
+	next_net_id = highest + 1;
+
+	// The client's state is over.
+	remote_objects.clear();
+	received.clear();
+	predictions.clear();
+	dolls.clear();
+	predicted_ids.clear();
+	predicted_ids_dirty = true;
+	pending_snapshot = PendingSnapshot();
+	welcomed = false;
+	predicting = false;
+	needs_full = false;
+	latest_snapshot = TICK_FRAME_NONE;
+	last_reconciled = TICK_FRAME_NONE;
+
+	// Every other peer joins again with a handshake.
+	peers.clear();
+	LocalVector<int> connected;
+	transport->get_connected_peers(connected);
+	for (const int peer : connected) {
+		PeerState state;
+		state.inputs.resize(settings.history_size);
+		peers.insert(peer, state);
+	}
+	// Objects registered here that the old authority didn't know.
+	for (const KeyValue<String, TickSyncObject *> &E : local_objects) {
+		if (!server_ids_by_object.has(E.value)) {
+			server_add_object(E.value);
+		}
+	}
+}
+
 // ------------------------------------------------------------------------------------------------------ Spawns
 
 uint32_t TickSyncCore::spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
@@ -2235,6 +2376,18 @@ void TickSyncCore::client_handle_spawn(TickDataBuffer &p_message) {
 		return;
 	}
 	stats.spawns++;
+	// Kept, so this client can take over the spawns if it becomes the authority (ADR-062).
+	if (!spawns.has(spawn_id)) {
+		SpawnRecord record;
+		record.spawner = spawner;
+		record.scene = scene;
+		record.name = name;
+		record.controller = controller;
+		record.data = data;
+		spawns.insert(spawn_id, record);
+		spawn_order.push_back(spawn_id);
+		next_spawn_id = MAX(next_spawn_id, spawn_id + 1);
+	}
 	if (listener) {
 		listener->on_spawn(spawner, spawn_id, scene, name, controller, data);
 	}
@@ -2248,6 +2401,8 @@ void TickSyncCore::client_handle_despawn(TickDataBuffer &p_message) {
 		return;
 	}
 	stats.despawns++;
+	spawns.erase(spawn_id);
+	spawn_order.erase(spawn_id);
 	if (listener) {
 		listener->on_despawn(spawner, spawn_id);
 	}

@@ -132,7 +132,7 @@
 			[constant AUTHORITY_SINGLE]: one peer ([member authority_peer]) simulates every object — the server of a star, or one node of a mesh. [constant AUTHORITY_DISTRIBUTED]: every object has an owner node that simulates it and sends its state to the other nodes, and ownership can change (see [method TickObject.request_authority]); for trusted meshes of servers, without prediction.
 		</member>
 		<member name="authority_peer" type="int" setter="set_authority_peer" getter="get_authority_peer" default="1">
-			With [constant AUTHORITY_SINGLE]: the peer that simulates every object, is the destination of inputs and events, and is the clock master — the hub of a star (1), or the node of a mesh chosen by the project.
+			With [constant AUTHORITY_SINGLE]: the peer that simulates every object, is the destination of inputs and events, and is the clock master — the hub of a star (1), or the node of a mesh chosen by the project. It changes with a host migration (see [signal host_migrated]).
 		</member>
 		<member name="clock_master" type="int" setter="set_clock_master" getter="get_clock_master" default="1">
 			With [constant AUTHORITY_DISTRIBUTED]: the node whose timeline the others follow.
@@ -225,6 +225,13 @@
 			<param index="3" name="frame" type="int" />
 			<description>
 				Emitted when an event without target object runs: on the server for events from clients, on clients for events from the server ([param sender] is 1). [param frame] is the frame the event was sent for.
+			</description>
+		</signal>
+		<signal name="host_migrated">
+			<param index="0" name="old_host" type="int" />
+			<param index="1" name="new_host" type="int" />
+			<description>
+				With [constant AUTHORITY_SINGLE] over an [EnetHostedMeshTransport]: the host [param old_host] left and [param new_host] is the authority now. The new authority goes on from the latest state it had, with the same objects and timeline; the objects the old host controlled (its NPCs and its own player) are now controlled by the new one, so the game may want to remove the old host's player. The others join the new authority again, like after a reconnection.
 			</description>
 		</signal>
 		<signal name="peer_left">

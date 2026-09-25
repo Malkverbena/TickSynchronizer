@@ -135,7 +135,10 @@ void TickSpawner::_on_spawned_exiting(uint32_t p_spawn_id) {
 }
 
 void TickSpawner::client_spawn(uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
-	ERR_FAIL_COND_MSG(nodes_by_spawn.has(p_spawn_id), vformat("Spawn %d already exists.", p_spawn_id));
+	if (nodes_by_spawn.has(p_spawn_id)) {
+		// Sent again by a new host after a migration.
+		return;
+	}
 	Node *parent = get_node_or_null(spawn_path);
 	ERR_FAIL_NULL_MSG(parent, "TickSpawner can't find the node at `spawn_path`.");
 	ERR_FAIL_COND_MSG(p_name.validate_node_name() != p_name || parent->has_node(NodePath(p_name)), vformat("Can't spawn a node named \"%s\".", p_name));

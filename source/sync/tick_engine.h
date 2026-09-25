@@ -43,6 +43,8 @@ public:
 		virtual int filter_relevance(int p_peer, TickSyncObject *p_object) { return -1; }
 		// Client: the server started or stopped sending the state of a local object.
 		virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) {}
+		// The host of a mesh left and `p_new_host` became the authority (ADR-062).
+		virtual void on_host_migrated(int p_old_host, int p_new_host) {}
 	};
 
 	struct Settings {

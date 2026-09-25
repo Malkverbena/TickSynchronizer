@@ -338,6 +338,10 @@ void TickMeshCore::on_peer_ready(int p_peer) {
 void TickMeshCore::handle_events() {
 	TickTransport::Event event;
 	while (transport->pop_event(event)) {
+		if (event.type == TickTransport::EVENT_HOST_MIGRATED) {
+			// The distributed mesh doesn't migrate its registry (the old host's objects become orphans).
+			continue;
+		}
 		if (event.type == TickTransport::EVENT_PEER_CONNECTED) {
 			if (!peers.has(event.peer)) {
 				peers.insert(event.peer, PeerState());

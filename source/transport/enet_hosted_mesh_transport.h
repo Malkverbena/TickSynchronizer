@@ -111,6 +111,12 @@ private:
 
 	bool is_host = false;
 	int local_id = 0;
+	// The node that hosts the mesh now: 1, or the successor after a migration.
+	int host_id = PEER_SERVER;
+	// Host migration (ADR-062): the order in which players take over when the host leaves, sent by the host.
+	bool host_migration = true;
+	double host_timeout = 5.0;
+	LocalVector<int> succession;
 	Status status = STATUS_DISCONNECTED;
 	Compression compression = COMPRESSION_RANGE_CODER;
 	double punch_timeout = 3.0;
@@ -127,6 +133,8 @@ private:
 	int next_player_id = 2;
 	HashMap<int, Ref<RefCounted>> members;
 	HashMap<ObjectID, int> members_by_link;
+	// After a migration: each member's link is on the socket of the former direct link.
+	HashMap<int, Ref<RefCounted>> member_sockets;
 	HashMap<uint64_t, Introduction> introductions;
 	HashMap<uint32_t, uint64_t> introductions_by_token;
 
@@ -167,10 +175,12 @@ private:
 
 	// Host.
 	void host_poll();
-	void host_service(const Ref<RefCounted> &p_socket);
+	// `p_kind`: 0 the main socket, 1 the rendezvous one, 2 a member's own socket (after a migration).
+	void host_service(const Ref<RefCounted> &p_socket, int p_kind);
+	void host_send_succession();
 	// Sends both players their partner's endpoint once both registered (and, with DTLS, the certificate is known).
 	void host_try_punch(uint64_t p_key);
-	void host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data, bool p_rendezvous);
+	void host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data, int p_kind);
 	void host_on_disconnect(const Ref<RefCounted> &p_link);
 	void host_on_receive(int p_from, int p_channel, const uint8_t *p_data, int p_size, int p_flags);
 	void host_introduce(int p_first, int p_second);
@@ -193,6 +203,11 @@ private:
 	void player_report_connected(int p_peer, Pair &r_pair);
 	void player_report_disconnected(int p_peer, Pair &r_pair);
 	void player_lost_host();
+	// The host left: the first living player of the succession takes over. `false` when there's none to reach.
+	bool player_migrate(int p_old_host);
+	void player_become_host(int p_old_host);
+	void player_follow_host(int p_old_host, int p_new_host);
+	void apply_host_timeout(const Ref<RefCounted> &p_link);
 
 	// Multiplayer peer.
 	void attach_multiplayer_peer(TickMultiplayerPeer *p_peer);
@@ -214,6 +229,8 @@ public:
 	bool is_hosting() const { return is_host; }
 	bool is_encrypted() const { return encrypted; }
 	PeerPath get_peer_path(int p_peer) const;
+	int get_host_peer() const { return is_host ? local_id : host_id; }
+	PackedInt32Array get_succession() const;
 	PackedInt32Array get_peers() const;
 	Dictionary get_stats() const;
 
@@ -223,6 +240,12 @@ public:
 	// When `false`, this player never tries direct links: every other player is relayed by the host.
 	void set_direct_connections(bool p_enabled);
 	bool is_direct_connections_enabled() const { return direct_connections; }
+	// When the host leaves, a player takes its place (ADR-062) instead of the mesh ending.
+	void set_host_migration(bool p_enabled) { host_migration = p_enabled; }
+	bool is_host_migration_enabled() const { return host_migration; }
+	// Seconds without an answer from the host before a player considers it gone.
+	void set_host_timeout(double p_seconds);
+	double get_host_timeout() const { return host_timeout; }
 
 	// A `MultiplayerPeer` on this mesh, for `SceneMultiplayer` (RPCs, spawners, synchronizers).
 	Ref<TickMultiplayerPeer> get_multiplayer_peer();

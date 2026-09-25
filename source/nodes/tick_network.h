@@ -64,6 +64,7 @@ public:
 	virtual void on_authority_request_denied(TickSyncObject *p_object) override;
 	virtual int filter_relevance(int p_peer, TickSyncObject *p_object) override;
 	virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) override;
+	virtual void on_host_migrated(int p_old_host, int p_new_host) override;
 
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const;

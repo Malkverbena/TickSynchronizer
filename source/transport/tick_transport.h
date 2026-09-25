@@ -27,6 +27,9 @@ public:
 	enum EventType {
 		EVENT_PEER_CONNECTED,
 		EVENT_PEER_DISCONNECTED,
+		// The host of the mesh left and `peer` took its place (`EnetHostedMeshTransport`); sent before the old host's
+		// disconnection. Engines that don't migrate ignore it.
+		EVENT_HOST_MIGRATED,
 	};
 
 	struct Event {
