@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickObject" inherits="Node" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Synchronizes properties of a node through a [TickNetwork].
+	</brief_description>
+	<description>
+		Add a [TickObject] as a child of the node to synchronize (see [member root_path]) and extend it with a script. Declare the synchronized properties in [method _setup_sync], write the controller's input in [method _collect_input] and advance the object by one tick in [method _process_tick].
+		The server simulates the object with the input of its [member controller_peer]. That client predicts it; every other client interpolates it, or simulates it as a doll (see [member remote_mode]).
+		[codeblock]
+		extends TickObject
+
+		func _setup_sync():
+			declare_var("position", TickCodec.vector3(TickCodec.PRECISION_HALF))
+
+		func _collect_input(input: DataBuffer):
+			input.add_vector2(Input.get_vector("left", "right", "up", "down"), DataBuffer.COMPRESSION_LEVEL_2)
+
+		func _process_tick(delta: float, input: DataBuffer):
+			var direction := Vector2()
+			if input.get_size() &gt; 0:
+				direction = input.read_vector2(DataBuffer.COMPRESSION_LEVEL_2)
+			get_root_node().position += Vector3(direction.x, 0.0, direction.y) * 5.0 * delta
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="_apply_interpolated_state" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="state" type="Dictionary" />
+			<description>
+				Called on peers that interpolate this object, with the interpolated value of each declared property. If not overridden, the properties are set on the root node.
+			</description>
+		</method>
+		<method name="_approve_authority_request" qualifiers="virtual">
+			<return type="bool" />
+			<param index="0" name="requester" type="int" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: called on the owner when [param requester] asks for this object; return [code]false[/code] to refuse. If not overridden, requests are approved. Assignments ([method assign_authority]) can't be refused.
+			</description>
+		</method>
+		<method name="_collect_input" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="input" type="DataBuffer" />
+			<description>
+				Called on the controller, once per tick, to write the input of this tick in [param input]. Not called during rewinds: the stored inputs are used.
+			</description>
+		</method>
+		<method name="_on_authority_changed" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="old_owner" type="int" />
+			<param index="1" name="new_owner" type="int" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: called on every node when the owner of this object changes ([param new_owner] is 0 when nobody owns it).
+			</description>
+		</method>
+		<method name="_on_event" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="sender" type="int" />
+			<param index="1" name="event" type="StringName" />
+			<param index="2" name="payload" type="Variant" />
+			<param index="3" name="frame" type="int" />
+			<description>
+				Runs an event sent to this object by [param sender] (see [method send_event]). [param frame] is the frame the event was sent for; on the server, a client event runs at that frame, or at the next one if it already passed.
+			</description>
+		</method>
+		<method name="_on_relevance_changed" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="relevant" type="bool" />
+			<description>
+				Client: called when the server starts or stops sending this object's state (see [member TickNetwork.interest_filter]).
+			</description>
+		</method>
+		<method name="_process_tick" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="delta" type="float" />
+			<param index="1" name="input" type="DataBuffer" />
+			<description>
+				Advances the object by one tick. [param input] holds the controller's input; it's empty (size 0) when no input is available. Called on the server, on the predicting client and on the peers that simulate the object as a doll, also during rewinds (see [method is_rewinding]).
+			</description>
+		</method>
+		<method name="_setup_sync" qualifiers="virtual">
+			<return type="void" />
+			<description>
+				Called once, before the object is registered in the network. Declare the synchronized properties here with [method declare_var].
+			</description>
+		</method>
+		<method name="_validate_event" qualifiers="virtual">
+			<return type="bool" />
+			<param index="0" name="sender" type="int" />
+			<param index="1" name="event" type="StringName" />
+			<param index="2" name="payload" type="Variant" />
+			<description>
+				Called on the server for each event a client sends to this object; return [code]false[/code] to refuse it. If not overridden, [member TickNetwork.trust] decides: untrusted networks only accept events from the [member controller_peer].
+			</description>
+		</method>
+		<method name="assign_authority">
+			<return type="int" enum="Error" />
+			<param index="0" name="peer" type="int" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry to give this object to [param peer]. An orphan is assigned directly, from its last known state; an owned object is transferred without asking its owner. Used, for example, to adopt orphans (see [signal TickNetwork.authority_orphaned]).
+			</description>
+		</method>
+		<method name="declare_var">
+			<return type="void" />
+			<param index="0" name="property" type="StringName" />
+			<param index="1" name="codec" type="TickCodec" />
+			<description>
+				Declares a property of the root node to synchronize, encoded with [param codec]. Nested properties use the property path syntax, for example [code]"transform:origin"[/code]. Only valid inside [method _setup_sync].
+			</description>
+		</method>
+		<method name="get_declared_vars" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the names of the declared properties.
+			</description>
+		</method>
+		<method name="get_net_id" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the network id of this object, or 0 if it isn't synchronized yet.
+			</description>
+		</method>
+		<method name="get_network" qualifiers="const">
+			<return type="TickNetwork" />
+			<description>
+				Returns the [TickNetwork] this object is registered in.
+			</description>
+		</method>
+		<method name="get_owner_peer" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the node that currently simulates this object: the network's authority with [constant TickNetwork.AUTHORITY_SINGLE], or the current owner with [constant TickNetwork.AUTHORITY_DISTRIBUTED] (0 when nobody owns it).
+			</description>
+		</method>
+		<method name="get_root_node" qualifiers="const">
+			<return type="Node" />
+			<description>
+				Returns the node whose properties are synchronized.
+			</description>
+		</method>
+		<method name="get_state_at" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="frame" type="float" />
+			<description>
+				Returns this object's state at [param frame]; see [method TickNetwork.get_state_at].
+			</description>
+		</method>
+		<method name="is_owner" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if this peer simulates the object.
+			</description>
+		</method>
+		<method name="is_relevant" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if this peer gets this object's state; always [code]true[/code] on the server.
+			</description>
+		</method>
+		<method name="is_rewinding" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while the network simulates again past frames. Use it to skip side effects.
+			</description>
+		</method>
+		<method name="release_authority">
+			<return type="int" enum="Error" />
+			<param index="0" name="to_peer" type="int" default="0" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: the owner gives this object to [param to_peer], or leaves it orphaned with 0. The object stops being simulated here right away; the new owner continues from its state.
+			</description>
+		</method>
+		<method name="request_authority">
+			<return type="int" enum="Error" />
+			<description>
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry for this object. The owner may refuse ([method _approve_authority_request]); a request that arrives while another transfer of the object is in progress is refused ([signal TickNetwork.authority_request_denied]). Once transferred, [method _on_authority_changed] is called on every node.
+			</description>
+		</method>
+		<method name="send_event">
+			<return type="int" enum="Error" />
+			<param index="0" name="event" type="StringName" />
+			<param index="1" name="payload" type="Variant" default="null" />
+			<param index="2" name="frame" type="int" default="-1" />
+			<param index="3" name="peer" type="int" default="0" />
+			<description>
+				Sends an event to this object on the other side. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts), and the server calls [method _validate_event] then [method _on_event]. From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. Events aren't repeated during rewinds.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="controller_peer" type="int" setter="set_controller_peer" getter="get_controller_peer" default="1">
+			Peer whose input drives this object: 1 for the server (NPCs, the host), or a client id. With [constant TickNetwork.AUTHORITY_DISTRIBUTED], the node that owns the object at first. It can't change while the object is registered.
+		</member>
+		<member name="network_path" type="NodePath" setter="set_network_path" getter="get_network_path" default="NodePath(&quot;&quot;)">
+			Path to the [TickNetwork]. If empty, the first [TickNetwork] ancestor is used, or else the first one in the scene.
+		</member>
+		<member name="remote_mode" type="int" setter="set_remote_mode" getter="get_remote_mode" enum="TickObject.RemoteMode" default="0">
+			How the peers that don't control this object show it, with [constant TickNetwork.AUTHORITY_SINGLE]. It can't change while the object is registered, and should be the same on every peer.
+		</member>
+		<member name="root_path" type="NodePath" setter="set_root_path" getter="get_root_path" default="NodePath(&quot;..&quot;)">
+			Path to the node whose properties are synchronized.
+		</member>
+	</members>
+	<constants>
+		<constant name="REMOTE_MODE_INTERPOLATE" value="0" enum="RemoteMode">
+			The object is interpolated between the authority's snapshots, [member TickNetwork.interpolation_delay] behind the authority. The default.
+		</constant>
+		<constant name="REMOTE_MODE_DOLL" value="1" enum="RemoteMode">
+			The object is simulated with its controller's inputs, as a doll: behind the controller by the latency to it plus a small input buffer, and corrected by the authority's snapshots. The controller sends its inputs to every peer it's connected to, so dolls need a mesh ([EnetMeshTransport]); in a star, only the server's objects can be dolls, and the others are interpolated. A doll whose controller stops sending inputs is interpolated again.
+		</constant>
+	</constants>
+</class>

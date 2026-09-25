@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickCodec" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Network encoding of a synchronized variable.
+	</brief_description>
+	<description>
+		A [TickCodec] defines how a variable declared with [method TickObject.declare_var] is written, how much it's quantized, how two values are compared and how they are interpolated.
+		The server and the predicting client quantize the state with the codec every tick, so identical simulations produce identical values and don't cause rewinds. Two values are considered equal when they differ by no more than [method get_tolerance].
+		[codeblock]
+		func _setup_sync():
+			declare_var("position", TickCodec.vector3(TickCodec.PRECISION_HALF))
+			declare_var("velocity", TickCodec.vector3_ranged(-20.0, 20.0, 12))
+			declare_var("quaternion", TickCodec.quaternion(10))
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="boolean" qualifiers="static">
+			<return type="TickCodec" />
+			<description>
+				Returns a codec for [bool] values, in 1 bit.
+			</description>
+		</method>
+		<method name="get_bits" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of bits of integer, ranged and quaternion codecs.
+			</description>
+		</method>
+		<method name="get_kind" qualifiers="const">
+			<return type="int" enum="TickCodec.Kind" />
+			<description>
+				Returns the kind of value this codec encodes.
+			</description>
+		</method>
+		<method name="get_precision" qualifiers="const">
+			<return type="int" enum="TickCodec.Precision" />
+			<description>
+				Returns the precision of the floating point based codecs.
+			</description>
+		</method>
+		<method name="get_tolerance" qualifiers="const">
+			<return type="float" />
+			<description>
+				Returns the largest difference for two values to be considered equal: absolute for ranged codecs, relative to the magnitude for [constant KIND_REAL], [constant KIND_VECTOR2] and [constant KIND_VECTOR3]. Defaults to half of the quantization step.
+			</description>
+		</method>
+		<method name="integer" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="bits" type="int" default="32" />
+			<description>
+				Returns a codec for signed [int] values in [param bits] bits (1 to 64), clamped to the range of that size.
+			</description>
+		</method>
+		<method name="interpolate" qualifiers="const">
+			<return type="Variant" />
+			<param index="0" name="from" type="Variant" />
+			<param index="1" name="to" type="Variant" />
+			<param index="2" name="weight" type="float" />
+			<description>
+				Returns the value between [param from] and [param to] at [param weight] (0 to 1). Discrete values (booleans, integers, [method variant]) keep [param from] until [param weight] reaches 1.
+			</description>
+		</method>
+		<method name="is_equal" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="a" type="Variant" />
+			<param index="1" name="b" type="Variant" />
+			<description>
+				Returns [code]true[/code] if [param a] and [param b] differ by no more than [method get_tolerance].
+			</description>
+		</method>
+		<method name="normalized_vector2" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="precision" type="int" enum="TickCodec.Precision" default="0" />
+			<description>
+				Returns a codec for directions ([Vector2] of length 1, or zero), stored as an angle.
+			</description>
+		</method>
+		<method name="normalized_vector3" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="precision" type="int" enum="TickCodec.Precision" default="0" />
+			<description>
+				Returns a codec for directions ([Vector3] of length 1, or zero).
+			</description>
+		</method>
+		<method name="quantize" qualifiers="const">
+			<return type="Variant" />
+			<param index="0" name="value" type="Variant" />
+			<description>
+				Returns [param value] as the other peers receive it.
+			</description>
+		</method>
+		<method name="quaternion" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="bits_per_component" type="int" default="10" />
+			<description>
+				Returns a codec for rotations ([Quaternion]) with the smallest three encoding: 2 bits plus [param bits_per_component] bits for each of three components.
+			</description>
+		</method>
+		<method name="real" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="precision" type="int" enum="TickCodec.Precision" default="0" />
+			<description>
+				Returns a codec for [float] values: 64, 32 or 16 bits according to [param precision].
+			</description>
+		</method>
+		<method name="real_ranged" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="min" type="float" />
+			<param index="1" name="max" type="float" />
+			<param index="2" name="bits" type="int" />
+			<description>
+				Returns a codec for [float] values between [param min] and [param max], quantized uniformly in [param bits] bits (1 to 32). Values outside the range are clamped.
+			</description>
+		</method>
+		<method name="set_tolerance">
+			<return type="void" />
+			<param index="0" name="tolerance" type="float" />
+			<description>
+				Overrides the default tolerance of [method is_equal].
+			</description>
+		</method>
+		<method name="variant" qualifiers="static">
+			<return type="TickCodec" />
+			<description>
+				Returns a codec for any [Variant] (without objects), encoded without compression and compared exactly. Up to 65535 bytes.
+			</description>
+		</method>
+		<method name="vector2" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="precision" type="int" enum="TickCodec.Precision" default="0" />
+			<description>
+				Returns a codec for [Vector2] values; each component is encoded as in [method real].
+			</description>
+		</method>
+		<method name="vector2_ranged" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="min" type="float" />
+			<param index="1" name="max" type="float" />
+			<param index="2" name="bits" type="int" />
+			<description>
+				Returns a codec for [Vector2] values; each component is encoded as in [method real_ranged].
+			</description>
+		</method>
+		<method name="vector3" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="precision" type="int" enum="TickCodec.Precision" default="0" />
+			<description>
+				Returns a codec for [Vector3] values; each component is encoded as in [method real].
+			</description>
+		</method>
+		<method name="vector3_ranged" qualifiers="static">
+			<return type="TickCodec" />
+			<param index="0" name="min" type="float" />
+			<param index="1" name="max" type="float" />
+			<param index="2" name="bits" type="int" />
+			<description>
+				Returns a codec for [Vector3] values; each component is encoded as in [method real_ranged].
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="KIND_BOOL" value="0" enum="Kind">
+			Encodes a [bool].
+		</constant>
+		<constant name="KIND_INT" value="1" enum="Kind">
+			Encodes an [int].
+		</constant>
+		<constant name="KIND_REAL" value="2" enum="Kind">
+			Encodes a [float].
+		</constant>
+		<constant name="KIND_REAL_RANGED" value="3" enum="Kind">
+			Encodes a [float] in a range.
+		</constant>
+		<constant name="KIND_VECTOR2" value="4" enum="Kind">
+			Encodes a [Vector2].
+		</constant>
+		<constant name="KIND_VECTOR2_RANGED" value="5" enum="Kind">
+			Encodes a [Vector2] with components in a range.
+		</constant>
+		<constant name="KIND_NORMALIZED_VECTOR2" value="6" enum="Kind">
+			Encodes a [Vector2] direction.
+		</constant>
+		<constant name="KIND_VECTOR3" value="7" enum="Kind">
+			Encodes a [Vector3].
+		</constant>
+		<constant name="KIND_VECTOR3_RANGED" value="8" enum="Kind">
+			Encodes a [Vector3] with components in a range.
+		</constant>
+		<constant name="KIND_NORMALIZED_VECTOR3" value="9" enum="Kind">
+			Encodes a [Vector3] direction.
+		</constant>
+		<constant name="KIND_QUATERNION" value="10" enum="Kind">
+			Encodes a [Quaternion].
+		</constant>
+		<constant name="KIND_VARIANT" value="11" enum="Kind">
+			Encodes any [Variant] without compression.
+		</constant>
+		<constant name="PRECISION_FULL" value="0" enum="Precision">
+			64 bits reals; the finest level for directions.
+		</constant>
+		<constant name="PRECISION_SINGLE" value="1" enum="Precision">
+			32 bits reals.
+		</constant>
+		<constant name="PRECISION_HALF" value="2" enum="Precision">
+			16 bits reals.
+		</constant>
+		<constant name="PRECISION_LOW" value="3" enum="Precision">
+			16 bits reals; the coarsest level for directions.
+		</constant>
+	</constants>
+</class>

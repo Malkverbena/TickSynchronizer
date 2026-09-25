@@ -1,306 +1,224 @@
 # TickSynchronizer
 
-TickSynchronizer is a C++ module for Godot 4 that is being developed as a transport-independent, benchmark-driven foundation for deterministic real-time multiplayer synchronization.
+**TickSynchronizer** is a C++ module for Godot 4 that provides **tick-based, real-time network
+synchronization**: fixed simulation ticks, client-side prediction, server reconciliation (rewind and
+replay), interpolation, lag compensation and per-object authority, over ENet.
 
-The project currently provides a validated binary buffer, explicit integer and floating-point codecs, a fixed control envelope, a strict experimental handshake, resource limits, deterministic protocol benchmarks, and public diagnostic classes. Prediction, rollback, reconciliation, production transports, and editor tooling remain future work.
+It is a rewrite, inspired by [NetworkSynchronizer](https://github.com/GameNetworking/NetworkSynchronizer)
+(MIT), whose ideas it reuses and extends.
 
-## Project identity
+> **Status:** branch `0.1` — phase F5 done: server-authoritative star networks (prediction, reconciliation,
+> interpolation, spawning, frame-scheduled events, sender validation), meshes between servers with a single
+> authority bridged to each server's clients, and meshes with distributed, transferable authority per object.
+> Peer-to-peer meshes between players come next; see [Roadmap](#roadmap).
 
-- **Module name:** `TickSynchronizer`
-- **Module directory:** `tick_synchronizer`
-- **Supported engine range:** Godot 4.x, version `4.4.0` or newer
-- **Qualified engine baseline:** Godot `4.7.1-stable`
-- **Language baseline:** C++17
-- **Build system:** SCons
-- **License:** MIT, Copyright (c) 2026 Malkverbena
-- **Default precision:** `double`
-- **Supported precision:** `single` and `double`
+## Purpose
 
-The design is conceptually informed by the original `GameNetworking/NetworkSynchronizer` project, but this repository is a new implementation with an explicit wire contract, stronger validation, transport abstraction, and benchmark-driven protocol selection.
+Godot's high-level multiplayer (`SceneMultiplayer`, `MultiplayerSynchronizer`, `MultiplayerSpawner`) replicates
+state and RPCs, but it has **no notion of a network tick**. It offers no prediction, no rollback/reconciliation,
+no snapshot interpolation and no lag compensation. Fast-paced games (shooters, action, sports, racing) need all
+of those to feel responsive and stay consistent across peers.
+
+TickSynchronizer fills that gap. It builds on the engine's networking layer: ENet transport, `SceneMultiplayer`
+authentication, `MultiplayerSpawner`. Game code is written once, and the module decides how each object is
+predicted, validated, corrected and replicated.
+
+## What it provides
+
+| Feature | Description |
+|---|---|
+| **Fixed network tick** | Shared frame index, time bank and sub-ticks; clients speed up or slow down to keep the server input buffer healthy. |
+| **Client-side prediction** | Local inputs are simulated immediately; the server simulates the same inputs authoritatively. |
+| **Reconciliation** | Snapshots are compared per frame; on divergence the client resets to the authoritative state and replays pending inputs. Corrections that do not need a replay are applied directly. |
+| **Remote entities** | Other players are simulated from their inputs ("dolls") or interpolated from state. |
+| **Interpolation** | Objects that are not predicted are interpolated between authoritative states. |
+| **Per-variable quantization** | Each synchronized variable declares a codec (bit width, range, precision) and a comparison tolerance derived from it; the authority quantizes its own state so prediction and validation agree. |
+| **Bandwidth control** | Bit-level encoding, delta state with acknowledged baselines, relevancy groups, partial updates. |
+| **Reliable full snapshots** | Late join, resynchronization and recovery use full snapshots on a dedicated reliable channel. |
+| **Events and scheduled actions** | Reliable, frame-stamped events delivered to the object's authority; actions scheduled on a shared frame with latency compensation. |
+| **Security** | Every message has a sender rule, and the sender is identified by the transport, never by the payload. Optional validation hooks for untrusted peers. |
+| **Diagnostics** | Desync detection with client/server values, network statistics (latency, jitter, packet loss). |
+
+## Network models
+
+A network is configured along four axes (topology, authority, trust, transport). The same game code runs
+in every configuration:
 
 ```mermaid
 flowchart LR
-    Game[Godot game] --> API[TickSynchronizer public API]
-    API --> Session[Future synchronization session]
-    Session --> Protocol[Protocol and codecs]
-    Protocol --> Endpoint[Transport endpoint abstraction]
-    Endpoint --> Network[Network implementation]
+    subgraph star["Authoritative server (STAR + SINGLE)"]
+        s((server)) --- c1((client))
+        s --- c2((client))
+    end
+    subgraph meshA["Mesh with authority (MESH + SINGLE)"]
+        a((authority)) --- p1((peer))
+        a --- p2((peer))
+        p1 --- p2
+    end
+    subgraph meshD["Mesh with per-object authority (MESH + DISTRIBUTED)"]
+        o1((owner A)) --- o2((owner B))
+        o2 --- o3((owner C))
+        o1 --- o3
+    end
 ```
 
-## Supported module layouts
+| Model | Source of truth | Typical use |
+|---|---|---|
+| **Authoritative server** | One server for every object | Server ↔ players |
+| **Mesh with authority** | One configurable node for every object; inputs travel peer-to-peer | Server clusters, or player meshes with a host |
+| **Mesh with per-object authority** | Each object's owner (by default, whoever spawned it), with authority transfer through a configurable registry node | Server clusters that split the simulation, peer-to-peer games |
 
-TickSynchronizer supports both standard Godot module layouts.
+A process can join several networks at once (for example a star with its clients and a mesh with other
+servers). How a game combines them, and which node owns which objects, is up to the game. The module
+provides the mechanisms: authority assignment and transfer, orphaned-authority signals, and a configurable
+clock master and registry node.
 
-### External custom module
+The module does **not** rely on deterministic simulation. There is always a single source of truth per object,
+so physics engines that are not deterministic across platforms (such as Jolt or GodotPhysics) are fine.
 
-Recommended during independent module development:
+## Requirements
 
-```text
-workspace/
-├── godot/
-└── tick_synchronizer/
+| Requirement | Value |
+|---|---|
+| Godot | **4.6 or newer** (the module disables itself on older versions) |
+| Build system | **SCons only** (the module is compiled together with the engine) |
+| Language | C++17, no exceptions (engine flags) |
+| Precision | Both `precision=single` and `precision=double` builds are supported and tested |
+| Transport | ENet |
+| Platforms | Portable to every platform supported by Godot; validated on **linuxbsd, android and windows** |
+
+GDExtension support is planned for a later version.
+
+## Usage (F2)
+
+```gdscript
+# Server (peer 1) or client, sharing the same scene.
+var transport := EnetStarTransport.create_server(7000, 32)            # or create_client("127.0.0.1", 7000)
+$TickNetwork.start(transport)
 ```
 
-Build from the Godot tree:
+```gdscript
+# player_sync.gd — a TickObject child of the synchronized body.
+extends TickObject
 
-```bash
-scons platform=linuxbsd \
-    target=editor \
-    tests=yes \
-    precision=double \
-    custom_modules=../tick_synchronizer \
-    module_tick_synchronizer_enabled=yes
+func _setup_sync():
+	declare_var("position", TickCodec.vector3(TickCodec.PRECISION_HALF))
+
+func _collect_input(input: DataBuffer):
+	input.add_vector2(Input.get_vector("left", "right", "up", "down"), DataBuffer.COMPRESSION_LEVEL_2)
+
+func _process_tick(delta: float, input: DataBuffer):
+	var direction := Vector2()
+	if input.get_size() > 0:
+		direction = input.read_vector2(DataBuffer.COMPRESSION_LEVEL_2)
+	get_root_node().position += Vector3(direction.x, 0.0, direction.y) * 5.0 * delta
 ```
 
-### Conventional in-tree module
+Set `controller_peer` to the id of the client that controls the object (1 for the server), or let a
+`TickSpawner` do it:
 
-The repository may also be placed at:
-
-```text
-godot/modules/tick_synchronizer/
+```gdscript
+# Server: create the player of each client that joins; the clients create the same node.
+func _on_peer_ready(peer: int):
+	$Players/TickSpawner.spawn("res://player.tscn", "Player_%d" % peer, peer)
+	# Run something at the same frame on every peer.
+	$TickNetwork.send_event(&"round_start", null, $TickNetwork.get_event_frame(0.5))
 ```
 
-Then build normally from the Godot root:
+Events sent by clients (`TickObject.send_event()`) run on the server at the frame the client predicted, after
+`_validate_event()`; with the default untrusted setting, only the controller of an object can send it events,
+and the rate and size of what clients send are limited. The class reference
+is in `doc_classes/`; a runnable client/server example is in [`demos/star_headless`](demos/star_headless).
 
-```bash
-scons platform=linuxbsd \
-    target=editor \
-    tests=yes \
-    precision=double \
-    module_tick_synchronizer_enabled=yes
+### Clusters of servers (F4)
+
+A game server can take part in a mesh with other servers and in a star with its own clients at the same time:
+
+```gdscript
+# Mesh between servers: node 1 is the authority and clock master.
+var mesh := EnetMeshTransport.create(my_id, 9000 + my_id)
+for id in other_ids:
+	mesh.add_node(id, addresses[id], 9000 + id)
+$Cluster.trust = TickNetwork.TRUST_TRUSTED
+$Cluster.interpolate_remote = false          # only the final clients interpolate
+$Cluster.start(mesh)
+
+# The star with this server's clients follows the cluster's timeline.
+$Edge.clock_network = NodePath("../Cluster")
+$Edge.start(EnetStarTransport.create_server(7000))
 ```
 
-No source file may assume that the module is necessarily outside the Godot tree.
+A body relayed from the cluster to the clients has a `TickObject` in each network (`network_path`). See
+[`demos/cluster_headless`](demos/cluster_headless).
 
-The validation scripts detect both layouts automatically. In-tree builds omit `custom_modules`; external builds resolve the module path relative to the selected Godot tree.
+### Distributed authority (F5)
+
+In a mesh of trusted servers, every object can have its own owner, which simulates it; ownership changes through a
+registry node, with a version per object so late packets from a former owner are discarded:
+
+```gdscript
+$Mesh.authority_mode = TickNetwork.AUTHORITY_DISTRIBUTED
+$Mesh.registry_peer = 1       # keeps the owners; also the default clock master
+$Mesh.start(mesh_transport)
+
+$Crate/TickObject.request_authority()           # the owner may refuse (_approve_authority_request)
+$Crate/TickObject.release_authority(3)          # give it to node 3 (0: leave it orphaned)
+$Mesh.authority_orphaned.connect(func(object, last_owner, last_frame): object.assign_authority(2))
+```
+
+See [`demos/distributed_headless`](demos/distributed_headless).
+
+## Building
+
+The module is compiled as part of the engine using `custom_modules`:
+
+```sh
+cd /path/to/godot
+scons platform=linuxbsd target=editor custom_modules=/path/to/tick_synchronizer precision=single
+scons platform=linuxbsd target=editor custom_modules=/path/to/tick_synchronizer precision=double
+```
+
+Double-precision binaries get a `.double` suffix. Servers and clients must use the same precision.
+
+Tests (doctest, built with `tests=yes`):
+
+```sh
+bin/godot.linuxbsd.editor.x86_64 --headless --test --test-case="*TickSynchronizer*"
+```
+
+## Layout
 
 ```mermaid
 flowchart TB
-    Source[Same TickSynchronizer sources]
-    Source --> External[External custom_modules layout]
-    Source --> InTree[godot/modules/tick_synchronizer]
-    External --> GodotBuild[Godot SCons build]
-    InTree --> GodotBuild
+    m["tick_synchronizer/"] --> cfg["config.py — build conditions (Godot 4.6+)"]
+    m --> scsub["SCsub — compiles register_types.cpp and everything under source/"]
+    m --> reg["register_types.h/.cpp — class registration"]
+    m --> src["source/ — all module sources"]
+    src --> common["common/ — TickBitArray, TickDataBuffer"]
+    src --> tick["tick/ — TickFixedStepper, TickClock"]
+    src --> codec["codec/ — TickCodec"]
+    src --> sync["sync/ — TickEngine, TickSyncCore (single authority), TickMeshCore (distributed authority), protocol"]
+    src --> transport["transport/ — TickTransport, EnetStarTransport, EnetMeshTransport, TickLocalNetwork (tests)"]
+    src --> nodes["nodes/ — TickNetwork, TickObject, TickSpawner, DataBuffer"]
+    m --> tests["tests/ — doctest suites"]
+    m --> docs["doc_classes/ — class reference"]
+    m --> demos["demos/ — example projects"]
 ```
 
-## Current version contract
+## Roadmap
 
-```text
-script_api=6
-api=4
-wire=0
-wire_revision=2
-benchmark_suite=2
-wire_stable=no
-exact_build_match=yes
-```
+| Phase | Scope |
+|---|---|
+| F0 | Module skeleton, builds on linuxbsd (single and double) |
+| F1 | Core: data buffer, tick clock, transport abstraction |
+| F2 | Prediction and reconciliation, replication, codecs, ENet star transport, public API |
+| F3 | Spawning, events, sender rules and validation |
+| F4–F5 | Mesh networks between servers, per-object authority transfer |
+| F6–F7 | Peer-to-peer meshes between players (direct inputs, NAT traversal, relay) |
+| F8 | Relevancy, history and lag compensation, optimizations |
+| F9 | Validation on android and windows, compatibility check with Godot 4.6 |
 
-- API version 4 identifies the current public module contract.
-- Wire version 0 means the protocol is experimental.
-- Wire revision 2 identifies the current incompatible experimental layout.
-- Benchmark suite version 2 identifies the current corpus and comparison methodology.
-- Report schema 3 records Linux, Windows, Android, and macOS provenance plus
-  the platform CPU execution policy.
-- Client and server module builds, game builds, schemas, and precision must
-  match exactly during the experimental period.
-- The canonical complete Godot version must match exactly; a differing Godot
-  commit is retained as diagnostic provenance and produces a warning.
+## Credits and license
 
-Display the contract with:
-
-```bash
-./scripts/build_and_validate.sh --print-version-contract
-```
-
-## Cross-platform protocol benchmarks
-
-The benchmark core is shared across Linux, Windows, Android, and macOS through
-one SCons compilation graph. Windows executables are cross-compiled from Linux
-with MinGW-w64 or LLVM-MinGW, Android ARM64 executables use the Android NDK
-Clang driver, and local Apple Clang thin builds produce macOS Universal 2
-binaries. See `documentation/BENCHMARKS.md`.
-
-```bash
-./scripts/build_protocol_benchmarks.sh --precision all --jobs 45
-./scripts/build_protocol_benchmarks_android.sh --precision all --jobs 45
-```
-
-```bash
-./scripts/build_protocol_benchmarks_windows_cross.sh --precision all --jobs 45
-```
-
-On a macOS build host:
-
-```bash
-./scripts/build_protocol_benchmarks_macos.sh \
-    --precision all \
-    --clean-first
-```
-
-Private execution-only packages can be exported for qualification machines that
-do not have compilers, SCons, target SDKs, Git, or project sources:
-
-```bash
-./scripts/build_protocol_benchmarks.sh --precision all --jobs 45 --export-package
-./scripts/build_protocol_benchmarks_android.sh --precision all --jobs 45 --export-package
-./scripts/build_protocol_benchmarks_windows_cross.sh --precision all --jobs 45 --toolchain mingw-gcc
-./scripts/build_protocol_benchmarks_macos.sh --precision all --clean-first
-```
-
-Each execution-only runner verifies the package manifest before starting a benchmark.
-
-GitHub distribution is source-only. Generated benchmark executables and
-deployment packages are not published. macOS users build from source with their
-own locally licensed Apple toolchain and SDK on Apple-branded hardware running
-macOS; Apple SDK files are never vendored or copied into this repository.
-
-Official reports require a clean source tree. Linux, Windows, and Android also
-require verified native CPU affinity. ADR 0039 closes the candidate-selection
-stage with 14 measured passing pairs and an explicit informed waiver for the
-two unmeasured Redmi performance-core pairs. The waiver is not recorded as
-measurement evidence. macOS uses the exact scheduler-managed representative
-policy from ADR 0032 and remains the blocking final portability gate.
-
-## Development status
-
-The wire protocol remains experimental. ADR 0039 adopts
-`varint_zigzag_fixed_float` as the default scalar-encoding profile for
-subsequent gameplay protocol design. This selects canonical ULEB128/ZigZag
-integers with fixed-width canonical floats; it does not select stateful framing,
-masks, quantization, recovery policy, transport behavior, or the complete
-production realtime packet format.
-Version-bound implementation state, pending work, and accepted evidence are maintained in
-[`documentation/development/`](documentation/development/). The permanent
-manual describes module behavior and the gates that every accepted source state
-must satisfy.
-
-## Build and validation
-
-Run consistency checks first:
-
-```bash
-./scripts/verify_source_consistency.sh
-```
-
-Normal builds accept clean Godot 4.x source at version 4.4.0 or newer. The
-complete accepted validation and version-specific sanitizer policies remain
-qualified on the exact Godot version and commit recorded in `GODOT_VERSION` and
-`GODOT_COMMIT`.
-
-Module-linked C++ follows Godot's restricted subset without STL containers,
-`auto`, avoidable lambdas, exceptions, or RTTI. The engine-independent benchmark
-may use STL containers, but SCons compiles it with exceptions and RTTI disabled.
-
-Run the complete validation matrix:
-
-```bash
-./scripts/build_and_validate.sh --mode all --precision double --jobs 45
-./scripts/build_and_validate.sh --mode all --precision single --jobs 45
-```
-
-Run the focused sanitizer gate:
-
-```bash
-./scripts/run_sanitized_tests.sh all --jobs 45
-```
-
-The accepted ASAN profile keeps leak detection enabled. Its one version-locked
-Godot 4.7.1 SDL joypad rule and the existing three-rule UBSAN policy are each
-protected by SCons-built unrelated negative controls.
-The two precisions run serially, and the full unrelated LSAN control runs once
-per uninterrupted acceptance batch.
-
-See [`documentation/BUILD.md`](documentation/BUILD.md),
-[`documentation/TESTING.md`](documentation/TESTING.md), and the current
-[`validation record`](documentation/development/VALIDATION.md).
-
-## Protocol benchmark suite
-
-The standalone benchmark suite compares protocol candidates without initializing Godot, Java, JNI, rendering, or a network transport.
-
-Build both precision variants:
-
-```bash
-./scripts/build_protocol_benchmarks.sh --precision all --jobs 45
-```
-
-Run a quick infrastructure check:
-
-```bash
-./scripts/run_protocol_benchmarks.sh --list-cpus
-read -r -p "Linux logical CPU: " LINUX_CPU
-./scripts/run_protocol_benchmarks.sh \
-    --precision all --quick --cpu "$LINUX_CPU" --no-build
-```
-
-Run an official benchmark only from a clean Git tree:
-
-```bash
-./scripts/run_protocol_benchmarks.sh \
-    --precision all --cpu "$LINUX_CPU" --no-build
-```
-
-The suite compares the fixed-width reference with
-`varint_zigzag_fixed_float`. The latter is now the accepted default scalar
-profile, but this does not stabilize the complete production protocol.
-Decisions, waivers, and evidence boundaries are recorded in
-[`documentation/BENCHMARK_DECISIONS.md`](documentation/BENCHMARK_DECISIONS.md).
-
-```mermaid
-flowchart LR
-    Datasets[Deterministic datasets] --> Candidate[Protocol candidate]
-    Candidate --> Encode[Encode measurements]
-    Candidate --> Decode[Decode measurements]
-    Encode --> Report[JSON and CSV report]
-    Decode --> Report
-    Report --> Decision[Evidence-based decision]
-```
-
-## Public classes
-
-The module currently registers:
-
-- `TickSynchronizer`
-- `TickSynchronizerBuffer`
-- `TickSynchronizerObject`
-- `TickSynchronizerSchema`
-- `TickSynchronizerSettings`
-
-`TickSynchronizer` exposes build and protocol diagnostics. `TickSynchronizerBuffer` implements the validated bitstream and scalar codecs. The remaining public classes are intentionally small placeholders for later phases.
-
-## Source layout
-
-```text
-src/
-├── public/      Public Godot-facing classes
-├── protocol/    Wire codec and handshake components
-└── internal/    Build and version contracts
-
-benchmarks/      Standalone deterministic benchmark suite
-doc_classes/     Godot class reference XML
-documentation/   Module manual, architecture decisions, and development records
-scripts/         Build, validation, sanitizer, and benchmark tools
-tests/           C++ tests, smoke project, and golden vectors
-```
-
-`register_types.*`, `SCsub`, and `config.py` remain at the repository root because they are conventional Godot module integration files.
-
-## Documentation map
-
-[`documentation/README.md`](documentation/README.md) separates the permanent
-module manual, versioned architecture decisions, and stage-specific development
-records. Module behavior and contracts remain in the permanent manual; current
-status and qualification evidence are kept under `documentation/development/`.
-The publication and artifact-handling rules are in
-[`documentation/PRIVACY.md`](documentation/PRIVACY.md).
-The GitHub Project owns operational planning. After source acceptance and the
-complete final portability gate close, the Wiki may publish derived user guides, while versioned
-contracts, evidence, and ADRs remain authoritative in the repository.
-
-## Contribution policy
-
-AI-assisted contributions are welcome only when the responsible developer understands and can maintain the resulting code. Read [`AGENTS.md`](AGENTS.md) before contributing.
-
-## License
-
-TickSynchronizer is licensed under the MIT License. See [`LICENSE`](LICENSE).
+Based on ideas and code from [NetworkSynchronizer](https://github.com/GameNetworking/NetworkSynchronizer) by
+Andrea Catania and contributors. Released under the MIT license (see `LICENSE`).

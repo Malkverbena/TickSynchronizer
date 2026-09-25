@@ -1,27 +1,33 @@
-// Registers and unregisters TickSynchronizer classes with Godot.
-// Connects project-owned runtime classes to the engine module lifecycle.
-
 #include "register_types.h"
 
+#include "source/codec/tick_codec.h"
+#include "source/nodes/data_buffer.h"
+#include "source/nodes/tick_network.h"
+#include "source/nodes/tick_object.h"
+#include "source/nodes/tick_spawner.h"
+#include "source/transport/enet_hosted_mesh_transport.h"
+#include "source/transport/enet_mesh_transport.h"
+#include "source/transport/enet_star_transport.h"
+#include "source/transport/tick_multiplayer_peer.h"
+#include "source/transport/tick_transport.h"
+
 #include "core/object/class_db.h"
-#include "src/public/tick_synchronizer.h"
-#include "src/public/tick_synchronizer_buffer.h"
-#include "src/public/tick_synchronizer_object.h"
-#include "src/public/tick_synchronizer_schema.h"
-#include "src/public/tick_synchronizer_settings.h"
 
 void initialize_tick_synchronizer_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
-
-	GDREGISTER_CLASS(TickSynchronizer);
-	GDREGISTER_CLASS(TickSynchronizerSettings);
-	GDREGISTER_CLASS(TickSynchronizerBuffer);
-	GDREGISTER_CLASS(TickSynchronizerObject);
-	GDREGISTER_CLASS(TickSynchronizerSchema);
+	GDREGISTER_CLASS(TickCodec);
+	GDREGISTER_CLASS(DataBuffer);
+	GDREGISTER_ABSTRACT_CLASS(TickTransport);
+	GDREGISTER_CLASS(EnetStarTransport);
+	GDREGISTER_CLASS(EnetMeshTransport);
+	GDREGISTER_CLASS(EnetHostedMeshTransport);
+	GDREGISTER_ABSTRACT_CLASS(TickMultiplayerPeer);
+	GDREGISTER_CLASS(TickNetwork);
+	GDREGISTER_CLASS(TickObject);
+	GDREGISTER_CLASS(TickSpawner);
 }
-
 
 void uninitialize_tick_synchronizer_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {

@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="EnetHostedMeshTransport" inherits="TickTransport" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Mesh transport for [TickNetwork] between players over the internet, with a host that introduces and relays them.
+	</brief_description>
+	<description>
+		One node hosts the mesh ([method create_host]) and is player 1; it must be reachable on its port (a public address, or a port forwarded by the project). The other players join through it ([method create_player]) and get their id from it. The host introduces every pair of players: each player of the pair opens a socket, the host learns its public endpoint, and both punch through their NATs to connect directly. A pair that can't connect within [member punch_timeout] is relayed by the host. The engines see every player as connected either way; [method get_peer_path] tells how a player is reached.
+		The sender of every packet comes from the connection, and the host assigns the ids: a player can't take another one's place. A relayed packet carries its origin, written by the host.
+		The same mesh can carry [SceneMultiplayer] ([method get_multiplayer_peer]), so RPCs, spawners and synchronizers reach every player, relayed ones included.
+		[codeblock]
+		# On the host:
+		var mesh := EnetHostedMeshTransport.create_host(9500)
+		# On a player:
+		var mesh := EnetHostedMeshTransport.create_player("203.0.113.7", 9500)
+
+		multiplayer.multiplayer_peer = mesh.get_multiplayer_peer()
+		$Game.start(mesh)
+		[/codeblock]
+		[b]DTLS:[/b] pass [TLSOptions] to [method create_host] ([method TLSOptions.server]) and [method create_player] ([method TLSOptions.client], or [method TLSOptions.client_unsafe] for testing) to encrypt every link. The direct links between players use a certificate each player generates when it joins; the host hands it to the other player of the pair, who accepts only that certificate. A DTLS socket only takes DTLS, so the players register their endpoints on a second, plain port of the host (the rendezvous port, the next port by default), which must be reachable too; only single-use tokens go through it.
+		[b]Host migration:[/b] the host keeps every player informed of a succession (players without relayed pairs first, then by id). When the host leaves or stops answering (see [member host_timeout]), the first player of the succession still in the mesh becomes the host: its direct links become the host links, and the others follow it through their direct link with it. A [TickNetwork] with [constant TickNetwork.AUTHORITY_SINGLE] moves its authority to the new host (see [signal TickNetwork.host_migrated]). A player that can't reach the new host directly leaves the mesh. The new host has no listening port, so no new players can join after a migration.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="close">
+			<return type="void" />
+			<description>
+				Closes every connection. On the host, the mesh ends for every player.
+			</description>
+		</method>
+		<method name="create_host" qualifiers="static">
+			<return type="EnetHostedMeshTransport" />
+			<param index="0" name="port" type="int" />
+			<param index="1" name="max_players" type="int" default="32" />
+			<param index="2" name="bind_address" type="String" default="&quot;*&quot;" />
+			<param index="3" name="compression" type="int" enum="EnetHostedMeshTransport.Compression" default="1" />
+			<param index="4" name="tls_options" type="TLSOptions" default="null" />
+			<param index="5" name="rendezvous_port" type="int" default="0" />
+			<description>
+				Hosts a mesh on [param port] for up to [param max_players] players (the host included). The [param compression] mode must be the same on every node. With [param tls_options] ([method TLSOptions.server]), the mesh uses DTLS, and the pairs register on [param rendezvous_port] ([param port] + 1 when 0). Returns [code]null[/code] on failure.
+			</description>
+		</method>
+		<method name="create_player" qualifiers="static">
+			<return type="EnetHostedMeshTransport" />
+			<param index="0" name="address" type="String" />
+			<param index="1" name="port" type="int" />
+			<param index="2" name="compression" type="int" enum="EnetHostedMeshTransport.Compression" default="1" />
+			<param index="3" name="tls_options" type="TLSOptions" default="null" />
+			<param index="4" name="tls_hostname" type="String" default="&quot;&quot;" />
+			<description>
+				Joins the mesh hosted at [param address]:[param port]; the id comes from the host (see [method get_status]). With [param tls_options] ([method TLSOptions.client] or [method TLSOptions.client_unsafe]), the host must use DTLS too; [param tls_hostname] is the name checked in the host's certificate ([param address] when empty). Joining with DTLS generates an RSA key for the player, which can take a moment. Returns [code]null[/code] on failure.
+			</description>
+		</method>
+		<method name="get_host_peer" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the id of the node that hosts the mesh now: 1, or its successor after a migration.
+			</description>
+		</method>
+		<method name="get_multiplayer_peer">
+			<return type="TickMultiplayerPeer" />
+			<description>
+				Returns a [TickMultiplayerPeer] on this mesh, always the same one. Assign it to [member MultiplayerAPI.multiplayer_peer] to use RPCs next to the [TickNetwork].
+			</description>
+		</method>
+		<method name="get_peer_path" qualifiers="const">
+			<return type="int" enum="EnetHostedMeshTransport.PeerPath" />
+			<param index="0" name="peer" type="int" />
+			<description>
+				Returns how this node reaches [param peer].
+			</description>
+		</method>
+		<method name="get_peers" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the ids of the connected nodes.
+			</description>
+		</method>
+		<method name="get_stats" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns a [Dictionary] with [code]direct_pairs[/code] and [code]relayed_pairs[/code] (on a player, its links; on the host, the relayed pairs), [code]relayed_packets[/code] (host), [code]rejected_connections[/code] and [code]failed_punches[/code].
+			</description>
+		</method>
+		<method name="get_status" qualifiers="const">
+			<return type="int" enum="EnetHostedMeshTransport.Status" />
+			<description>
+				Returns the connection status. A player is [constant STATUS_CONNECTING] until the host gives it an id.
+			</description>
+		</method>
+		<method name="get_succession" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the order in which the players take over when the host leaves, as last sent by the host.
+			</description>
+		</method>
+		<method name="is_encrypted" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the mesh uses DTLS.
+			</description>
+		</method>
+		<method name="is_hosting" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] on the host.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="direct_connections" type="bool" setter="set_direct_connections" getter="is_direct_connections_enabled" default="true">
+			When [code]false[/code], this player never tries direct links: every other player is relayed by the host. Set it before joining.
+		</member>
+		<member name="host_migration" type="bool" setter="set_host_migration" getter="is_host_migration_enabled" default="true">
+			When [code]true[/code], a player takes the host's place when it leaves (see the class description); when [code]false[/code], the mesh ends with the host.
+		</member>
+		<member name="host_timeout" type="float" setter="set_host_timeout" getter="get_host_timeout" default="5.0">
+			Seconds without an answer from the host before a player considers it gone. A host that closes the mesh is noticed right away.
+		</member>
+		<member name="punch_timeout" type="float" setter="set_punch_timeout" getter="get_punch_timeout" default="3.0">
+			Seconds to establish a direct link between two players before relaying them.
+		</member>
+	</members>
+	<constants>
+		<constant name="COMPRESSION_NONE" value="0" enum="Compression">
+			No compression.
+		</constant>
+		<constant name="COMPRESSION_RANGE_CODER" value="1" enum="Compression">
+			ENet's range coder, suited for small packets. The default.
+		</constant>
+		<constant name="COMPRESSION_FASTLZ" value="2" enum="Compression">
+			FastLZ compression.
+		</constant>
+		<constant name="COMPRESSION_ZLIB" value="3" enum="Compression">
+			Zlib compression.
+		</constant>
+		<constant name="COMPRESSION_ZSTD" value="4" enum="Compression">
+			Zstandard compression.
+		</constant>
+		<constant name="STATUS_DISCONNECTED" value="0" enum="Status">
+			Not connected.
+		</constant>
+		<constant name="STATUS_CONNECTING" value="1" enum="Status">
+			A player joining the host.
+		</constant>
+		<constant name="STATUS_CONNECTED" value="2" enum="Status">
+			Connected: the host, or a player with its id.
+		</constant>
+		<constant name="PATH_NONE" value="0" enum="PeerPath">
+			Not a node of the mesh.
+		</constant>
+		<constant name="PATH_HOST" value="1" enum="PeerPath">
+			The host, or a player seen from the host.
+		</constant>
+		<constant name="PATH_CONNECTING" value="2" enum="PeerPath">
+			A player being introduced.
+		</constant>
+		<constant name="PATH_DIRECT" value="3" enum="PeerPath">
+			A player reached through a direct link.
+		</constant>
+		<constant name="PATH_RELAYED" value="4" enum="PeerPath">
+			A player reached through the host.
+		</constant>
+		<constant name="MULTIPLAYER_CHANNEL_COUNT" value="4">
+			Number of transfer channels of the multiplayer peer.
+		</constant>
+	</constants>
+</class>

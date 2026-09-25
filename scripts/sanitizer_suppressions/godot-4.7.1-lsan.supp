@@ -1,3 +1,0 @@
-# Godot 4.7.1 SDL joypad/UDEV allocations reproduced without TickSynchronizer.
-# Keep this function-specific rule version locked and guarded by a fatal unrelated leak.
-leak:JoypadSDL::initialize

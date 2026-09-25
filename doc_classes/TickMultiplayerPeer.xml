@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TickMultiplayerPeer" inherits="MultiplayerPeer" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		A [MultiplayerPeer] on an [EnetHostedMeshTransport].
+	</brief_description>
+	<description>
+		Lets [SceneMultiplayer] (RPCs, [MultiplayerSpawner], [MultiplayerSynchronizer]) use the players' mesh, next to the [TickNetwork] on the same transport. Every player is reached, directly or relayed by the host, which is peer 1 (the server for [SceneMultiplayer]). Get it with [method EnetHostedMeshTransport.get_multiplayer_peer]. It has [constant EnetHostedMeshTransport.MULTIPLAYER_CHANNEL_COUNT] transfer channels and doesn't need the server relay of [SceneMultiplayer]: the transport relays.
+	</description>
+	<tutorials>
+	</tutorials>
+</class>

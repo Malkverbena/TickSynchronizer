@@ -1,76 +1,23 @@
-# Python / SCons caches
-__pycache__/
-*.py[cod]
-
-# Godot project cache
-.godot/
-
-# TickSynchronizer generated reports
-build_reports/
-
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
+# Build artifacts produced when the engine compiles this module.
 *.o
 *.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-*.dwo
-*.dSYM/
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
+*.os
+*.ox
 *.a
 *.lib
+*.d
+*.gen.*
+.scu/
+.sconsign*.dblite
+__pycache__/
+*.pyc
 
-# Executables and application bundles
-*.exe
-*.out
-*.app
+# Editors / tools.
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+*.code-workspace
 
-# Build directories
-build/
-Build/
-build-*/
-
-# Temporary files
-*.tmp
-*.log
-*.bak
-*.swp
-*~
-
-# vcpkg
-vcpkg_installed/
-
-# OS metadata
-.DS_Store
-Thumbs.db
-# Generated benchmark artifacts.
-benchmarks/.build/
-benchmarks/bin/
-benchmark_reports/*
-!benchmark_reports/.gitignore
-benchmark_dist/
+# Godot project data of the demos.
+.godot/
