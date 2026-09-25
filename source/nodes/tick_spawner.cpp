@@ -1,10 +1,10 @@
 #include "tick_spawner.h"
 
+#include "../common/tick_engine_compat.h"
 #include "tick_network.h"
 #include "tick_object.h"
 
 #include "core/io/resource_loader.h"
-#include "core/object/callable_mp.h"
 #include "scene/main/scene_tree.h"
 #include "scene/resources/packed_scene.h"
 

@@ -1,8 +1,8 @@
 #include "enet_star_transport.h"
 
+#include "../common/tick_engine_compat.h"
 #include "../sync/tick_protocol.h"
 
-#include "core/object/callable_mp.h"
 #include "core/os/os.h"
 
 #include "modules/enet/enet_connection.h"
