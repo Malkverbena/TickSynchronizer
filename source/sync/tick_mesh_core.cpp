@@ -1,5 +1,7 @@
 #include "tick_mesh_core.h"
 
+#include "tick_net_ids.h"
+
 #include "core/io/marshalls.h"
 #include "core/math/math_funcs.h"
 #include "core/variant/variant.h"
@@ -26,6 +28,18 @@ struct MeshEventOrder {
 	}
 };
 
+TickMeshCore::BusyScope::BusyScope(TickMeshCore *p_core) :
+		core(p_core) {
+	core->busy_depth++;
+}
+
+TickMeshCore::BusyScope::~BusyScope() {
+	core->busy_depth--;
+	if (core->busy_depth == 0 && core->stop_requested) {
+		core->stop_now();
+	}
+}
+
 void TickMeshCore::set_settings(const Settings &p_settings) {
 	ERR_FAIL_COND_MSG(running, "The settings can't change while the network is running.");
 	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0, "The ticks per second must be positive.");
@@ -35,6 +49,7 @@ void TickMeshCore::set_settings(const Settings &p_settings) {
 }
 
 Error TickMeshCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec) {
+	ERR_FAIL_COND_V_MSG(stop_requested, ERR_BUSY, "The network is stopping: start it again once its callbacks return (for example, with `call_deferred()`).");
 	ERR_FAIL_COND_V_MSG(running, ERR_ALREADY_IN_USE, "The network is already running.");
 	ERR_FAIL_COND_V_MSG(p_transport.is_null(), ERR_INVALID_PARAMETER, "The transport is null.");
 	ERR_FAIL_COND_V_MSG(p_transport->get_channel_count() < TICK_CHANNEL_COUNT, ERR_INVALID_PARAMETER, vformat("The transport must have at least %d channels.", TICK_CHANNEL_COUNT));
@@ -69,6 +84,16 @@ Error TickMeshCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 }
 
 void TickMeshCore::stop() {
+	if (busy_depth > 0) {
+		// Game code the engine is running asked for it: the engine's state is freed once that code returns.
+		stop_requested = true;
+		return;
+	}
+	stop_now();
+}
+
+void TickMeshCore::stop_now() {
+	stop_requested = false;
 	running = false;
 	transport.unref();
 	peers.clear();
@@ -337,7 +362,7 @@ void TickMeshCore::on_peer_ready(int p_peer) {
 
 void TickMeshCore::handle_events() {
 	TickTransport::Event event;
-	while (transport->pop_event(event)) {
+	while (is_active() && transport->pop_event(event)) {
 		if (event.type == TickTransport::EVENT_HOST_MIGRATED) {
 			// The distributed mesh doesn't migrate its registry (the old host's objects become orphans).
 			continue;
@@ -533,7 +558,7 @@ void TickMeshCore::follow_timeline(double p_target_frame) {
 		tick(stepper.step_frame());
 		return;
 	}
-	for (int32_t i = 0; i < MIN(behind, limit); i++) {
+	for (int32_t i = 0; i < MIN(behind, limit) && is_active(); i++) {
 		tick(stepper.step_frame());
 	}
 }
@@ -541,25 +566,26 @@ void TickMeshCore::follow_timeline(double p_target_frame) {
 // ------------------------------------------------------------------------------------------------------ Process
 
 void TickMeshCore::process(double p_delta, uint64_t p_now_usec) {
-	ERR_FAIL_COND_MSG(!running, "The network isn't running.");
+	ERR_FAIL_COND_MSG(!is_active(), "The network isn't running.");
+	BusyScope busy(this);
 	now_usec = p_now_usec;
 
 	transport->poll();
 	handle_events();
 	TickTransport::Packet packet;
-	while (running && transport->pop_packet(packet)) {
+	while (is_active() && transport->pop_packet(packet)) {
 		handle_packet(packet);
 	}
 	// Messages to itself, including the ones they cause (bounded).
-	for (int round = 0; round < 16 && !loopback.is_empty(); round++) {
+	for (int round = 0; round < 16 && !loopback.is_empty() && is_active(); round++) {
 		LocalVector<TickTransport::Packet> packets;
 		packets = loopback;
 		loopback.clear();
-		for (const TickTransport::Packet &local : packets) {
-			handle_packet(local);
+		for (uint32_t i = 0; i < packets.size() && is_active(); i++) {
+			handle_packet(packets[i]);
 		}
 	}
-	if (!running) {
+	if (!is_active()) {
 		return;
 	}
 	if (is_registry()) {
@@ -571,7 +597,7 @@ void TickMeshCore::process(double p_delta, uint64_t p_now_usec) {
 			follow_timeline(clock_source->get_timeline_frame(now_usec));
 		} else {
 			stepper.advance(p_delta);
-			while (stepper.get_pending_ticks() > 0) {
+			while (stepper.get_pending_ticks() > 0 && is_active()) {
 				tick(stepper.pop_tick());
 			}
 		}
@@ -588,6 +614,9 @@ void TickMeshCore::process(double p_delta, uint64_t p_now_usec) {
 				send(settings.clock_master, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, ping);
 			}
 		}
+	}
+	if (!is_active()) {
+		return;
 	}
 
 	LocalVector<int> to_disconnect;
@@ -613,12 +642,19 @@ void TickMeshCore::tick(uint32_t p_frame) {
 		if (entry.owner != local_id || entry.object == nullptr || entry.frozen) {
 			continue;
 		}
-		// The owner drives the object with its own input.
+		// The owner drives the object with its own input. The object's code may remove objects (removing one
+		// clears its entry's object), so the entry is checked again after it.
 		TickDataBuffer input;
 		input.begin_write();
 		entry.object->collect_input(input);
+		if (entry.object == nullptr) {
+			continue;
+		}
 		input.begin_read();
 		entry.object->process_tick(delta, input);
+		if (entry.object == nullptr) {
+			continue;
+		}
 		quantize_object(entry.object);
 	}
 	if (p_frame % uint32_t(settings.snapshot_interval) == 0) {
@@ -728,9 +764,11 @@ void TickMeshCore::handle_state(int p_peer, TickDataBuffer &p_message) {
 }
 
 void TickMeshCore::update_interpolation(uint64_t p_now_usec) {
-	if (!running) {
+	if (!is_active()) {
 		return;
 	}
+	// Objects may apply the state with their own code.
+	BusyScope busy(this);
 	now_usec = p_now_usec;
 	const double timeline = get_timeline_frame(p_now_usec);
 	const bool interpolate = settings.interpolate_remote && timeline >= 0.0;
@@ -783,9 +821,13 @@ void TickMeshCore::registry_handle_claim(int p_peer, const String &p_path, int p
 		registry_send_announce(p_peer, *existing, has_state ? &state : nullptr);
 		return;
 	}
-	ERR_FAIL_COND_MSG(registry.size() + quarantined_ids.size() >= UINT16_MAX - 1, "Too many synchronized objects.");
 	const uint32_t current = stepper.get_next_frame_index();
 	const uint32_t quarantine = uint32_t(settings.history_size) * 2;
+	if (registry.size() + quarantined_ids.size() >= UINT16_MAX - 1) {
+		// Released ids are only forgotten when reused: the ones past their quarantine don't count.
+		tick_prune_quarantine(quarantined_ids, current, quarantine);
+	}
+	ERR_FAIL_COND_MSG(registry.size() + quarantined_ids.size() >= UINT16_MAX - 1, "Too many synchronized objects.");
 	for (int attempt = 0; attempt < UINT16_MAX; attempt++) {
 		if (next_net_id == 0 || registry.has(next_net_id)) {
 			next_net_id++;
@@ -1363,7 +1405,10 @@ bool TickMeshCore::dispatch_event(PendingEvent &r_event) {
 			stats.events_rejected++;
 			return true;
 		}
-		entry->object->on_event(r_event.sender, r_event.name, r_event.payload, frame);
+		// The validator is game code, which may have removed the object.
+		if (entry->object) {
+			entry->object->on_event(r_event.sender, r_event.name, r_event.payload, frame);
+		}
 		return true;
 	}
 	if (entry->owner == 0) {
@@ -1406,7 +1451,7 @@ void TickMeshCore::handle_mesh_event(int p_peer, TickDataBuffer &p_message) {
 	PendingEvent event;
 	event.target = uint16_t(p_message.read_uint_bits(16));
 	event.requested_frame = uint32_t(p_message.read_uint_bits(32));
-	event.name = p_message.read_string();
+	event.name = p_message.read_string(TICK_MAX_EVENT_NAME_BYTES);
 	event.payload = TickCodec::variant()->decode(p_message);
 	const int origin = int(p_message.read_int_bits(32));
 	event.hops = int(p_message.read_uint_bits(8));
@@ -1434,6 +1479,7 @@ void TickMeshCore::handle_mesh_event(int p_peer, TickDataBuffer &p_message) {
 Error TickMeshCore::send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) {
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
+	ERR_FAIL_COND_V_MSG(String(p_name).utf8().length() > TICK_MAX_EVENT_NAME_BYTES, ERR_INVALID_PARAMETER, vformat("An event name can't be longer than %d bytes in UTF-8.", TICK_MAX_EVENT_NAME_BYTES));
 	int payload_bytes = 0;
 	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded (objects aren't allowed).");
 	ERR_FAIL_COND_V_MSG(payload_bytes > settings.max_event_bytes, ERR_INVALID_DATA, vformat("The event payload takes %d bytes; the limit is %d.", payload_bytes, settings.max_event_bytes));

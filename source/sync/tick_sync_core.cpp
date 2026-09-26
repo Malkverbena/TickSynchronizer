@@ -1,5 +1,7 @@
 #include "tick_sync_core.h"
 
+#include "tick_net_ids.h"
+
 #include "core/io/marshalls.h"
 #include "core/math/math_funcs.h"
 #include "core/variant/variant.h"
@@ -48,6 +50,18 @@ static bool sorted_contains(const LocalVector<uint16_t> &p_sorted, uint16_t p_va
 	return low < p_sorted.size() && p_sorted[low] == p_value;
 }
 
+TickSyncCore::BusyScope::BusyScope(TickSyncCore *p_core) :
+		core(p_core) {
+	core->busy_depth++;
+}
+
+TickSyncCore::BusyScope::~BusyScope() {
+	core->busy_depth--;
+	if (core->busy_depth == 0 && core->stop_requested) {
+		core->stop_now();
+	}
+}
+
 bool TickSyncCore::RateLimiter::take(double p_rate, uint64_t p_now_usec) {
 	if (tokens < 0.0) {
 		tokens = p_rate;
@@ -74,10 +88,12 @@ void TickSyncCore::set_settings(const Settings &p_settings) {
 }
 
 Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec) {
+	ERR_FAIL_COND_V_MSG(stop_requested, ERR_BUSY, "The network is stopping: start it again once its callbacks return (for example, with `call_deferred()`).");
 	ERR_FAIL_COND_V_MSG(role != ROLE_NONE, ERR_ALREADY_IN_USE, "The network is already running.");
 	ERR_FAIL_COND_V_MSG(p_transport.is_null(), ERR_INVALID_PARAMETER, "The transport is null.");
 	ERR_FAIL_COND_V_MSG(p_transport->get_channel_count() < TICK_CHANNEL_COUNT, ERR_INVALID_PARAMETER, vformat("The transport must have at least %d channels.", TICK_CHANNEL_COUNT));
 
+	BusyScope busy(this);
 	transport = p_transport;
 	now_usec = p_now_usec;
 	stats = Stats();
@@ -139,6 +155,16 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 }
 
 void TickSyncCore::stop() {
+	if (busy_depth > 0) {
+		// Game code the engine is running asked for it: the engine's state is freed once that code returns.
+		stop_requested = true;
+		return;
+	}
+	stop_now();
+}
+
+void TickSyncCore::stop_now() {
+	stop_requested = false;
 	role = ROLE_NONE;
 	transport.unref();
 	peers.clear();
@@ -179,6 +205,8 @@ void TickSyncCore::register_object(TickSyncObject *p_object) {
 	}
 	local_objects.insert(path, p_object);
 
+	// The interest filter and the events of a bound object are game code.
+	BusyScope busy(this);
 	if (role == ROLE_SERVER) {
 		server_add_object(p_object);
 	} else if (role == ROLE_CLIENT) {
@@ -191,9 +219,13 @@ void TickSyncCore::register_object(TickSyncObject *p_object) {
 }
 
 void TickSyncCore::server_add_object(TickSyncObject *p_object) {
-	ERR_FAIL_COND_MSG(server_objects.size() + quarantined_ids.size() >= UINT16_MAX - 1, "Too many synchronized objects.");
 	const uint32_t current = stepper.get_next_frame_index();
 	const uint32_t quarantine = uint32_t(settings.history_size) * 2;
+	if (server_objects.size() + quarantined_ids.size() >= UINT16_MAX - 1) {
+		// Released ids are only forgotten when reused: the ones past their quarantine don't count.
+		tick_prune_quarantine(quarantined_ids, current, quarantine);
+	}
+	ERR_FAIL_COND_MSG(server_objects.size() + quarantined_ids.size() >= UINT16_MAX - 1, "Too many synchronized objects.");
 	for (int attempt = 0; attempt < UINT16_MAX; attempt++) {
 		if (next_net_id == 0 || server_objects.has(next_net_id)) {
 			next_net_id++;
@@ -220,7 +252,7 @@ void TickSyncCore::server_add_object(TickSyncObject *p_object) {
 	server_object_ids.sort();
 
 	for (KeyValue<int, PeerState> &E : peers) {
-		if (E.value.accepted) {
+		if (E.value.accepted && server_objects.has(net_id)) {
 			server_register_for_peer(E.key, E.value, net_id);
 		}
 	}
@@ -344,16 +376,17 @@ void TickSyncCore::write_input_groups(TickDataBuffer &r_message, uint32_t p_firs
 }
 
 void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
-	ERR_FAIL_COND_MSG(role == ROLE_NONE, "The network isn't running.");
+	ERR_FAIL_COND_MSG(!is_active(), "The network isn't running.");
+	BusyScope busy(this);
 	now_usec = p_now_usec;
 
 	transport->poll();
 	handle_events();
 	TickTransport::Packet packet;
-	while (role != ROLE_NONE && transport->pop_packet(packet)) {
+	while (is_active() && transport->pop_packet(packet)) {
 		handle_packet(packet);
 	}
-	if (role == ROLE_NONE) {
+	if (!is_active()) {
 		return;
 	}
 
@@ -370,7 +403,7 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 					stepper.set_next_frame_index(target);
 					server_tick(stepper.step_frame());
 				} else {
-					for (int32_t i = 0; i < MIN(behind, int32_t(stepper.get_max_ticks_per_advance())); i++) {
+					for (int32_t i = 0; i < MIN(behind, int32_t(stepper.get_max_ticks_per_advance())) && is_active(); i++) {
 						server_tick(stepper.step_frame());
 					}
 				}
@@ -380,9 +413,12 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 			stepper.advance(p_delta);
 			// Dropped ticks shift the timeline: the frames keep their duration.
 			server_epoch_usec += int64_t(double(stepper.get_dropped_ticks() - dropped_before) * 1000000.0 * get_tick_delta());
-			while (stepper.get_pending_ticks() > 0) {
+			while (stepper.get_pending_ticks() > 0 && is_active()) {
 				server_tick(stepper.pop_tick());
 			}
+		}
+		if (!is_active()) {
+			return;
 		}
 
 		LocalVector<int> to_disconnect;
@@ -402,10 +438,13 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 		bool ticked = false;
 		if (predicting) {
 			stepper.advance(p_delta);
-			while (stepper.get_pending_ticks() > 0) {
+			while (stepper.get_pending_ticks() > 0 && is_active()) {
 				client_tick(stepper.pop_tick());
 				ticked = true;
 			}
+		}
+		if (!is_active()) {
+			return;
 		}
 		if (transport->is_peer_connected(settings.authority_peer)) {
 			if (ticked || ack_pending) {
@@ -430,7 +469,7 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 
 void TickSyncCore::handle_events() {
 	TickTransport::Event event;
-	while (role != ROLE_NONE && transport->pop_event(event)) {
+	while (is_active() && transport->pop_event(event)) {
 		if (event.type == TickTransport::EVENT_HOST_MIGRATED) {
 			handle_host_migrated(event.peer);
 			continue;
@@ -600,8 +639,13 @@ void TickSyncCore::server_accept_peer(int p_peer) {
 	for (const uint32_t spawn_id : spawn_order) {
 		server_send_spawn(p_peer, spawn_id);
 	}
-	for (const uint16_t net_id : server_object_ids) {
-		server_register_for_peer(p_peer, peer, net_id);
+	// The interest filter is game code, which may register or remove objects: a copy of the ids.
+	LocalVector<uint16_t> ids;
+	ids = server_object_ids;
+	for (const uint16_t net_id : ids) {
+		if (server_objects.has(net_id)) {
+			server_register_for_peer(p_peer, peer, net_id);
+		}
 	}
 	if (listener) {
 		listener->on_peer_ready(p_peer);
@@ -768,19 +812,29 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 
 	LocalVector<uint16_t> own_doll_ids;
 	LocalVector<TickDataBuffer> own_doll_inputs;
-	for (const uint16_t net_id : server_object_ids) {
-		ServerObject &object = server_objects[net_id];
+	// The objects' code may register or remove objects (spawn a projectile, remove a node): the loop goes over a
+	// copy of the ids and looks every object up again after running it. Objects registered during the tick are
+	// simulated from the next one.
+	LocalVector<uint16_t> ids;
+	ids = server_object_ids;
+	for (const uint16_t net_id : ids) {
+		const ServerObject *object = server_objects.getptr(net_id);
+		if (object == nullptr) {
+			// Removed earlier in this tick.
+			continue;
+		}
+		TickSyncObject *sync_object = object->object;
 		TickDataBuffer input;
 		input.begin_write();
-		if (object.controller == settings.authority_peer) {
-			object.object->collect_input(input);
-			if (object.object->is_doll_enabled() && own_doll_ids.size() < 255) {
+		if (object->controller == settings.authority_peer) {
+			sync_object->collect_input(input);
+			if (sync_object->is_doll_enabled() && own_doll_ids.size() < 255) {
 				own_doll_ids.push_back(net_id);
 				own_doll_inputs.push_back(input);
 			}
 		} else {
 			// Only the controller's own input moves the object (H1): inputs are looked up per sending peer.
-			PeerState *peer = peers.getptr(object.controller);
+			PeerState *peer = peers.getptr(object->controller);
 			if (peer && peer->accepted) {
 				TickDataBuffer *peer_input = peer->tick_inputs.getptr(net_id);
 				if (peer_input) {
@@ -789,13 +843,18 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 			}
 		}
 		input.begin_read();
-		object.object->process_tick(delta, input);
-		quantize_object(object.object);
+		sync_object->process_tick(delta, input);
+		object = server_objects.getptr(net_id);
+		if (object == nullptr || object->object != sync_object) {
+			// Removed by its own code.
+			continue;
+		}
+		quantize_object(sync_object);
 		LocalVector<Variant> *values = record.states.getptr(net_id);
 		if (values == nullptr) {
 			values = &record.states.insert(net_id, LocalVector<Variant>())->value;
 		}
-		read_states(object.object, *values);
+		read_states(sync_object, *values);
 	}
 
 	if (p_frame % uint32_t(settings.interest_interval) == 0) {
@@ -999,14 +1058,20 @@ void TickSyncCore::write_snapshot_entry(TickDataBuffer &r_message, uint16_t p_ne
 }
 
 void TickSyncCore::server_register_for_peer(int p_peer, PeerState &r_peer, uint16_t p_net_id) {
+	const ServerObject *object = server_objects.getptr(p_net_id);
+	ERR_FAIL_NULL(object);
 	server_send_register(p_peer, p_net_id);
-	const ServerObject &object = server_objects[p_net_id];
+	const int controller = object->controller;
 	bool relevant = settings.default_relevant;
-	const int verdict = listener ? listener->filter_relevance(p_peer, object.object) : -1;
+	// The filter is game code, which may register or remove objects: `object` isn't used after it.
+	const int verdict = listener ? listener->filter_relevance(p_peer, object->object) : -1;
 	if (verdict >= 0) {
 		relevant = verdict == 1;
 	}
-	if (relevant || object.controller == p_peer) {
+	if (!server_objects.has(p_net_id)) {
+		return;
+	}
+	if (relevant || controller == p_peer) {
 		r_peer.relevant.insert(p_net_id);
 		return;
 	}
@@ -1048,12 +1113,19 @@ void TickSyncCore::server_update_relevance() {
 	if (listener == nullptr) {
 		return;
 	}
+	// The filter is game code, which may register or remove objects: a copy of the ids.
+	LocalVector<uint16_t> ids;
+	ids = server_object_ids;
 	for (KeyValue<int, PeerState> &E : peers) {
 		if (!E.value.accepted) {
 			continue;
 		}
-		for (const uint16_t net_id : server_object_ids) {
-			const int verdict = listener->filter_relevance(E.key, server_objects[net_id].object);
+		for (const uint16_t net_id : ids) {
+			const ServerObject *object = server_objects.getptr(net_id);
+			if (object == nullptr) {
+				continue;
+			}
+			const int verdict = listener->filter_relevance(E.key, object->object);
 			if (verdict >= 0) {
 				server_set_peer_relevant(E.key, E.value, net_id, verdict == 1);
 			}
@@ -1158,22 +1230,27 @@ void TickSyncCore::client_bind(uint16_t p_net_id, RemoteObject &r_remote) {
 		ERR_PRINT(vformat("The object \"%s\" declares different variables or codecs than the server's; it's not synchronized.", r_remote.path));
 		return;
 	}
-	r_remote.object = *local;
+	TickSyncObject *object = *local;
+	r_remote.object = object;
 	predicted_ids_dirty = true;
+	// Its state may be unknown in the current snapshot: ask for a full one.
+	needs_full = true;
 	if (!r_remote.relevant && listener) {
-		listener->on_relevance_changed(r_remote.object, false);
+		listener->on_relevance_changed(object, false);
 	}
 	// Events that arrived before the object (E5).
 	run_events(predicting ? stepper.get_next_frame_index() - 1 : TICK_FRAME_NONE);
-	// Its state may be unknown in the current snapshot: ask for a full one.
-	needs_full = true;
+	// The game's code above may have removed the object again.
+	if (r_remote.object != object) {
+		return;
+	}
 	if (predicting && r_remote.controller == transport->get_local_peer_id() && latest_snapshot != TICK_FRAME_NONE) {
 		// A predicted object joining late starts from the server's state.
 		SnapshotRecord *record = client_get_received(latest_snapshot);
 		const LocalVector<Variant> *values = record ? record->states.getptr(p_net_id) : nullptr;
 		if (values) {
 			for (uint32_t i = 0; i < values->size(); i++) {
-				r_remote.object->set_sync_var(int(i), (*values)[i]);
+				object->set_sync_var(int(i), (*values)[i]);
 			}
 		}
 	}
@@ -1551,8 +1628,10 @@ void TickSyncCore::client_start_prediction() {
 	if (record) {
 		for (const uint16_t net_id : predicted_ids) {
 			const LocalVector<Variant> *values = record->states.getptr(net_id);
-			if (values) {
-				TickSyncObject *object = remote_objects[net_id].object;
+			const RemoteObject *remote = remote_objects.getptr(net_id);
+			// The objects' setters are game code: one of them may have removed a later object.
+			TickSyncObject *object = remote ? remote->object : nullptr;
+			if (values && object) {
 				for (uint32_t i = 0; i < values->size(); i++) {
 					object->set_sync_var(int(i), (*values)[i]);
 				}
@@ -1590,6 +1669,8 @@ void TickSyncCore::client_adjust_speed(int p_server_buffer) {
 }
 
 void TickSyncCore::client_reconcile(uint32_t p_frame) {
+	// The game may have removed a predicted object since the last tick.
+	client_update_predicted_ids();
 	if (!predicting || predicted_ids.is_empty()) {
 		return;
 	}
@@ -1634,14 +1715,16 @@ void TickSyncCore::client_reconcile(uint32_t p_frame) {
 		return;
 	}
 
-	// Rewind: apply the server's state at `p_frame`, then simulate again the frames predicted after it.
+	// Rewind: apply the server's state at `p_frame`, then simulate again the frames predicted after it. The objects'
+	// code runs here and may remove objects: each one is looked up again before it's used.
 	rewinding = true;
 	for (const uint16_t net_id : predicted_ids) {
 		const LocalVector<Variant> *server_values = snapshot->states.getptr(net_id);
-		if (server_values == nullptr) {
+		const RemoteObject *remote = remote_objects.getptr(net_id);
+		TickSyncObject *object = remote ? remote->object : nullptr;
+		if (server_values == nullptr || object == nullptr) {
 			continue;
 		}
-		TickSyncObject *object = remote_objects[net_id].object;
 		for (uint32_t i = 0; i < server_values->size(); i++) {
 			object->set_sync_var(int(i), (*server_values)[i]);
 		}
@@ -1660,7 +1743,11 @@ void TickSyncCore::client_reconcile(uint32_t p_frame) {
 		frame_input.begin_read();
 		parse_frame_input(frame_input, inputs);
 		for (const uint16_t net_id : predicted_ids) {
-			TickSyncObject *object = remote_objects[net_id].object;
+			const RemoteObject *remote = remote_objects.getptr(net_id);
+			TickSyncObject *object = remote ? remote->object : nullptr;
+			if (object == nullptr) {
+				continue;
+			}
 			TickDataBuffer input;
 			TickDataBuffer *stored = inputs.getptr(net_id);
 			if (stored) {
@@ -1670,6 +1757,10 @@ void TickSyncCore::client_reconcile(uint32_t p_frame) {
 			}
 			input.begin_read();
 			object->process_tick(delta, input);
+			if (remote->object != object) {
+				// Removed by its own code.
+				continue;
+			}
 			quantize_object(object);
 			LocalVector<Variant> values;
 			read_states(object, values);
@@ -1695,14 +1786,21 @@ void TickSyncCore::client_tick(uint32_t p_frame) {
 	record.frame = p_frame;
 	record.states.clear();
 	record.input.begin_write();
-	record.input.add_uint_bits(MIN(predicted_ids.size(), 255u), 8);
+	// The object count, written once known.
+	record.input.add_uint_bits(0, 8);
 
+	// The objects' code (and the events above) may remove objects: each one is looked up again before it's used.
 	int count = 0;
 	for (const uint16_t net_id : predicted_ids) {
-		if (count++ >= 255) {
+		if (count >= 255) {
 			break;
 		}
-		TickSyncObject *object = remote_objects[net_id].object;
+		const RemoteObject *remote = remote_objects.getptr(net_id);
+		TickSyncObject *object = remote ? remote->object : nullptr;
+		if (object == nullptr) {
+			continue;
+		}
+		count++;
 		TickDataBuffer input;
 		input.begin_write();
 		object->collect_input(input);
@@ -1711,11 +1809,19 @@ void TickSyncCore::client_tick(uint32_t p_frame) {
 
 		input.begin_read();
 		object->process_tick(delta, input);
+		if (remote->object != object) {
+			// Removed by its own code.
+			continue;
+		}
 		quantize_object(object);
 		LocalVector<Variant> values;
 		read_states(object, values);
 		record.states.insert(net_id, values);
 	}
+	const int end = record.input.total_size();
+	record.input.seek(0);
+	record.input.add_uint_bits(uint64_t(count), 8);
+	record.input.seek(end);
 
 	client_advance_dolls();
 }
@@ -1783,9 +1889,11 @@ double TickSyncCore::get_timeline_frame(uint64_t p_now_usec) const {
 }
 
 void TickSyncCore::update_interpolation(uint64_t p_now_usec) {
-	if (role != ROLE_CLIENT) {
+	if (role != ROLE_CLIENT || stop_requested) {
 		return;
 	}
+	// Objects may apply the state with their own code.
+	BusyScope busy(this);
 	now_usec = p_now_usec;
 	client_update_interpolation();
 }
@@ -2011,6 +2119,7 @@ void TickSyncCore::client_simulate_doll(DollPeer &r_doll, uint32_t p_frame) {
 		if (remote == nullptr || remote->object == nullptr) {
 			continue;
 		}
+		TickSyncObject *object = remote->object;
 		// The inputs came from the object's controller: dolls are grouped by the peer that sent them (H1).
 		TickDataBuffer input;
 		const TickDataBuffer *stored = inputs.getptr(net_id);
@@ -2020,10 +2129,14 @@ void TickSyncCore::client_simulate_doll(DollPeer &r_doll, uint32_t p_frame) {
 			input.begin_write();
 		}
 		input.begin_read();
-		remote->object->process_tick(delta, input);
-		quantize_object(remote->object);
+		object->process_tick(delta, input);
+		if (remote->object != object) {
+			// Removed by its own code.
+			continue;
+		}
+		quantize_object(object);
 		LocalVector<Variant> values;
-		read_states(remote->object, values);
+		read_states(object, values);
 		record.states.insert(net_id, values);
 	}
 
@@ -2034,12 +2147,13 @@ void TickSyncCore::client_simulate_doll(DollPeer &r_doll, uint32_t p_frame) {
 	}
 	for (const uint16_t net_id : r_doll.ids) {
 		const LocalVector<Variant> *values = snapshot->states.getptr(net_id);
-		RemoteObject *remote = remote_objects.getptr(net_id);
-		if (values == nullptr || remote == nullptr || remote->object == nullptr) {
+		const RemoteObject *remote = remote_objects.getptr(net_id);
+		TickSyncObject *object = remote ? remote->object : nullptr;
+		if (values == nullptr || object == nullptr) {
 			continue;
 		}
 		for (uint32_t i = 0; i < values->size(); i++) {
-			remote->object->set_sync_var(int(i), (*values)[i]);
+			object->set_sync_var(int(i), (*values)[i]);
 		}
 		record.states.insert(net_id, *values);
 	}
@@ -2085,12 +2199,13 @@ bool TickSyncCore::client_restore_doll(DollPeer &r_doll, uint32_t p_snapshot_fra
 	record.states.clear();
 	for (const uint16_t net_id : r_doll.ids) {
 		const LocalVector<Variant> *values = snapshot->states.getptr(net_id);
-		RemoteObject *remote = remote_objects.getptr(net_id);
-		if (values == nullptr || remote == nullptr || remote->object == nullptr) {
+		const RemoteObject *remote = remote_objects.getptr(net_id);
+		TickSyncObject *object = remote ? remote->object : nullptr;
+		if (values == nullptr || object == nullptr) {
 			continue;
 		}
 		for (uint32_t i = 0; i < values->size(); i++) {
-			remote->object->set_sync_var(int(i), (*values)[i]);
+			object->set_sync_var(int(i), (*values)[i]);
 		}
 		record.states.insert(net_id, *values);
 	}
@@ -2264,18 +2379,23 @@ void TickSyncCore::client_become_server(int p_old_authority) {
 		object.path = remote.path;
 		object.controller = remote.controller == p_old_authority ? local_peer : remote.controller;
 		object.schema_hash = remote.schema_hash;
-		const LocalVector<Variant> *values = latest ? latest->states.getptr(net_id) : nullptr;
-		if (values && !predicted.has(net_id)) {
-			for (uint32_t i = 0; i < values->size(); i++) {
-				remote.object->set_sync_var(int(i), (*values)[i]);
-			}
-		}
 		server_objects.insert(net_id, object);
-		server_ids_by_object.insert(remote.object, net_id);
+		server_ids_by_object.insert(object.object, net_id);
 		server_object_ids.push_back(net_id);
 		highest = MAX(highest, net_id);
 	}
 	next_net_id = highest + 1;
+	// The objects' setters are game code, which may remove objects: set once every object is registered.
+	for (const uint16_t net_id : ids) {
+		const LocalVector<Variant> *values = latest ? latest->states.getptr(net_id) : nullptr;
+		const ServerObject *object = server_objects.getptr(net_id);
+		if (values && object && !predicted.has(net_id)) {
+			TickSyncObject *sync_object = object->object;
+			for (uint32_t i = 0; i < values->size(); i++) {
+				sync_object->set_sync_var(int(i), (*values)[i]);
+			}
+		}
+	}
 
 	// The client's state is over.
 	remote_objects.clear();
@@ -2422,7 +2542,7 @@ void TickSyncCore::write_event(TickDataBuffer &r_message, uint16_t p_target, uin
 bool TickSyncCore::read_event(TickDataBuffer &p_message, PendingEvent &r_event, int &r_payload_bytes) {
 	r_event.target = uint16_t(p_message.read_uint_bits(16));
 	r_event.requested_frame = uint32_t(p_message.read_uint_bits(32));
-	r_event.name = p_message.read_string();
+	r_event.name = p_message.read_string(TICK_MAX_EVENT_NAME_BYTES);
 	// The payload size comes first (see `TickCodec::variant()`); checked before decoding anything big.
 	const int offset = p_message.get_bit_offset();
 	r_payload_bytes = int(p_message.read_uint_bits(16));
@@ -2524,14 +2644,16 @@ void TickSyncCore::server_handle_event(int p_peer, TickDataBuffer &p_message) {
 			verdict = 1;
 		}
 	} else {
-		ServerObject *object = server_objects.getptr(event.target);
+		const ServerObject *object = server_objects.getptr(event.target);
 		if (object == nullptr) {
 			stats.events_rejected++;
 			return;
 		}
+		// The validator is game code, which may remove the object: `object` isn't used after it.
+		const int controller = object->controller;
 		verdict = object->object->validate_event(p_peer, event.name, event.payload);
 		if (verdict < 0) {
-			verdict = (settings.trusted || object->controller == p_peer) ? 1 : 0;
+			verdict = (settings.trusted || controller == p_peer) ? 1 : 0;
 		}
 	}
 	if (verdict == 0) {
@@ -2583,6 +2705,7 @@ void TickSyncCore::client_handle_event(TickDataBuffer &p_message) {
 Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) {
 	ERR_FAIL_COND_V_MSG(role == ROLE_NONE, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
+	ERR_FAIL_COND_V_MSG(String(p_name).utf8().length() > TICK_MAX_EVENT_NAME_BYTES, ERR_INVALID_PARAMETER, vformat("An event name can't be longer than %d bytes in UTF-8.", TICK_MAX_EVENT_NAME_BYTES));
 	int payload_bytes = 0;
 	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded (objects aren't allowed).");
 	ERR_FAIL_COND_V_MSG(payload_bytes > settings.max_event_bytes, ERR_INVALID_DATA, vformat("The event payload takes %d bytes; the limit is %d.", payload_bytes, settings.max_event_bytes));

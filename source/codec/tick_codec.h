@@ -91,7 +91,8 @@ public:
 	// Writes `p_value`. A value of the wrong type is an error and writes the default value, so the buffer keeps
 	// its layout.
 	void encode(const Variant &p_value, TickDataBuffer &r_buffer) const;
-	// Reads a value; on failure `r_buffer.is_buffer_failed()` is set and the default value is returned.
+	// Reads a value; on failure `r_buffer.is_buffer_failed()` is set and the default value is returned. Decoding
+	// never prints errors: the data may come from an untrusted peer.
 	Variant decode(TickDataBuffer &r_buffer) const;
 
 	// Returns the value as the readers receive it.

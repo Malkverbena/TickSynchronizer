@@ -223,6 +223,52 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Strings, bits and nested 
 	CHECK_FALSE(db.is_buffer_failed());
 }
 
+TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] UTF-8 validation") {
+	CHECK(TickDataBuffer::is_valid_utf8(nullptr, 0));
+	// Well-formed: ASCII, and the edges of each sequence length (U+0080, U+07FF, U+0800, U+D7FF, U+E000, U+FFFF,
+	// U+10000, U+10FFFF).
+	const char *valid[] = { "hello", "\xC2\x80", "\xDF\xBF", "\xE0\xA0\x80", "\xED\x9F\xBF", "\xEE\x80\x80", "\xEF\xBF\xBF", "\xF0\x90\x80\x80", "\xF4\x8F\xBF\xBF" };
+	for (const char *text : valid) {
+		CHECK_MESSAGE(TickDataBuffer::is_valid_utf8(reinterpret_cast<const uint8_t *>(text), int(strlen(text))), text);
+	}
+	// Malformed: a lone continuation byte, overlong encodings, a surrogate, above U+10FFFF, leads that are never
+	// valid, and truncated sequences.
+	const char *invalid[] = { "\x80", "\xC0\x80", "\xC1\xBF", "\xE0\x9F\xBF", "\xED\xA0\x80", "\xF0\x8F\xBF\xBF", "\xF4\x90\x80\x80", "\xF5\x80\x80\x80", "\xFF", "\xE2\x82", "\xF0\x90\x80", "a\xC3" };
+	for (const char *text : invalid) {
+		CHECK_FALSE(TickDataBuffer::is_valid_utf8(reinterpret_cast<const uint8_t *>(text), int(strlen(text))));
+	}
+	// NUL characters too.
+	const uint8_t with_nul[3] = { 'a', 0, 'b' };
+	CHECK_FALSE(TickDataBuffer::is_valid_utf8(with_nul, 3));
+}
+
+TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] A string that isn't UTF-8, or is too long, fails the buffer") {
+	TickDataBuffer db;
+	db.begin_write();
+	db.add_string(String::utf8("ação, 日本, 🎮"));
+	db.add_string("abcdef");
+	db.begin_read();
+	CHECK(db.read_string() == String::utf8("ação, 日本, 🎮"));
+	CHECK(db.read_string(6) == "abcdef");
+	CHECK_FALSE(db.is_buffer_failed());
+
+	// Longer than the reader accepts.
+	db.begin_read();
+	db.skip_string();
+	CHECK(db.read_string(5).is_empty());
+	CHECK(db.is_buffer_failed());
+
+	// Bytes that aren't UTF-8 aren't decoded (the engine's decoder would print an error for each of them).
+	const uint8_t invalid[5] = { 'o', 'k', 0xFF, 0xC0, 0x80 };
+	db.begin_write();
+	db.add_uint(5, TickDataBuffer::COMPRESSION_LEVEL_2);
+	db.add_bits(invalid, 40);
+	db.add_bool(true);
+	db.begin_read();
+	CHECK(db.read_string().is_empty());
+	CHECK(db.is_buffer_failed());
+}
+
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Equality compares every payload byte") {
 	// The NetworkSynchronizer version compared only `sizeof(int)` bytes.
 	TickDataBuffer a;

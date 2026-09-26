@@ -457,18 +457,31 @@ void TickDataBuffer::add_string(const String &p_input) {
 		buffer_failed = true;
 		ERR_FAIL_MSG(vformat("A string can't be longer than %d bytes in UTF-8, but it's %d bytes.", MAX_STRING_BYTES, utf8.length()));
 	}
+	if (!is_valid_utf8(reinterpret_cast<const uint8_t *>(utf8.get_data()), utf8.length())) {
+		buffer_failed = true;
+		ERR_FAIL_MSG("The string can't be sent: it has a NUL character or an unpaired surrogate, which the readers refuse.");
+	}
 	add_uint(uint64_t(utf8.length()), COMPRESSION_LEVEL_2);
 	add_bits(reinterpret_cast<const uint8_t *>(utf8.get_data()), utf8.length() * 8);
 }
 
-String TickDataBuffer::read_string() {
+String TickDataBuffer::read_string(int p_max_bytes) {
 	const int length = int(read_uint(COMPRESSION_LEVEL_2));
-	if (length == 0 || !check_reading(length * 8)) {
+	if (length == 0 || buffer_failed) {
+		return String();
+	}
+	if (length > p_max_bytes || !check_reading(length * 8)) {
+		buffer_failed = true;
 		return String();
 	}
 	LocalVector<char> chars;
 	chars.resize(length);
 	read_bits(reinterpret_cast<uint8_t *>(chars.ptr()), length * 8);
+	// Checked first: the engine's decoder would print an error for every invalid byte.
+	if (!is_valid_utf8(reinterpret_cast<const uint8_t *>(chars.ptr()), length)) {
+		buffer_failed = true;
+		return String();
+	}
 	return String::utf8(chars.ptr(), length);
 }
 
@@ -658,6 +671,57 @@ uint64_t TickDataBuffer::compress_unit_float(double p_value, double p_scale_fact
 
 double TickDataBuffer::decompress_unit_float(uint64_t p_value, double p_scale_factor) {
 	return MIN(double(p_value) / p_scale_factor, 1.0);
+}
+
+bool TickDataBuffer::is_valid_utf8(const uint8_t *p_bytes, int p_length) {
+	ERR_FAIL_COND_V(p_length < 0 || (p_length > 0 && p_bytes == nullptr), false);
+	// The well-formed byte sequences of the Unicode standard (table 3-7): no overlong encodings, no surrogates,
+	// nothing above U+10FFFF.
+	int offset = 0;
+	while (offset < p_length) {
+		const uint8_t lead = p_bytes[offset];
+		if (lead < 0x80) {
+			if (lead == 0) {
+				return false;
+			}
+			offset++;
+			continue;
+		}
+		int size = 0;
+		// Range of the second byte; the others are always 0x80 to 0xBF.
+		uint8_t second_min = 0x80;
+		uint8_t second_max = 0xBF;
+		if (lead >= 0xC2 && lead <= 0xDF) {
+			size = 2;
+		} else if (lead >= 0xE0 && lead <= 0xEF) {
+			size = 3;
+			if (lead == 0xE0) {
+				second_min = 0xA0;
+			} else if (lead == 0xED) {
+				second_max = 0x9F;
+			}
+		} else if (lead >= 0xF0 && lead <= 0xF4) {
+			size = 4;
+			if (lead == 0xF0) {
+				second_min = 0x90;
+			} else if (lead == 0xF4) {
+				second_max = 0x8F;
+			}
+		} else {
+			// A continuation byte, an overlong lead (0xC0, 0xC1), or beyond Unicode (0xF5 and above).
+			return false;
+		}
+		if (size > p_length - offset || p_bytes[offset + 1] < second_min || p_bytes[offset + 1] > second_max) {
+			return false;
+		}
+		for (int i = 2; i < size; i++) {
+			if ((p_bytes[offset + i] & 0xC0) != 0x80) {
+				return false;
+			}
+		}
+		offset += size;
+	}
+	return true;
 }
 
 bool TickDataBuffer::check_writing() {

@@ -313,6 +313,73 @@ TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Released net ids are quarantin
 	world.cores[1].unregister_object(&b);
 }
 
+TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Net ids past their quarantine are reused, however many came before") {
+	EventWorld world(1);
+	world.run(0.1);
+
+	// Objects come and go (projectiles, for example), all within the quarantine.
+	TestMover churn("churn", 1);
+	int registered = 0;
+	for (int i = 0; i < 65530; i++) {
+		world.cores[1].register_object(&churn);
+		registered += world.cores[1].get_net_id(&churn) != 0 ? 1 : 0;
+		world.cores[1].unregister_object(&churn);
+	}
+	CHECK(registered == 65530);
+
+	// Past the quarantine (2 x history_size ticks), their ids can be used again.
+	world.run(5.0);
+	int reused = 0;
+	for (int i = 0; i < 100; i++) {
+		world.cores[1].register_object(&churn);
+		reused += world.cores[1].get_net_id(&churn) != 0 ? 1 : 0;
+		world.cores[1].unregister_object(&churn);
+	}
+	CHECK(reused == 100);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EventSync] Event names are limited and must be valid UTF-8") {
+	EventWorld world(2);
+	world.run(2.0);
+
+	// The sender refuses a name above the limit; one at the limit goes through.
+	ERR_PRINT_OFF;
+	CHECK(world.cores[2].send_event(world.movers[2], String("x").repeat(TICK_MAX_EVENT_NAME_BYTES + 1), Variant(), TICK_FRAME_NONE, 0) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+	const String longest = String("y").repeat(TICK_MAX_EVENT_NAME_BYTES);
+	CHECK(world.cores[2].send_event(world.movers[2], longest, Variant(), TICK_FRAME_NONE, 0) == OK);
+	world.run(0.5);
+	REQUIRE(world.movers[1]->events.size() == 1);
+	CHECK(world.movers[1]->events[0].name == StringName(longest));
+
+	// A modified client sends a name above the limit, and one that isn't UTF-8: both messages are malformed.
+	const uint16_t target = world.cores[1].get_net_id(world.movers[1]);
+	const uint64_t malformed = world.cores[1].get_stats().malformed_packets;
+	TickDataBuffer long_name;
+	long_name.begin_write();
+	long_name.add_uint_bits(TICK_MESSAGE_EVENT, 8);
+	long_name.add_uint_bits(target, 16);
+	long_name.add_uint_bits(TICK_FRAME_NONE, 32);
+	long_name.add_string(String("z").repeat(60000));
+	TickCodec::variant()->encode(Variant(), long_name);
+	world.send_raw(2, 1, TICK_CHANNEL_CONTROL, long_name);
+
+	const uint8_t invalid[4] = { 0xFF, 0xFE, 0xC0, 0x80 };
+	TickDataBuffer invalid_name;
+	invalid_name.begin_write();
+	invalid_name.add_uint_bits(TICK_MESSAGE_EVENT, 8);
+	invalid_name.add_uint_bits(target, 16);
+	invalid_name.add_uint_bits(TICK_FRAME_NONE, 32);
+	invalid_name.add_uint_bits(4, 16);
+	invalid_name.add_bits(invalid, 32);
+	TickCodec::variant()->encode(Variant(), invalid_name);
+	world.send_raw(2, 1, TICK_CHANNEL_CONTROL, invalid_name);
+
+	world.run(0.5);
+	CHECK(world.cores[1].get_stats().malformed_packets == malformed + 2);
+	CHECK(world.movers[1]->events.size() == 1);
+}
+
 TEST_CASE("[Modules][TickSynchronizer][Security] Spoofed input and state are ignored (H1, H2)") {
 	EventWorld world(3);
 	// Clients also see each other directly, as in a mesh or through a relay.

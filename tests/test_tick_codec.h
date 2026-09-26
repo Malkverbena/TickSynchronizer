@@ -73,6 +73,56 @@ TEST_CASE("[Modules][TickSynchronizer][TickCodec] Wrong types keep the layout") 
 	CHECK_FALSE(buffer.is_buffer_failed());
 }
 
+TEST_CASE("[Modules][TickSynchronizer][TickCodec] Variants: complex values round trip, malformed ones fail the buffer") {
+	const Ref<TickCodec> codec = TickCodec::variant();
+	Dictionary value;
+	value["name"] = String::utf8("João 🎮");
+	Array list;
+	list.push_back(1);
+	list.push_back(2.5);
+	list.push_back(Vector3(1, 2, 3));
+	list.push_back(String("x"));
+	value[StringName("list")] = list;
+	PackedByteArray bytes;
+	bytes.resize(5);
+	bytes.fill(7);
+	value["bytes"] = bytes;
+	PackedStringArray strings;
+	strings.push_back("a");
+	strings.push_back(String::utf8("ü"));
+	value["strings"] = strings;
+	value["path"] = NodePath("a/b:c");
+	value["transform"] = Transform3D(Basis(Vector3(0, 1, 0), 0.5), Vector3(1, 2, 3));
+	CHECK(round_trip(codec, value) == Variant(value));
+
+	// A string variant whose bytes aren't UTF-8 (type 4, length 3, padding 1).
+	const uint8_t bad_string[12] = { 4, 0, 0, 0, 3, 0, 0, 0, 0xFF, 0xFE, 0xFD, 0 };
+	// A nil variant followed by 4 bytes that belong to no value.
+	const uint8_t trailing[8] = { 0, 0, 0, 0, 1, 2, 3, 4 };
+	const uint8_t *malformed[2] = { bad_string, trailing };
+	const int sizes[2] = { 12, 8 };
+	for (int i = 0; i < 2; i++) {
+		TickDataBuffer buffer;
+		buffer.begin_write();
+		buffer.add_uint_bits(uint64_t(sizes[i]), 16);
+		buffer.add_bits(malformed[i], sizes[i] * 8);
+		buffer.begin_read();
+		// The decoder's errors are silenced while it runs, and the setting is restored afterwards.
+		CHECK(codec->decode(buffer) == Variant());
+		CHECK(buffer.is_buffer_failed());
+		CHECK(CoreGlobals::print_error_enabled);
+	}
+	ERR_PRINT_OFF;
+	TickDataBuffer buffer;
+	buffer.begin_write();
+	buffer.add_uint_bits(12, 16);
+	buffer.add_bits(bad_string, 96);
+	buffer.begin_read();
+	codec->decode(buffer);
+	CHECK_FALSE(CoreGlobals::print_error_enabled);
+	ERR_PRINT_ON;
+}
+
 TEST_CASE("[Modules][TickSynchronizer][TickCodec] Interpolation and schema hash") {
 	const Ref<TickCodec> real = TickCodec::real(TickCodec::PRECISION_SINGLE);
 	CHECK(double(real->interpolate(0.0, 10.0, 0.25)) == doctest::Approx(2.5));

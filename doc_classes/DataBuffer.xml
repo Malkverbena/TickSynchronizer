@@ -190,7 +190,7 @@
 		<method name="read_string">
 			<return type="String" />
 			<description>
-				Reads a string written with [method add_string].
+				Reads a string written with [method add_string]. Bytes that aren't valid UTF-8 (possible in data from another peer) return an empty string and mark the buffer as failed (see [method is_failed]).
 			</description>
 		</method>
 		<method name="read_uint">

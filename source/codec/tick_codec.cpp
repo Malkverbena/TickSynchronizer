@@ -1,5 +1,6 @@
 #include "tick_codec.h"
 
+#include "core/core_globals.h"
 #include "core/io/marshalls.h"
 #include "core/math/math_funcs.h"
 #include "core/math/quaternion.h"
@@ -351,9 +352,17 @@ Variant TickCodec::decode(TickDataBuffer &r_buffer) const {
 			if (r_buffer.is_buffer_failed()) {
 				return Variant();
 			}
+			// The data may come from an untrusted peer: objects are never decoded, and the engine's errors aren't
+			// printed, or a peer could flood the log (the decoder prints a line for every invalid byte of a string).
+			// A malformed value fails the buffer.
 			Variant value;
-			// Objects are never decoded: the data may come from an untrusted peer.
-			if (decode_variant(value, bytes.ptr(), length, nullptr, false) != OK) {
+			int used = 0;
+			const bool print_errors = CoreGlobals::print_error_enabled;
+			CoreGlobals::print_error_enabled = false;
+			const Error err = decode_variant(value, bytes.ptr(), length, &used, false);
+			CoreGlobals::print_error_enabled = print_errors;
+			if (err != OK || used != length) {
+				r_buffer.mark_failed();
 				return Variant();
 			}
 			return value;

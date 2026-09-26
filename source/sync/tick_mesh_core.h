@@ -105,10 +105,23 @@ private:
 		Variant data;
 	};
 
+	// Marks a call into the engine that may run game code (ticks, events, the listener). Game code may stop the
+	// engine: `stop()` then waits until the outermost call returns, so nothing the engine is working on is freed
+	// under it.
+	class BusyScope {
+		TickMeshCore *core = nullptr;
+
+	public:
+		explicit BusyScope(TickMeshCore *p_core);
+		~BusyScope();
+	};
+
 	Settings settings;
 	Stats stats;
 	Listener *listener = nullptr;
 	bool running = false;
+	int busy_depth = 0;
+	bool stop_requested = false;
 	Ref<TickTransport> transport;
 	int local_id = 0;
 	TickFixedStepper stepper;
@@ -142,6 +155,9 @@ private:
 	bool is_clock_master() const { return local_id == settings.clock_master; }
 	double get_tick_delta() const { return 1.0 / double(settings.ticks_per_second); }
 	bool is_peer_ready(int p_peer) const;
+	// Running, and not asked to stop.
+	bool is_active() const { return running && !stop_requested; }
+	void stop_now();
 
 	void send(int p_peer, TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message);
 	void send_to_ready_peers(TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message, bool p_include_self);
@@ -206,8 +222,10 @@ public:
 	virtual void set_listener(Listener *p_listener) override { listener = p_listener; }
 
 	virtual Error start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec) override;
+	// Called from game code the engine is running (a tick, an event, a signal), the engine stops once that call
+	// returns; it isn't running anymore from now on.
 	virtual void stop() override;
-	virtual bool is_running() const override { return running; }
+	virtual bool is_running() const override { return is_active(); }
 
 	virtual void register_object(TickSyncObject *p_object) override;
 	virtual void unregister_object(TickSyncObject *p_object) override;

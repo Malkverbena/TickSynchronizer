@@ -137,6 +137,50 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Objects register once and repli
 	CHECK(world.cores[1].get_stats().malformed_packets == 0);
 }
 
+// Node 1 registers the objects and drops them, a frame apart; returns how many of them got an id.
+static int churn_objects(MeshWorld &r_world, const LocalVector<AuthMover *> &p_movers) {
+	TickMeshCore &core = r_world.cores[1];
+	for (AuthMover *mover : p_movers) {
+		core.register_object(mover);
+	}
+	r_world.run(1.0 / 60.0);
+	int registered = 0;
+	for (AuthMover *mover : p_movers) {
+		registered += core.get_net_id(mover) != 0 ? 1 : 0;
+		core.unregister_object(mover);
+	}
+	r_world.run(1.0 / 60.0);
+	return registered;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] Registry ids past their quarantine are reused, however many came before") {
+	MeshWorld world(1);
+	world.run(0.2);
+	LocalVector<AuthMover *> movers;
+	for (int i = 0; i < 2000; i++) {
+		movers.push_back(memnew(AuthMover(vformat("churn_%d", i), 1)));
+	}
+
+	// 60,000 objects within the quarantine.
+	int registered = 0;
+	for (int batch = 0; batch < 30; batch++) {
+		registered += churn_objects(world, movers);
+	}
+	CHECK(registered == 60000);
+
+	// Past the quarantine, the registry keeps assigning ids beyond 65,535 objects in total.
+	world.run(5.0);
+	registered = 0;
+	for (int batch = 0; batch < 5; batch++) {
+		registered += churn_objects(world, movers);
+	}
+	CHECK(registered == 10000);
+
+	for (AuthMover *mover : movers) {
+		memdelete(mover);
+	}
+}
+
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A requested object changes owner and keeps its state") {
 	MeshWorld world(3);
 	world.run(2.0);

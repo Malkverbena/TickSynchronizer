@@ -1,5 +1,6 @@
 #include "enet_hosted_mesh_transport.h"
 
+#include "../common/tick_data_buffer.h"
 #include "../sync/tick_protocol.h"
 #include "tick_multiplayer_peer.h"
 
@@ -137,8 +138,9 @@ struct HostedMeshReader {
 	}
 	String get_string() {
 		const uint32_t length = get_u32();
-		// Addresses, and certificates (PEM) with DTLS.
-		if (failed || length > 16384 || offset + int(length) > size) {
+		// Addresses, and certificates (PEM) with DTLS. Checked before decoding: the engine's decoder would print an
+		// error for every invalid byte.
+		if (failed || length > 16384 || offset + int(length) > size || !TickDataBuffer::is_valid_utf8(data + offset, int(length))) {
 			failed = true;
 			return String();
 		}
@@ -789,9 +791,10 @@ void EnetHostedMeshTransport::host_on_receive(int p_from, int p_channel, const u
 				}
 			}
 			host_send_succession();
-		} else if (type == CONTROL_CERTIFICATE && encrypted) {
+		} else if (type == CONTROL_CERTIFICATE && encrypted && !member_certificates.has(p_from)) {
+			// Only the first one counts: the others aren't even read.
 			const String certificate = reader.get_string();
-			if (!reader.failed && !member_certificates.has(p_from)) {
+			if (!reader.failed) {
 				member_certificates.insert(p_from, certificate);
 				// Introductions that waited for it.
 				LocalVector<uint64_t> keys;

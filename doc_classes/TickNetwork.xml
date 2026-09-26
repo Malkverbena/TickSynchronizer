@@ -101,7 +101,7 @@
 			<param index="2" name="frame" type="int" default="-1" />
 			<param index="3" name="peer" type="int" default="0" />
 			<description>
-				Sends an event without target object, received with [signal event_received]. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts). From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The [param payload] can't contain objects and is limited to [member max_event_size] bytes. Events aren't repeated during rewinds.
+				Sends an event without target object, received with [signal event_received]. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts). From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The name of the event takes at most 255 bytes in UTF-8; the [param payload] can't contain objects and is limited to [member max_event_size] bytes. Events aren't repeated during rewinds.
 			</description>
 		</method>
 		<method name="set_object_relevant">
@@ -123,7 +123,7 @@
 		<method name="stop">
 			<return type="void" />
 			<description>
-				Stops the network. The objects stay registered and synchronize again on the next [method start].
+				Stops the network. The objects stay registered and synchronize again on the next [method start]. It can be called from the network's own callbacks and signals (an event, [method TickObject._process_tick]): the network then finishes what it was doing first, and [method start] works again once that call returns.
 			</description>
 		</method>
 	</methods>
