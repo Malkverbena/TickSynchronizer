@@ -138,6 +138,14 @@ func make(data):
 	REQUIRE(crate != nullptr);
 	Node *player = server.spawner->spawn_custom(Vector2(5, 6), "Player_2", 2);
 	REQUIRE(player != nullptr);
+	// Data the network can't send: nothing is spawned, not even here.
+	Ref<RefCounted> not_sendable;
+	not_sendable.instantiate();
+	ERR_PRINT_OFF;
+	CHECK(server.spawner->spawn(scene_path, "Unsent", 1, not_sendable) == nullptr);
+	ERR_PRINT_ON;
+	CHECK(server.network->get_node_or_null(NodePath("Unsent")) == nullptr);
+	CHECK(server.spawner->get_spawned_nodes().size() == 2);
 	run_worlds(local_network, server, client, 1.0);
 
 	Node *client_crate = client.network->get_node_or_null(NodePath(String(crate->get_name())));

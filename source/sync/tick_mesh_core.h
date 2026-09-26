@@ -244,6 +244,8 @@ public:
 	virtual uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override;
 	virtual void despawn(uint32_t p_spawn_id) override;
 	virtual uint32_t get_next_spawn_id() const override;
+	// Only the spawns of this node are recorded here.
+	virtual bool owns_spawn(uint32_t p_spawn_id) const override { return running && spawns.has(p_spawn_id); }
 
 	// Object events go to the target's current owner (forwarded if it changed on the way); events without target
 	// go to `p_peer`, or every node with 0.

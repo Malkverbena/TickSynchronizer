@@ -7,19 +7,24 @@
 // A `MultiplayerPeer` over an `EnetHostedMeshTransport` (ADR-050): `SceneMultiplayer` (RPCs, spawners, synchronizers)
 // reaches every player of the mesh, directly or relayed by the host, next to the `TickNetwork` that uses the same
 // transport. Get it with `EnetHostedMeshTransport.get_multiplayer_peer()`.
+//
+// `SceneMultiplayer` takes peer 1 for the server. After a host migration nobody is peer 1: the `host_migrated` signal
+// lets the game move to the new host the authority it gave to peer 1 (ADR-067).
 class TickMultiplayerPeer : public MultiplayerPeer {
 	GDCLASS(TickMultiplayerPeer, MultiplayerPeer);
 	friend class EnetHostedMeshTransport;
 
 	Ref<EnetHostedMeshTransport> transport;
 	int target_peer = TARGET_PEER_BROADCAST;
+	// The host as of the events emitted so far: the old host of the next migration.
+	int host_peer = 1;
 	// The packet returned by the last `get_packet()`, valid until the next call.
 	LocalVector<uint8_t> current_packet;
 
 	const EnetHostedMeshTransport::MultiplayerPacket *get_next_packet() const;
 
 protected:
-	static void _bind_methods() {}
+	static void _bind_methods();
 
 public:
 	// PacketPeer.

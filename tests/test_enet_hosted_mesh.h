@@ -427,6 +427,81 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player takes o
 	CHECK(mesh.receive(4, 3, TICK_CHANNEL_INPUTS));
 }
 
+// What the multiplayer peers reported, in order: a migration (`old_host` to `new_host`), or a peer that left (`left`).
+struct MultiplayerReport {
+	int peer = 0;
+	int old_host = 0;
+	int new_host = 0;
+	int left = 0;
+};
+static MultiplayerReport multiplayer_reports[16];
+static int multiplayer_report_count = 0;
+
+static void report_migration(int p_old_host, int p_new_host, int p_peer) {
+	if (multiplayer_report_count < 16) {
+		MultiplayerReport &report = multiplayer_reports[multiplayer_report_count++];
+		report = MultiplayerReport();
+		report.peer = p_peer;
+		report.old_host = p_old_host;
+		report.new_host = p_new_host;
+	}
+}
+
+static void report_peer_left(int p_left, int p_peer) {
+	if (multiplayer_report_count < 16) {
+		MultiplayerReport &report = multiplayer_reports[multiplayer_report_count++];
+		report = MultiplayerReport();
+		report.peer = p_peer;
+		report.left = p_left;
+	}
+}
+
+TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer reports the host migration") {
+	HostedMesh mesh(3);
+	Ref<TickMultiplayerPeer> peers[5];
+	for (int i = 2; i <= 4; i++) {
+		peers[i] = mesh.nodes[i]->get_multiplayer_peer();
+		peers[i]->connect(SNAME("host_migrated"), callable_mp_static(&report_migration).bind(i));
+		peers[i]->connect(SNAME("peer_disconnected"), callable_mp_static(&report_peer_left).bind(i));
+	}
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.poll(20);
+	for (int i = 2; i <= 4; i++) {
+		peers[i]->poll();
+	}
+	multiplayer_report_count = 0;
+
+	CHECK(mesh.nodes[1]->hand_over() == OK);
+	for (int t = 0; t < 3000 && multiplayer_report_count < 6; t++) {
+		for (int i = 2; i <= 4; i++) {
+			peers[i]->poll();
+		}
+		OS::get_singleton()->delay_usec(1000);
+	}
+	// Every player is told the new host, then that the old one left.
+	REQUIRE(multiplayer_report_count == 6);
+	for (int i = 2; i <= 4; i++) {
+		int migrated_at = -1;
+		int left_at = -1;
+		for (int r = 0; r < multiplayer_report_count; r++) {
+			const MultiplayerReport &report = multiplayer_reports[r];
+			if (report.peer == i && report.old_host == 1 && report.new_host == 2) {
+				migrated_at = r;
+			} else if (report.peer == i && report.left == 1) {
+				left_at = r;
+			}
+		}
+		CHECK(migrated_at >= 0);
+		CHECK(left_at > migrated_at);
+	}
+	// `SceneMultiplayer` still takes peer 1 for the server; the peer itself knows who hosts.
+	CHECK(peers[2]->is_server());
+	CHECK_FALSE(peers[3]->is_server());
+	CHECK(peers[3]->get_unique_id() == 3);
+	multiplayer_report_count = 0;
+}
+
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that stops answering is replaced; relayed players are lost") {
 	// Player 4 is only relayed: it can't reach the successor.
 	HostedMesh mesh(3, 4);
@@ -477,8 +552,10 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority mi
 	}
 	uint64_t last = OS::get_singleton()->get_ticks_usec();
 	int stopped = 0;
-	for (int phase = 0; phase < 2; phase++) {
-		const uint64_t end = last + 2500000;
+	uint32_t crate = 0;
+	const uint64_t durations[4] = { 2500000, 500000, 2500000, 500000 };
+	for (int phase = 0; phase < 4; phase++) {
+		const uint64_t end = last + durations[phase];
 		while (OS::get_singleton()->get_ticks_usec() < end) {
 			const uint64_t now = OS::get_singleton()->get_ticks_usec();
 			const double delta = double(now - last) / 1000000.0;
@@ -492,11 +569,27 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority mi
 		}
 		if (phase == 0) {
 			REQUIRE(cores[3].is_predicting());
+			crate = cores[1].spawn("Spawner", 0, "Crate", 1, Variant());
+			REQUIRE(crate != 0);
+			CHECK(cores[1].owns_spawn(crate));
+		} else if (phase == 1) {
+			CHECK(listeners[3].spawns == 1);
+			CHECK_FALSE(cores[3].owns_spawn(crate));
 			// The host leaves, handing the mesh over.
 			cores[1].stop();
 			mesh.nodes[1]->hand_over();
 			stopped = 1;
+		} else if (phase == 2) {
+			// The new authority took over the old one's spawns: removing one reaches the others.
+			CHECK(cores[2].owns_spawn(crate));
+			CHECK_FALSE(cores[3].owns_spawn(crate));
+			cores[2].despawn(crate);
+			CHECK_FALSE(cores[2].owns_spawn(crate));
 		}
+	}
+	for (int peer = 3; peer <= 4; peer++) {
+		CHECK(listeners[peer].despawns == 1);
+		CHECK(listeners[peer].last_despawn == crate);
 	}
 
 	// Player 2 is the authority now; the others joined it again and predict.

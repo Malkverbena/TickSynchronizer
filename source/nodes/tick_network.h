@@ -144,6 +144,7 @@ public:
 	void despawn(uint32_t p_spawn_id);
 	uint32_t get_next_spawn_id() const { return engine->get_next_spawn_id(); }
 	bool can_spawn() const { return running && engine->can_spawn(); }
+	bool owns_spawn(uint32_t p_spawn_id) const { return running && engine->owns_spawn(p_spawn_id); }
 
 	// Distributed authority (ADR-041).
 	int get_object_owner(const TickSyncObject *p_object) const;

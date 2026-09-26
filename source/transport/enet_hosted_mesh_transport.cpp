@@ -387,7 +387,7 @@ void EnetHostedMeshTransport::push_event(EventType p_type, int p_peer) {
 	event.type = p_type;
 	event.peer = p_peer;
 	events.push_back(event);
-	if (multiplayer_peer && p_type != EVENT_HOST_MIGRATED) {
+	if (multiplayer_peer) {
 		multiplayer_events.push_back(event);
 	}
 }
@@ -1926,6 +1926,7 @@ void EnetHostedMeshTransport::attach_multiplayer_peer(TickMultiplayerPeer *p_pee
 	if (p_peer == nullptr) {
 		return;
 	}
+	p_peer->host_peer = host_id;
 	// The peers connected before the multiplayer peer existed.
 	LocalVector<int> connected;
 	get_connected_peers(connected);

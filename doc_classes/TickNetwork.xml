@@ -231,7 +231,7 @@
 			<param index="0" name="old_host" type="int" />
 			<param index="1" name="new_host" type="int" />
 			<description>
-				With [constant AUTHORITY_SINGLE] over an [EnetHostedMeshTransport]: the host [param old_host] left and [param new_host] is the authority now. The new authority goes on from the latest state it had, with the same objects and timeline; the objects the old host controlled (its NPCs and its own player) are now controlled by the new one, so the game may want to remove the old host's player. The others join the new authority again, like after a reconnection.
+				With [constant AUTHORITY_SINGLE] over an [EnetHostedMeshTransport]: the host [param old_host] left and [param new_host] is the authority now. The new authority goes on from the latest state it had, with the same objects and timeline; the objects the old host controlled (its NPCs and its own player) are now controlled by the new one, so the game may want to remove the old host's player. The spawns of the old host are the new authority's too (see [TickSpawner]). The others join the new authority again, like after a reconnection. [SceneMultiplayer] doesn't follow: see [signal TickMultiplayerPeer.host_migrated].
 			</description>
 		</signal>
 		<signal name="peer_left">

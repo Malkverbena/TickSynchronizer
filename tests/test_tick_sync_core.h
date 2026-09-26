@@ -71,12 +71,20 @@ public:
 	int ready_peers = 0;
 	int prediction_started = 0;
 	int rewinds = 0;
+	int spawns = 0;
+	int despawns = 0;
+	uint32_t last_despawn = 0;
 	String rejected;
 
 	virtual void on_peer_ready(int p_peer) override { ready_peers++; }
 	virtual void on_prediction_started(uint32_t p_frame) override { prediction_started++; }
 	virtual void on_rewound(uint32_t p_frame, int p_frame_count) override { rewinds++; }
 	virtual void on_rejected(const String &p_reason) override { rejected = p_reason; }
+	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override { spawns++; }
+	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override {
+		despawns++;
+		last_despawn = p_spawn_id;
+	}
 };
 
 // A server and two clients in a star, over a simulated network.

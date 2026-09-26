@@ -4,7 +4,7 @@
 		Replicates the creation and removal of nodes from the server to the clients.
 	</brief_description>
 	<description>
-		On the server, [method spawn] instantiates one of [member spawnable_scenes] (or [method spawn_custom] calls [member spawn_function]) under [member spawn_path], and every client creates the same node with the same name. Removing a spawned node from the tree on the server removes it on the clients. Clients that join later receive the live spawns.
+		On the server, [method spawn] instantiates one of [member spawnable_scenes] (or [method spawn_custom] calls [member spawn_function]) under [member spawn_path], and every client creates the same node with the same name. Removing a spawned node from the tree on the server removes it on the clients. Clients that join later receive the live spawns. After a host migration ([signal TickNetwork.host_migrated]), the new server owns the spawns of the old one: removing their nodes removes them on the others too. If the network refuses the spawn (the data can't hold objects, callables, signals or RIDs), nothing is spawned and [code]null[/code] is returned.
 		The controller peer given to the spawn becomes the [member TickObject.controller_peer] of every [TickObject] of the new node, on all peers. Clients only instantiate scenes of [member spawnable_scenes] or call [member spawn_function]; nothing else coming from the network is instantiated.
 		[codeblock]
 		func _on_peer_ready(peer: int):

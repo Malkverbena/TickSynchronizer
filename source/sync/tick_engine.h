@@ -136,6 +136,9 @@ public:
 	virtual uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) = 0;
 	virtual void despawn(uint32_t p_spawn_id) = 0;
 	virtual uint32_t get_next_spawn_id() const = 0;
+	// Whether removing the node of `p_spawn_id` despawns it on the others: this peer spawned it, or took it over with
+	// the authority after a host migration (ADR-062).
+	virtual bool owns_spawn(uint32_t p_spawn_id) const = 0;
 
 	virtual Error send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) = 0;
 	virtual uint32_t get_event_frame(double p_seconds) const = 0;

@@ -401,6 +401,8 @@ public:
 	virtual uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override;
 	virtual void despawn(uint32_t p_spawn_id) override;
 	virtual uint32_t get_next_spawn_id() const override { return next_spawn_id; }
+	// The server owns every spawn: a client that becomes the server takes over the old one's (it kept their records).
+	virtual bool owns_spawn(uint32_t p_spawn_id) const override { return role == ROLE_SERVER && spawns.has(p_spawn_id); }
 
 	// Sends an event to `p_target` (or the network when null). Client: to the server. Server: to `p_peer`, or
 	// every client with 0. `p_frame` schedules it (`TICK_FRAME_NONE`: see `notes/f3-design.md`).
