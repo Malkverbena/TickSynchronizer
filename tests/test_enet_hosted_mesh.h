@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../source/common/tick_engine_compat.h"
 #include "../source/sync/tick_sync_core.h"
 #include "../source/transport/enet_hosted_mesh_transport.h"
 #include "../source/transport/tick_multiplayer_peer.h"
@@ -399,7 +400,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player takes o
 		}
 	}
 
-	mesh.nodes[1]->close();
+	CHECK(mesh.nodes[1]->hand_over() == OK);
 	const int remaining[3] = { 2, 3, 4 };
 	CHECK(wait_peer_counts(mesh, remaining, 3, 2, 3000, 1));
 	CHECK(mesh.nodes[2]->is_hosting());
@@ -491,9 +492,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority mi
 		}
 		if (phase == 0) {
 			REQUIRE(cores[3].is_predicting());
-			// The host leaves.
+			// The host leaves, handing the mesh over.
 			cores[1].stop();
-			mesh.nodes[1]->close();
+			mesh.nodes[1]->hand_over();
 			stopped = 1;
 		}
 	}
@@ -573,6 +574,271 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player refused
 	CHECK_FALSE(mesh.nodes[3]->is_hosting());
 	CHECK(mesh.nodes[2]->get_host_peer() == 1);
 	host.stop();
+}
+
+// Drops the events waiting at `p_node`; returns whether one of them was a host migration.
+static bool drain_events(const Ref<Mesh> &p_node) {
+	bool migrated = false;
+	TickTransport::Event event;
+	while (p_node->pop_event(event)) {
+		migrated = migrated || event.type == TickTransport::EVENT_HOST_MIGRATED;
+	}
+	return migrated;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that closes ends the mesh for everyone") {
+	HostedMesh mesh(3);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.poll(20);
+	for (int i = 2; i <= 4; i++) {
+		drain_events(mesh.nodes[i]);
+	}
+
+	mesh.nodes[1]->close();
+	bool all_left = false;
+	for (int t = 0; t < 3000 && !all_left; t++) {
+		mesh.poll(1);
+		all_left = true;
+		for (int i = 2; i <= 4; i++) {
+			all_left = all_left && mesh.nodes[i]->get_status() == Mesh::STATUS_DISCONNECTED;
+		}
+	}
+	CHECK(all_left);
+	for (int i = 2; i <= 4; i++) {
+		CHECK_FALSE(mesh.nodes[i]->is_hosting());
+		CHECK_FALSE(drain_events(mesh.nodes[i]));
+	}
+}
+
+// The game's decision on the players joining: the ones that send "secret" are admitted, "later" waits for the game.
+static int waiting_player = 0;
+static Variant check_join(int p_peer, const PackedByteArray &p_data, const String &p_address) {
+	const String password = String::utf8((const char *)p_data.ptr(), p_data.size());
+	if (password == "later") {
+		waiting_player = p_peer;
+		return Variant();
+	}
+	return password == "secret" && p_address == "127.0.0.1";
+}
+
+// Joins the mesh as the next node, with `p_join_data`, and waits until it's connected or refused.
+static void join(HostedMesh &r_mesh, const String &p_join_data) {
+	r_mesh.count++;
+	r_mesh.nodes[r_mesh.count] = Mesh::create_player("127.0.0.1", r_mesh.port, Mesh::COMPRESSION_RANGE_CODER, Ref<TLSOptions>(), String(), p_join_data.to_utf8_buffer());
+	REQUIRE(r_mesh.nodes[r_mesh.count].is_valid());
+	for (int t = 0; t < 3000 && r_mesh.nodes[r_mesh.count]->get_status() == Mesh::STATUS_CONNECTING && p_join_data != "later"; t++) {
+		r_mesh.poll(1);
+	}
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The host admits only the players the game accepts") {
+	HostedMesh mesh(0);
+	mesh.nodes[1]->set_join_validator(callable_mp_static(&check_join));
+
+	join(mesh, "secret");
+	CHECK(mesh.nodes[2]->get_status() == Mesh::STATUS_CONNECTED);
+	CHECK(mesh.nodes[2]->get_local_peer_id() == 2);
+
+	// Refused: it never gets an id, and nobody learns about it.
+	join(mesh, "wrong");
+	CHECK(mesh.nodes[3]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK(mesh.nodes[3]->get_local_peer_id() == 0);
+	CHECK(mesh.nodes[1]->get_peers() == PackedInt32Array({ 2 }));
+	CHECK(mesh.nodes[2]->get_peers() == PackedInt32Array({ 1 }));
+	CHECK(int(mesh.nodes[1]->get_stats()["rejected_connections"]) == 1);
+
+	// The game decides later.
+	join(mesh, "later");
+	mesh.poll(200);
+	CHECK(mesh.nodes[4]->get_status() == Mesh::STATUS_CONNECTING);
+	CHECK(mesh.nodes[1]->get_peers().size() == 1);
+	REQUIRE(waiting_player != 0);
+	CHECK(mesh.nodes[1]->admit_player(waiting_player) == OK);
+	for (int t = 0; t < 3000 && !mesh.nodes[2]->is_peer_connected(waiting_player); t++) {
+		mesh.poll(1);
+	}
+	CHECK(mesh.nodes[4]->get_local_peer_id() == waiting_player);
+	CHECK(mesh.nodes[2]->is_peer_connected(waiting_player));
+	CHECK(mesh.nodes[4]->is_peer_connected(2));
+	waiting_player = 0;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Joins from one address are limited") {
+	HostedMesh mesh(0);
+	// Five joins at once from the same address are fine; the sixth is refused right away.
+	Ref<Mesh> players[6];
+	for (int i = 0; i < 6; i++) {
+		players[i] = Mesh::create_player("127.0.0.1", mesh.port);
+		REQUIRE(players[i].is_valid());
+	}
+	for (int t = 0; t < 3000 && int(mesh.nodes[1]->get_peers().size()) + int(mesh.nodes[1]->get_stats()["rejected_connections"]) < 6; t++) {
+		mesh.poll(1);
+		for (int i = 0; i < 6; i++) {
+			players[i]->poll();
+		}
+	}
+	CHECK(mesh.nodes[1]->get_peers().size() == 5);
+	CHECK(int(mesh.nodes[1]->get_stats()["rejected_connections"]) == 1);
+	for (int i = 0; i < 6; i++) {
+		players[i]->close();
+	}
+	mesh.poll(20);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player cut off from the host leaves instead of taking over") {
+	HostedMesh mesh(2);
+	for (int i = 1; i <= 3; i++) {
+		mesh.nodes[i]->set_host_timeout(1.0);
+	}
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.poll(20);
+	REQUIRE(mesh.nodes[3]->get_succession() == PackedInt32Array({ 2, 3 }));
+	drain_events(mesh.nodes[2]);
+
+	// Player 2, the first of the succession, hears nobody for a while (a phone in a tunnel), long enough for the host
+	// to drop it.
+	const uint64_t end = OS::get_singleton()->get_ticks_usec() + 3000000;
+	while (OS::get_singleton()->get_ticks_usec() < end) {
+		mesh.nodes[1]->poll();
+		mesh.nodes[3]->poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	// Back, it finds the host gone for it alone: player 3 still has it.
+	for (int t = 0; t < 4000 && mesh.nodes[2]->get_status() != Mesh::STATUS_DISCONNECTED; t++) {
+		mesh.poll(1);
+	}
+	CHECK(mesh.nodes[2]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK_FALSE(mesh.nodes[2]->is_hosting());
+	CHECK_FALSE(drain_events(mesh.nodes[2]));
+	CHECK(mesh.nodes[3]->get_host_peer() == 1);
+	CHECK(mesh.nodes[3]->is_peer_connected(1));
+	CHECK(mesh.nodes[1]->is_peer_connected(3));
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Players that follow the successor before it notices the host is gone") {
+	// Players 2 and 3 link directly; then player 3 refuses direct links, so 3-4 is relayed while 2-4 is direct.
+	HostedMesh mesh(2);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	REQUIRE(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_DIRECT);
+	mesh.nodes[3]->set_direct_connections(false);
+	join(mesh, String());
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	REQUIRE(mesh.nodes[3]->get_peer_path(4) == Mesh::PATH_RELAYED);
+	REQUIRE(mesh.nodes[2]->get_peer_path(4) == Mesh::PATH_DIRECT);
+	mesh.poll(20);
+	REQUIRE(mesh.nodes[3]->get_succession() == PackedInt32Array({ 2, 3, 4 }));
+
+	// The host freezes; players 3 and 4 notice first and follow player 2 before it notices.
+	mesh.nodes[2]->set_host_timeout(1.6);
+	mesh.nodes[3]->set_host_timeout(1.0);
+	mesh.nodes[4]->set_host_timeout(1.0);
+	bool done = false;
+	for (int t = 0; t < 8000 && !done; t++) {
+		for (int i = 2; i <= 4; i++) {
+			mesh.nodes[i]->poll();
+		}
+		OS::get_singleton()->delay_usec(1000);
+		done = mesh.nodes[2]->is_hosting() && mesh.nodes[3]->get_host_peer() == 2 && mesh.nodes[4]->get_host_peer() == 2 && mesh.nodes[3]->is_peer_connected(4) && mesh.nodes[4]->is_peer_connected(3);
+	}
+	CHECK(mesh.nodes[2]->is_hosting());
+	CHECK(mesh.nodes[3]->get_host_peer() == 2);
+	CHECK(mesh.nodes[4]->get_host_peer() == 2);
+	// Their pair comes back, relayed by the new host.
+	CHECK(mesh.nodes[3]->get_peer_path(4) == Mesh::PATH_RELAYED);
+	CHECK(mesh.nodes[4]->get_peer_path(3) == Mesh::PATH_RELAYED);
+	const uint8_t payload[2] = { 4, 2 };
+	CHECK(mesh.nodes[3]->send(4, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 2) == OK);
+	bool received = false;
+	for (int t = 0; t < 2000 && !received; t++) {
+		for (int i = 2; i <= 4; i++) {
+			mesh.nodes[i]->poll();
+		}
+		OS::get_singleton()->delay_usec(1000);
+		TickTransport::Packet packet;
+		while (mesh.nodes[4]->pop_packet(packet)) {
+			received = received || (packet.from_peer == 3 && packet.channel == TICK_CHANNEL_CONTROL);
+		}
+	}
+	CHECK(received);
+}
+
+// Sends a control message of the hosted mesh protocol: a type byte, then little-endian fields.
+static void send_control(const Variant &p_link, int p_type, const LocalVector<uint32_t> &p_fields) {
+	PackedByteArray message;
+	message.push_back(uint8_t(p_type));
+	for (const uint32_t field : p_fields) {
+		for (int i = 0; i < 4; i++) {
+			message.push_back(uint8_t(field >> (8 * i)));
+		}
+	}
+	Object *link = p_link;
+	// Null after a failed `REQUIRE`, which doesn't stop the test case (the engine builds without exceptions).
+	if (link) {
+		link->call("send", 0, message, 1);
+	}
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player keeps no more pairs than the mesh can have") {
+	// A fake host welcomes a player into a mesh of 4 players, then introduces it to 50 others.
+	Ref<RefCounted> host = Object::cast_to<RefCounted>(ClassDB::instantiate("ENetConnection"));
+	REQUIRE(host.is_valid());
+	int port = 0;
+	for (int attempt = 0; attempt < 10 && port == 0; attempt++) {
+		const int candidate = 38000 + int((OS::get_singleton()->get_ticks_usec() + uint64_t(attempt) * 7919) % 4000);
+		if (int(host->call("create_host_bound", "127.0.0.1", candidate, 4, 27, 0, 0)) == OK) {
+			port = candidate;
+		}
+	}
+	REQUIRE(port != 0);
+	// The players' compression (range coder).
+	host->call("compress", 1);
+	Ref<Mesh> player = Mesh::create_player("127.0.0.1", port);
+	REQUIRE(player.is_valid());
+	Variant link;
+	bool joined = false;
+	for (int t = 0; t < 2000 && !joined; t++) {
+		player->poll();
+		const Array event = host->call("service", 0);
+		if (int(event[0]) == 1) {
+			link = event[1];
+		} else if (int(event[0]) == 3) {
+			// The join data: welcomed as player 2 of a mesh of 4.
+			joined = true;
+		}
+		OS::get_singleton()->delay_usec(1000);
+	}
+	REQUIRE(joined);
+	LocalVector<uint32_t> welcome;
+	welcome.push_back(2);
+	welcome.push_back(0);
+	welcome.push_back(4);
+	send_control(link, 1, welcome);
+	for (uint32_t i = 0; i < 50; i++) {
+		LocalVector<uint32_t> open;
+		open.push_back(10 + i);
+		open.push_back(1000 + i);
+		send_control(link, 2, open);
+		LocalVector<uint32_t> relay;
+		relay.push_back(100 + i);
+		send_control(link, 4, relay);
+	}
+	for (int t = 0; t < 300; t++) {
+		player->poll();
+		host->call("service", 0);
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(player->get_status() == Mesh::STATUS_CONNECTED);
+	int pairs = 0;
+	for (int id = 10; id < 150; id++) {
+		pairs += player->get_peer_path(id) != Mesh::PATH_NONE ? 1 : 0;
+	}
+	CHECK(pairs == 2);
+	player->close();
+	host->call("destroy");
 }
 
 } // namespace TestEnetHostedMesh

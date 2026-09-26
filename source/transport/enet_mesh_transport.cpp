@@ -141,6 +141,10 @@ Error EnetMeshTransport::send_now(int p_node, MeshNode &r_node, int p_channel, T
 	}
 	ENetPacketPeer *peer = as_peer(r_node.peer);
 	ERR_FAIL_NULL_V(peer, ERR_UNAVAILABLE);
+	if (p_channel >= peer->get_channels()) {
+		// ENet already reset the link: its disconnection is on the way.
+		return ERR_UNAVAILABLE;
+	}
 	ENetPacket *packet = enet_packet_create(p_data, p_size, flags);
 	ERR_FAIL_NULL_V(packet, ERR_OUT_OF_MEMORY);
 	if (peer->send(uint8_t(p_channel), packet) < 0) {
@@ -160,8 +164,9 @@ Error EnetMeshTransport::send(int p_peer, int p_channel, TransferMode p_mode, co
 			continue;
 		}
 		if (E.value.simulated_latency_usec == 0) {
+			// A link being closed is skipped: its disconnection is on the way.
 			const Error err = send_now(E.key, E.value, p_channel, p_mode, p_data, p_size);
-			ERR_FAIL_COND_V(err != OK, err);
+			ERR_FAIL_COND_V(err != OK && err != ERR_UNAVAILABLE, err);
 			continue;
 		}
 		// The latency of a node is constant, so its packets keep their order.
