@@ -352,7 +352,7 @@ int TickNetwork::get_ticks_per_second() const {
 
 void TickNetwork::set_input_redundancy(int p_redundancy) {
 	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
-	ERR_FAIL_COND_MSG(p_redundancy < 1 || p_redundancy > 64, "The input redundancy must be between 1 and 64.");
+	ERR_FAIL_COND_MSG(p_redundancy < 1 || p_redundancy > TICK_MAX_INPUT_FRAMES, vformat("The input redundancy must be between 1 and %d.", TICK_MAX_INPUT_FRAMES));
 	settings.input_redundancy = p_redundancy;
 }
 
@@ -441,6 +441,9 @@ Error TickNetwork::start(const Ref<TickTransport> &p_transport) {
 	ERR_FAIL_COND_V(err != OK, err);
 	transport = p_transport;
 	running = true;
+	if (authority_mode == AUTHORITY_DISTRIBUTED && !settings.trusted) {
+		WARN_PRINT("With AUTHORITY_DISTRIBUTED, every node of the mesh is trusted (events, ownership, spawns): `trust` doesn't limit anything. Use distributed authority only between servers you control, and set `trust` to TRUST_TRUSTED.");
+	}
 	if (Engine::get_singleton()->get_physics_ticks_per_second() != settings.ticks_per_second) {
 		WARN_PRINT(vformat("TickNetwork runs at %d ticks per second, but the physics runs at %d: bodies moved with the physics delta (like move_and_slide) won't match the ticks.", settings.ticks_per_second, Engine::get_singleton()->get_physics_ticks_per_second()));
 	}

@@ -322,7 +322,9 @@ void EnetMeshTransport::service_host(const Ref<RefCounted> &p_host, bool p_accep
 			}
 		} else if (type == ENetConnection::EVENT_RECEIVE) {
 			const int *id = ids_by_peer.getptr(event.peer->get_instance_id());
-			if (id && is_peer_connected(*id)) {
+			if (id && is_peer_connected(*id) && !queue_has_room(packets.size() - next_packet, queued_bytes, int(event.packet->dataLength))) {
+				WARN_PRINT_ONCE("EnetMeshTransport drops the packets it receives: nothing consumes them (is the TickNetwork running?).");
+			} else if (id && is_peer_connected(*id)) {
 				Packet packet;
 				packet.from_peer = *id;
 				packet.channel = event.channel_id;
@@ -330,6 +332,7 @@ void EnetMeshTransport::service_host(const Ref<RefCounted> &p_host, bool p_accep
 				if (event.packet->dataLength > 0) {
 					memcpy(packet.data.ptr(), event.packet->data, event.packet->dataLength);
 				}
+				queued_bytes += event.packet->dataLength;
 				packets.push_back(packet);
 			}
 			enet_packet_destroy(event.packet);
@@ -386,9 +389,11 @@ bool EnetMeshTransport::pop_packet(Packet &r_packet) {
 	if (next_packet >= packets.size()) {
 		packets.clear();
 		next_packet = 0;
+		queued_bytes = 0;
 		return false;
 	}
 	r_packet = packets[next_packet++];
+	queued_bytes -= r_packet.data.size();
 	return true;
 }
 

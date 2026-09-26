@@ -5,6 +5,8 @@
 
 #include "tests/test_macros.h"
 
+#include <cfloat>
+
 namespace TestTickDataBuffer {
 
 TEST_CASE("[Modules][TickSynchronizer][TickBitArray] Store and read bits across byte boundaries") {
@@ -221,6 +223,39 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Strings, bits and nested 
 	db.skip_string();
 	CHECK(db.read_uint(TickDataBuffer::COMPRESSION_LEVEL_3) == 7);
 	CHECK_FALSE(db.is_buffer_failed());
+}
+
+TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Reals that aren't finite are never sent, nor accepted") {
+	TickDataBuffer db;
+	db.begin_write();
+	ERR_PRINT_OFF;
+	CHECK(db.add_real(Math::NaN, TickDataBuffer::COMPRESSION_LEVEL_0) == 0.0);
+	CHECK(db.add_real(-Math::INF, TickDataBuffer::COMPRESSION_LEVEL_1) == 0.0);
+	ERR_PRINT_ON;
+	// Beyond the range of the encoding: its largest value, not an infinity.
+	CHECK(db.add_real(1e300, TickDataBuffer::COMPRESSION_LEVEL_1) == double(FLT_MAX));
+	CHECK(db.add_real(-100000.0, TickDataBuffer::COMPRESSION_LEVEL_2) == -65504.0);
+	db.begin_read();
+	CHECK(db.read_real(TickDataBuffer::COMPRESSION_LEVEL_0) == 0.0);
+	CHECK(db.read_real(TickDataBuffer::COMPRESSION_LEVEL_1) == 0.0);
+	CHECK(db.read_real(TickDataBuffer::COMPRESSION_LEVEL_1) == double(FLT_MAX));
+	CHECK(db.read_real(TickDataBuffer::COMPRESSION_LEVEL_2) == -65504.0);
+	CHECK_FALSE(db.is_buffer_failed());
+
+	// A NaN written by a modified peer fails the reader.
+	db.begin_write();
+	db.add_uint_bits(0x7FF8000000000000ULL, 64);
+	db.begin_read();
+	CHECK(db.read_real(TickDataBuffer::COMPRESSION_LEVEL_0) == 0.0);
+	CHECK(db.is_buffer_failed());
+	// An infinity in a half float too (0x7C00).
+	db.begin_write();
+	db.add_uint_bits(0x7C00, 16);
+	db.add_uint_bits(0, 16);
+	db.add_uint_bits(0, 16);
+	db.begin_read();
+	CHECK(db.read_vector3(TickDataBuffer::COMPRESSION_LEVEL_2) == Vector3());
+	CHECK(db.is_buffer_failed());
 }
 
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] UTF-8 validation") {

@@ -310,6 +310,11 @@ void EnetHostedMeshTransport::deliver(int p_from, int p_logical, int p_flags, co
 		return;
 	}
 	if (p_logical < TICK_CHANNEL_COUNT) {
+		if (!queue_has_room(packets.size() - next_packet, queued_bytes, p_size)) {
+			// Nothing consumes them (no engine runs on this transport, for example).
+			dropped_packets++;
+			return;
+		}
 		Packet packet;
 		packet.from_peer = p_from;
 		packet.channel = p_logical;
@@ -318,10 +323,16 @@ void EnetHostedMeshTransport::deliver(int p_from, int p_logical, int p_flags, co
 		if (p_size > 0) {
 			memcpy(packet.data.ptr(), p_data, p_size);
 		}
+		queued_bytes += uint64_t(p_size);
 		packets.push_back(packet);
 		return;
 	}
 	if (multiplayer_peer == nullptr) {
+		return;
+	}
+	if (!queue_has_room(multiplayer_packets.size() - next_multiplayer_packet, multiplayer_queued_bytes, p_size)) {
+		// The multiplayer peer isn't polled.
+		dropped_packets++;
 		return;
 	}
 	MultiplayerPacket packet;
@@ -332,6 +343,7 @@ void EnetHostedMeshTransport::deliver(int p_from, int p_logical, int p_flags, co
 	if (p_size > 0) {
 		memcpy(packet.data.ptr(), p_data, p_size);
 	}
+	multiplayer_queued_bytes += uint64_t(p_size);
 	multiplayer_packets.push_back(packet);
 }
 
@@ -500,6 +512,7 @@ Dictionary EnetHostedMeshTransport::get_stats() const {
 	result["relayed_packets"] = relayed_packets;
 	result["rejected_connections"] = rejected_connections;
 	result["failed_punches"] = failed_punches;
+	result["dropped_packets"] = dropped_packets;
 	return result;
 }
 
@@ -525,9 +538,11 @@ bool EnetHostedMeshTransport::pop_packet(Packet &r_packet) {
 	if (next_packet >= packets.size()) {
 		packets.clear();
 		next_packet = 0;
+		queued_bytes = 0;
 		return false;
 	}
 	r_packet = packets[next_packet++];
+	queued_bytes -= r_packet.data.size();
 	return true;
 }
 
@@ -1453,6 +1468,7 @@ void EnetHostedMeshTransport::attach_multiplayer_peer(TickMultiplayerPeer *p_pee
 	multiplayer_events.clear();
 	multiplayer_packets.clear();
 	next_multiplayer_packet = 0;
+	multiplayer_queued_bytes = 0;
 	if (p_peer == nullptr) {
 		return;
 	}

@@ -198,6 +198,29 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Strangers are re
 	CHECK(mesh.nodes[2]->is_peer_connected(1));
 }
 
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Packets nothing consumes are dropped past a limit") {
+	HostedMesh mesh(1);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+
+	// No engine runs on the host: nothing takes its packets.
+	const uint8_t payload[3] = { 1, 2, 3 };
+	const int extra = 300;
+	for (int i = 0; i < TickTransport::MAX_QUEUED_PACKETS + extra; i++) {
+		mesh.nodes[2]->send(1, TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3);
+	}
+	for (int t = 0; t < 10000 && int(mesh.nodes[1]->get_stats()["dropped_packets"]) < extra; t++) {
+		mesh.poll(1);
+	}
+	CHECK(int(mesh.nodes[1]->get_stats()["dropped_packets"]) == extra);
+	int queued = 0;
+	TickTransport::Packet packet;
+	while (mesh.nodes[1]->pop_packet(packet)) {
+		queued++;
+	}
+	CHECK(queued == TickTransport::MAX_QUEUED_PACKETS);
+}
+
 TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer reaches direct and relayed players") {
 	HostedMesh mesh(3, 4);
 	Ref<TickMultiplayerPeer> peers[5];

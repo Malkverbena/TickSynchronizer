@@ -3,6 +3,7 @@
 #include "../source/codec/tick_codec.h"
 #include "../source/sync/tick_sync_object.h"
 
+#include "core/io/marshalls.h"
 #include "tests/test_macros.h"
 
 namespace TestTickCodec {
@@ -121,6 +122,47 @@ TEST_CASE("[Modules][TickSynchronizer][TickCodec] Variants: complex values round
 	codec->decode(buffer);
 	CHECK_FALSE(CoreGlobals::print_error_enabled);
 	ERR_PRINT_ON;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][TickCodec] Only values that mean something to another peer are sent") {
+	Ref<RefCounted> object;
+	object.instantiate();
+	Array with_object;
+	with_object.push_back(1);
+	with_object.push_back(object);
+	Dictionary keyed_by_object;
+	keyed_by_object[object] = 1;
+	CHECK(TickCodec::is_sendable(Variant()));
+	CHECK(TickCodec::is_sendable(Variant((Object *)nullptr)));
+	CHECK(TickCodec::is_sendable(Vector3(1, 2, 3)));
+	CHECK_FALSE(TickCodec::is_sendable(object));
+	CHECK_FALSE(TickCodec::is_sendable(with_object));
+	CHECK_FALSE(TickCodec::is_sendable(keyed_by_object));
+	CHECK_FALSE(TickCodec::is_sendable(Callable(object.ptr(), "get_class")));
+	CHECK_FALSE(TickCodec::is_sendable(RID()));
+
+	// The writer sends nil instead.
+	const Ref<TickCodec> codec = TickCodec::variant();
+	ERR_PRINT_OFF;
+	CHECK(round_trip(codec, with_object) == Variant());
+	ERR_PRINT_ON;
+
+	// An object written as its id by a modified peer fails the reader.
+	int length = 0;
+	REQUIRE(encode_variant(object, nullptr, length, false) == OK);
+	LocalVector<uint8_t> bytes;
+	bytes.resize(length);
+	encode_variant(object, bytes.ptr(), length, false);
+	TickDataBuffer buffer;
+	buffer.begin_write();
+	buffer.add_uint_bits(uint64_t(length), 16);
+	buffer.add_bits(bytes.ptr(), length * 8);
+	buffer.begin_read();
+	CHECK(codec->decode(buffer) == Variant());
+	CHECK(buffer.is_buffer_failed());
+
+	// NaN in a ranged codec is quantized to the minimum, not converted to an integer.
+	CHECK(double(TickCodec::real_ranged(-10.0, 10.0, 8)->quantize(Math::NaN)) == -10.0);
 }
 
 TEST_CASE("[Modules][TickSynchronizer][TickCodec] Interpolation and schema hash") {

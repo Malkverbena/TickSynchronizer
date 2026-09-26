@@ -80,7 +80,7 @@ void TickSyncCore::set_settings(const Settings &p_settings) {
 	ERR_FAIL_COND_MSG(role != ROLE_NONE, "The settings can't change while the network is running.");
 	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0, "The ticks per second must be positive.");
 	ERR_FAIL_COND_MSG(p_settings.history_size < 8, "The history must keep at least 8 frames.");
-	ERR_FAIL_COND_MSG(p_settings.input_redundancy < 1 || p_settings.input_redundancy > 64, "The input redundancy must be between 1 and 64.");
+	ERR_FAIL_COND_MSG(p_settings.input_redundancy < 1 || p_settings.input_redundancy > TICK_MAX_INPUT_FRAMES, vformat("The input redundancy must be between 1 and %d.", TICK_MAX_INPUT_FRAMES));
 	ERR_FAIL_COND_MSG(p_settings.snapshot_interval < 1, "The snapshot interval must be at least 1.");
 	ERR_FAIL_COND_MSG(p_settings.min_input_buffer < 0 || p_settings.max_input_buffer < p_settings.min_input_buffer, "The input buffer bounds are invalid.");
 	ERR_FAIL_COND_MSG(p_settings.interest_interval < 1, "The interest interval must be at least 1.");
@@ -690,7 +690,7 @@ void TickSyncCore::server_handle_inputs(int p_peer, TickDataBuffer &p_message) {
 	const bool wants_full = p_message.read_bool();
 	const int group_count = int(p_message.read_uint_bits(8));
 	const uint32_t first_frame = uint32_t(p_message.read_uint_bits(32));
-	if (p_message.is_buffer_failed()) {
+	if (p_message.is_buffer_failed() || group_count > TICK_MAX_INPUT_FRAMES) {
 		stats.malformed_packets++;
 		return;
 	}
@@ -709,7 +709,8 @@ void TickSyncCore::server_handle_inputs(int p_peer, TickDataBuffer &p_message) {
 		const int duplicates = int(p_message.read_uint_bits(8));
 		TickDataBuffer input;
 		p_message.read_data_buffer(input);
-		if (p_message.is_buffer_failed()) {
+		// A sender repeats at most `TICK_MAX_INPUT_FRAMES` frames: more is malformed, and would only cost CPU here.
+		if (p_message.is_buffer_failed() || int(index) + duplicates + 1 > TICK_MAX_INPUT_FRAMES) {
 			stats.malformed_packets++;
 			return;
 		}
@@ -1987,7 +1988,7 @@ void TickSyncCore::client_handle_doll_inputs(int p_peer, TickDataBuffer &p_messa
 	p_message.read_bool();
 	const int group_count = int(p_message.read_uint_bits(8));
 	const uint32_t first_frame = uint32_t(p_message.read_uint_bits(32));
-	if (p_message.is_buffer_failed()) {
+	if (p_message.is_buffer_failed() || group_count > TICK_MAX_INPUT_FRAMES) {
 		stats.malformed_packets++;
 		return;
 	}
@@ -2004,7 +2005,7 @@ void TickSyncCore::client_handle_doll_inputs(int p_peer, TickDataBuffer &p_messa
 		const int duplicates = int(p_message.read_uint_bits(8));
 		TickDataBuffer input;
 		p_message.read_data_buffer(input);
-		if (p_message.is_buffer_failed()) {
+		if (p_message.is_buffer_failed() || int(index) + duplicates + 1 > TICK_MAX_INPUT_FRAMES) {
 			stats.malformed_packets++;
 			return;
 		}
@@ -2433,6 +2434,7 @@ void TickSyncCore::client_become_server(int p_old_authority) {
 uint32_t TickSyncCore::spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	ERR_FAIL_COND_V_MSG(role != ROLE_SERVER, 0, "Only the server can spawn.");
 	ERR_FAIL_COND_V_MSG(p_name.is_empty(), 0, "A spawned node needs a name.");
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_data), 0, "The spawn data can't contain objects, callables, signals or RIDs.");
 	const uint32_t spawn_id = next_spawn_id++;
 	SpawnRecord record;
 	record.spawner = p_spawner;
@@ -2706,8 +2708,9 @@ Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 	ERR_FAIL_COND_V_MSG(role == ROLE_NONE, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
 	ERR_FAIL_COND_V_MSG(String(p_name).utf8().length() > TICK_MAX_EVENT_NAME_BYTES, ERR_INVALID_PARAMETER, vformat("An event name can't be longer than %d bytes in UTF-8.", TICK_MAX_EVENT_NAME_BYTES));
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_payload), ERR_INVALID_DATA, "The event payload can't contain objects, callables, signals or RIDs.");
 	int payload_bytes = 0;
-	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded (objects aren't allowed).");
+	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded.");
 	ERR_FAIL_COND_V_MSG(payload_bytes > settings.max_event_bytes, ERR_INVALID_DATA, vformat("The event payload takes %d bytes; the limit is %d.", payload_bytes, settings.max_event_bytes));
 
 	uint16_t target = 0;

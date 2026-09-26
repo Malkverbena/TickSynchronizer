@@ -406,6 +406,10 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 		return;
 	}
 	if (type == TICK_MESSAGE_REJECT) {
+		if (!peers.has(from)) {
+			stats.malformed_packets++;
+			return;
+		}
 		const String reason = message.read_string();
 		ERR_PRINT(vformat("A mesh node refused this node: %s", reason));
 		if (listener) {
@@ -1280,6 +1284,7 @@ uint32_t TickMeshCore::spawn(const String &p_spawner, int p_scene, const String 
 	ERR_FAIL_COND_V_MSG(!running, 0, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(local_id >= 4096, 0, "Only mesh nodes with an id below 4096 can spawn.");
 	ERR_FAIL_COND_V_MSG(p_name.is_empty(), 0, "A spawned node needs a name.");
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_data), 0, "The spawn data can't contain objects, callables, signals or RIDs.");
 	const uint32_t spawn_id = get_next_spawn_id();
 	next_spawn_counter++;
 	SpawnRecord record;
@@ -1480,8 +1485,9 @@ Error TickMeshCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
 	ERR_FAIL_COND_V_MSG(String(p_name).utf8().length() > TICK_MAX_EVENT_NAME_BYTES, ERR_INVALID_PARAMETER, vformat("An event name can't be longer than %d bytes in UTF-8.", TICK_MAX_EVENT_NAME_BYTES));
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_payload), ERR_INVALID_DATA, "The event payload can't contain objects, callables, signals or RIDs.");
 	int payload_bytes = 0;
-	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded (objects aren't allowed).");
+	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded.");
 	ERR_FAIL_COND_V_MSG(payload_bytes > settings.max_event_bytes, ERR_INVALID_DATA, vformat("The event payload takes %d bytes; the limit is %d.", payload_bytes, settings.max_event_bytes));
 
 	PendingEvent event;

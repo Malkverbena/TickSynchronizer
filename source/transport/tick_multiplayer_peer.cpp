@@ -27,9 +27,11 @@ Error TickMultiplayerPeer::get_packet(const uint8_t **r_buffer, int &r_buffer_si
 	ERR_FAIL_NULL_V_MSG(packet, ERR_UNAVAILABLE, "No packet available.");
 	current_packet = packet->data;
 	transport->next_multiplayer_packet++;
+	transport->multiplayer_queued_bytes -= current_packet.size();
 	if (transport->next_multiplayer_packet >= transport->multiplayer_packets.size()) {
 		transport->multiplayer_packets.clear();
 		transport->next_multiplayer_packet = 0;
+		transport->multiplayer_queued_bytes = 0;
 	}
 	*r_buffer = current_packet.ptr();
 	r_buffer_size = int(current_packet.size());

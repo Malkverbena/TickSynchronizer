@@ -155,15 +155,18 @@ private:
 	LocalVector<Packet> packets;
 	uint32_t next_event = 0;
 	uint32_t next_packet = 0;
+	uint64_t queued_bytes = 0;
 
 	TickMultiplayerPeer *multiplayer_peer = nullptr;
 	LocalVector<Event> multiplayer_events;
 	LocalVector<MultiplayerPacket> multiplayer_packets;
 	uint32_t next_multiplayer_packet = 0;
+	uint64_t multiplayer_queued_bytes = 0;
 
 	uint64_t relayed_packets = 0;
 	uint64_t rejected_connections = 0;
 	uint64_t failed_punches = 0;
+	uint64_t dropped_packets = 0;
 
 	static uint64_t make_pair_key(int p_a, int p_b);
 	static uint32_t make_token();

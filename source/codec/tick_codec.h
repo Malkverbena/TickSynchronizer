@@ -103,6 +103,10 @@ public:
 	// Identifies the encoding, to verify that all the peers use the same schema.
 	uint32_t hash(uint32_t p_seed) const;
 
+	// Whether `p_value` can be sent to another peer: no objects (null ones are fine), callables, signals or RIDs,
+	// which only mean something in this process, also inside arrays and dictionaries.
+	static bool is_sendable(const Variant &p_value);
+
 	// Expected `Variant` type, or `Variant::NIL` for `variant()`.
 	Variant::Type get_value_type() const;
 };

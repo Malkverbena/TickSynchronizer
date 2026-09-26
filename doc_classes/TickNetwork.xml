@@ -192,7 +192,7 @@
 			Ticks per second of the simulation. Clients use the server's value.
 		</member>
 		<member name="trust" type="int" setter="set_trust" getter="get_trust" enum="TickNetwork.Trust" default="0">
-			How much the server trusts the clients. With [constant TRUST_UNTRUSTED], it limits the rate and size of what they send, and accepts an event for an object only from its controller unless [method TickObject._validate_event] decides. The input of an object is always taken only from its controller, and state only from the server.
+			How much the server trusts the clients. With [constant TRUST_UNTRUSTED], it limits the rate and size of what they send, and accepts an event for an object only from its controller unless [method TickObject._validate_event] decides. The input of an object is always taken only from its controller, and state only from the server. It only applies to [constant AUTHORITY_SINGLE]: with [constant AUTHORITY_DISTRIBUTED], every node is trusted, and [method start] prints a warning while this is [constant TRUST_UNTRUSTED].
 		</member>
 	</members>
 	<signals>
@@ -284,7 +284,7 @@
 			One peer simulates every object.
 		</constant>
 		<constant name="AUTHORITY_DISTRIBUTED" value="1" enum="AuthorityMode">
-			Every object has an owner node, and ownership can change.
+			Every object has an owner node, and ownership can change. Every node is trusted (events, ownership, spawns): use it only between servers you control.
 		</constant>
 	</constants>
 </class>

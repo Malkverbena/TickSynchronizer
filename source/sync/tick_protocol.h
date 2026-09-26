@@ -13,6 +13,9 @@ static constexpr uint32_t TICK_FRAME_NONE = UINT32_MAX;
 // Longest event name, in bytes of UTF-8; a longer one makes the message malformed.
 static constexpr int TICK_MAX_EVENT_NAME_BYTES = 255;
 
+// Most frames an input message describes (`input_redundancy` is at most this); a message with more is malformed.
+static constexpr int TICK_MAX_INPUT_FRAMES = 64;
+
 enum TickMessageType {
 	TICK_MESSAGE_HELLO = 1,
 	TICK_MESSAGE_WELCOME,

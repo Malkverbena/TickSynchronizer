@@ -44,6 +44,11 @@ public:
 		LocalVector<uint8_t> data;
 	};
 
+	// Received packets a transport keeps for its engines. Beyond this, nothing consumes them (the network isn't
+	// running, for example), and new ones are dropped instead of growing without limit.
+	static constexpr int MAX_QUEUED_PACKETS = 16384;
+	static constexpr int MAX_QUEUED_BYTES = 8 * 1024 * 1024;
+
 	// Target of `send()` that reaches every connected peer.
 	static constexpr int PEER_BROADCAST = 0;
 	// Id of the server (the hub of a star network).
@@ -51,6 +56,11 @@ public:
 
 protected:
 	static void _bind_methods();
+
+	// Whether a received packet of `p_size` bytes still fits a queue holding `p_count` packets of `p_bytes` bytes.
+	static bool queue_has_room(uint32_t p_count, uint64_t p_bytes, int p_size) {
+		return p_count < uint32_t(MAX_QUEUED_PACKETS) && p_bytes + uint64_t(p_size) <= uint64_t(MAX_QUEUED_BYTES);
+	}
 
 public:
 	virtual int get_local_peer_id() const = 0;

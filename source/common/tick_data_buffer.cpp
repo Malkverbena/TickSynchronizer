@@ -4,7 +4,11 @@
 #include "core/math/math_funcs.h"
 #include "core/variant/variant.h"
 
+#include <cfloat>
 #include <cstring>
+
+// Largest finite binary16 value.
+static constexpr double HALF_MAX = 65504.0;
 
 TickDataBuffer::TickDataBuffer(const TickBitArray &p_buffer) :
 		bit_size(p_buffer.size_in_bits()),
@@ -261,24 +265,31 @@ double TickDataBuffer::add_real(double p_input, CompressionLevel p_compression_l
 		return p_input;
 	}
 
+	// The readers refuse values that aren't finite (see `read_real()`): NaN and infinities are sent as 0, and values
+	// beyond the range of the encoding as its largest one.
+	double input = p_input;
+	if (!Math::is_finite(input)) {
+		ERR_PRINT_ONCE("A real that isn't finite (NaN or infinity) can't be sent; 0 is sent instead.");
+		input = 0.0;
+	}
 	switch (p_compression_level) {
 		case COMPRESSION_LEVEL_0: {
 			uint64_t value;
-			memcpy(&value, &p_input, sizeof(uint64_t));
+			memcpy(&value, &input, sizeof(uint64_t));
 			write_bits(value, 64);
-			return p_input;
+			return input;
 		}
 		case COMPRESSION_LEVEL_1: {
-			const float input = float(p_input);
+			const float single = float(CLAMP(input, -double(FLT_MAX), double(FLT_MAX)));
 			uint32_t value;
-			memcpy(&value, &input, sizeof(uint32_t));
+			memcpy(&value, &single, sizeof(uint32_t));
 			write_bits(value, 32);
-			return input;
+			return single;
 		}
 		case COMPRESSION_LEVEL_2:
 		case COMPRESSION_LEVEL_3:
 		default: {
-			const uint16_t value = Math::make_half_float(float(p_input));
+			const uint16_t value = Math::make_half_float(float(CLAMP(input, -HALF_MAX, HALF_MAX)));
 			write_bits(value, 16);
 			return Math::half_to_float(value);
 		}
@@ -293,23 +304,30 @@ double TickDataBuffer::read_real(CompressionLevel p_compression_level) {
 	}
 
 	const uint64_t value = fetch_bits(bits);
+	double output = 0.0;
 	switch (p_compression_level) {
 		case COMPRESSION_LEVEL_0: {
-			double output;
 			memcpy(&output, &value, sizeof(double));
-			return output;
-		}
+		} break;
 		case COMPRESSION_LEVEL_1: {
 			const uint32_t value_32 = uint32_t(value);
-			float output;
-			memcpy(&output, &value_32, sizeof(float));
-			return output;
-		}
+			float single;
+			memcpy(&single, &value_32, sizeof(float));
+			output = single;
+		} break;
 		case COMPRESSION_LEVEL_2:
 		case COMPRESSION_LEVEL_3:
 		default:
-			return Math::half_to_float(uint16_t(value));
+			output = Math::half_to_float(uint16_t(value));
+			break;
 	}
+	// A writer never sends NaN or infinities: they're malformed data (from an untrusted peer, maybe) that would
+	// spread through the simulation.
+	if (!Math::is_finite(output)) {
+		buffer_failed = true;
+		return 0.0;
+	}
+	return output;
 }
 
 float TickDataBuffer::add_positive_unit_real(float p_input, CompressionLevel p_compression_level) {
@@ -666,7 +684,9 @@ double TickDataBuffer::get_real_epsilon(DataType p_data_type, CompressionLevel p
 }
 
 uint64_t TickDataBuffer::compress_unit_float(double p_value, double p_scale_factor) {
-	return uint64_t(Math::round(CLAMP(p_value, 0.0, 1.0) * p_scale_factor));
+	// NaN is compressed as 0 (converting it to an integer is undefined).
+	const double value = p_value > 0.0 ? MIN(p_value, 1.0) : 0.0;
+	return uint64_t(Math::round(value * p_scale_factor));
 }
 
 double TickDataBuffer::decompress_unit_float(uint64_t p_value, double p_scale_factor) {

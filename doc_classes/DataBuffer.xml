@@ -54,7 +54,7 @@
 			<param index="0" name="value" type="float" />
 			<param index="1" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
 			<description>
-				Writes a floating point value: 64 bits with [constant COMPRESSION_LEVEL_0], 32 bits with [constant COMPRESSION_LEVEL_1], 16 bits otherwise. Returns the value as it's read back.
+				Writes a floating point value: 64 bits with [constant COMPRESSION_LEVEL_0], 32 bits with [constant COMPRESSION_LEVEL_1], 16 bits otherwise. Returns the value as it's read back. NaN and infinities are written as [code]0[/code] (with an error), and values beyond the range of the encoding (65504 with 16 bits) as its largest value.
 			</description>
 		</method>
 		<method name="add_string">
@@ -184,7 +184,7 @@
 			<return type="float" />
 			<param index="0" name="compression_level" type="int" enum="DataBuffer.CompressionLevel" default="1" />
 			<description>
-				Reads a value written with [method add_real] and the same [param compression_level].
+				Reads a value written with [method add_real] and the same [param compression_level]. NaN or an infinity (possible in data from another peer) returns [code]0[/code] and marks the buffer as failed (see [method is_failed]).
 			</description>
 		</method>
 		<method name="read_string">

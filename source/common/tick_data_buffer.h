@@ -143,6 +143,8 @@ public:
 	int64_t add_int_bits(int64_t p_input, int p_bits);
 	int64_t read_int_bits(int p_bits);
 
+	// NaN and infinities are sent as 0 (with an error), and values beyond the range of the encoding as its largest
+	// value; reading one that isn't finite fails the buffer.
 	double add_real(double p_input, CompressionLevel p_compression_level);
 	double read_real(CompressionLevel p_compression_level);
 

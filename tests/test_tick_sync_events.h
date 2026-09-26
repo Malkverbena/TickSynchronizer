@@ -338,6 +338,55 @@ TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Net ids past their quarantine 
 	CHECK(reused == 100);
 }
 
+TEST_CASE("[Modules][TickSynchronizer][EventSync] Payloads that only mean something in this process aren't sent") {
+	EventWorld world(2);
+	world.run(2.0);
+	Ref<RefCounted> object;
+	object.instantiate();
+	Array with_object;
+	with_object.push_back(object);
+	ERR_PRINT_OFF;
+	CHECK(world.cores[2].send_event(world.movers[2], "give", with_object, TICK_FRAME_NONE, 0) == ERR_INVALID_DATA);
+	CHECK(world.cores[1].spawn("Spawner", 0, "Thing", 1, object) == 0);
+	ERR_PRINT_ON;
+	CHECK(world.cores[2].get_stats().events_sent == 0);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][Security] An input message can't describe more frames than a sender repeats") {
+	EventWorld world(2);
+	world.run(2.0);
+	const uint16_t mover_id = world.cores[1].get_net_id(world.movers[1]);
+	REQUIRE(mover_id != 0);
+
+	// One group repeated 256 times, where a sender repeats at most `TICK_MAX_INPUT_FRAMES` frames.
+	TickDataBuffer object_input;
+	object_input.begin_write();
+	object_input.add_int_bits(1, 2);
+	TickDataBuffer frame_input;
+	frame_input.begin_write();
+	frame_input.add_uint_bits(1, 8);
+	frame_input.add_uint_bits(mover_id, 16);
+	frame_input.add_data_buffer(object_input);
+	TickDataBuffer inputs;
+	inputs.begin_write();
+	inputs.add_uint_bits(TICK_MESSAGE_INPUTS, 8);
+	inputs.add_uint_bits(TICK_FRAME_NONE, 32);
+	inputs.add_bool(false);
+	inputs.add_uint_bits(1, 8);
+	inputs.add_uint_bits(world.cores[1].get_frame() - 100, 32);
+	inputs.add_uint_bits(255, 8);
+	inputs.add_data_buffer(frame_input);
+
+	const TickSyncCore::Stats before = world.cores[1].get_stats();
+	world.send_raw(2, 1, TICK_CHANNEL_INPUTS, inputs);
+	world.run(0.2);
+	const TickSyncCore::Stats &after = world.cores[1].get_stats();
+	CHECK(after.malformed_packets == before.malformed_packets + 1);
+	// Refused before looking at any of its frames.
+	CHECK(after.late_inputs == before.late_inputs);
+	CHECK(after.rejected_inputs == before.rejected_inputs);
+}
+
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Event names are limited and must be valid UTF-8") {
 	EventWorld world(2);
 	world.run(2.0);

@@ -202,7 +202,9 @@ TickDataBuffer::CompressionLevel TickCodec::get_compression_level(Precision p_pr
 
 uint64_t TickCodec::quantize_ranged(double p_value, double p_min, double p_max, int p_bits) {
 	const double max_value = double((uint64_t(1) << p_bits) - 1);
-	const double unit = (CLAMP(p_value, p_min, p_max) - p_min) / (p_max - p_min);
+	// NaN goes to the minimum (converting it to an integer is undefined).
+	const double value = Math::is_nan(p_value) ? p_min : CLAMP(p_value, p_min, p_max);
+	const double unit = (value - p_min) / (p_max - p_min);
 	return uint64_t(Math::round(unit * max_value));
 }
 
@@ -275,6 +277,10 @@ void TickCodec::encode(const Variant &p_value, TickDataBuffer &r_buffer) const {
 			}
 		} break;
 		case KIND_VARIANT: {
+			if (!is_sendable(value)) {
+				ERR_PRINT("TickCodec can't send objects, callables, signals or RIDs; nil is sent instead.");
+				value = Variant();
+			}
 			int length = 0;
 			Error err = encode_variant(value, nullptr, length, false);
 			if (err != OK || length > MAX_VARIANT_BYTES) {
@@ -361,7 +367,8 @@ Variant TickCodec::decode(TickDataBuffer &r_buffer) const {
 			CoreGlobals::print_error_enabled = false;
 			const Error err = decode_variant(value, bytes.ptr(), length, &used, false);
 			CoreGlobals::print_error_enabled = print_errors;
-			if (err != OK || used != length) {
+			// An object sent as its id decodes as an `EncodedObjectAsID`: refused too.
+			if (err != OK || used != length || !is_sendable(value)) {
 				r_buffer.mark_failed();
 				return Variant();
 			}
@@ -474,6 +481,46 @@ Variant TickCodec::interpolate(const Variant &p_from, const Variant &p_to, doubl
 			return p_weight < 1.0 ? p_from : p_to;
 	}
 	return p_to;
+}
+
+static bool is_sendable_recursive(const Variant &p_value, int p_depth) {
+	if (p_depth > Variant::MAX_RECURSION_DEPTH) {
+		return false;
+	}
+	switch (p_value.get_type()) {
+		case Variant::OBJECT:
+			return p_value.get_validated_object() == nullptr;
+		case Variant::CALLABLE:
+		case Variant::SIGNAL:
+		case Variant::RID:
+			return false;
+		case Variant::ARRAY: {
+			const Array array = p_value;
+			for (int i = 0; i < array.size(); i++) {
+				if (!is_sendable_recursive(array[i], p_depth + 1)) {
+					return false;
+				}
+			}
+			return true;
+		}
+		case Variant::DICTIONARY: {
+			const Dictionary dictionary = p_value;
+			const Array keys = dictionary.keys();
+			const Array values = dictionary.values();
+			for (int i = 0; i < keys.size(); i++) {
+				if (!is_sendable_recursive(keys[i], p_depth + 1) || !is_sendable_recursive(values[i], p_depth + 1)) {
+					return false;
+				}
+			}
+			return true;
+		}
+		default:
+			return true;
+	}
+}
+
+bool TickCodec::is_sendable(const Variant &p_value) {
+	return is_sendable_recursive(p_value, 0);
 }
 
 uint32_t TickCodec::hash(uint32_t p_seed) const {

@@ -79,7 +79,7 @@
 		<method name="get_stats" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns a [Dictionary] with [code]direct_pairs[/code] and [code]relayed_pairs[/code] (on a player, its links; on the host, the relayed pairs), [code]relayed_packets[/code] (host), [code]rejected_connections[/code] and [code]failed_punches[/code].
+				Returns a [Dictionary] with [code]direct_pairs[/code] and [code]relayed_pairs[/code] (on a player, its links; on the host, the relayed pairs), [code]relayed_packets[/code] (host), [code]rejected_connections[/code], [code]failed_punches[/code] and [code]dropped_packets[/code] (received packets dropped because nothing consumed them: no [TickNetwork] running, or a [TickMultiplayerPeer] that isn't polled).
 			</description>
 		</method>
 		<method name="get_status" qualifiers="const">
