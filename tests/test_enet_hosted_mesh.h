@@ -197,6 +197,8 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Strangers are re
 	CHECK_FALSE(mesh.nodes[1]->is_peer_connected(3));
 	CHECK(mesh.nodes[2]->get_peer_path(3) == Mesh::PATH_NONE);
 	CHECK(mesh.nodes[2]->is_peer_connected(1));
+	CHECK(mesh.nodes[3]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_CLOSED);
+	CHECK(mesh.nodes[2]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_NONE);
 }
 
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Packets nothing consumes are dropped past a limit") {
@@ -524,6 +526,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that stop
 		OS::get_singleton()->delay_usec(1000);
 	}
 	CHECK(mesh.nodes[4]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK(mesh.nodes[4]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_LOST);
 	CHECK_FALSE(mesh.nodes[2]->is_peer_connected(4));
 }
 
@@ -631,6 +634,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player the hos
 		mesh.poll(1);
 	}
 	CHECK(mesh.nodes[3]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK(mesh.nodes[3]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_REFUSED);
 	CHECK_FALSE(mesh.nodes[3]->is_hosting());
 	CHECK(mesh.nodes[2]->get_host_peer() == 1);
 	CHECK(mesh.nodes[4]->get_host_peer() == 1);
@@ -698,9 +702,11 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that clos
 		}
 	}
 	CHECK(all_left);
+	CHECK(mesh.nodes[1]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_CLOSED);
 	for (int i = 2; i <= 4; i++) {
 		CHECK_FALSE(mesh.nodes[i]->is_hosting());
 		CHECK_FALSE(drain_events(mesh.nodes[i]));
+		CHECK(mesh.nodes[i]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_ENDED);
 	}
 }
 
@@ -736,6 +742,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The host admits 
 	// Refused: it never gets an id, and nobody learns about it.
 	join(mesh, "wrong");
 	CHECK(mesh.nodes[3]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK(mesh.nodes[3]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_REFUSED);
 	CHECK(mesh.nodes[3]->get_local_peer_id() == 0);
 	CHECK(mesh.nodes[1]->get_peers() == PackedInt32Array({ 2 }));
 	CHECK(mesh.nodes[2]->get_peers() == PackedInt32Array({ 1 }));
@@ -773,10 +780,112 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Joins from one a
 	}
 	CHECK(mesh.nodes[1]->get_peers().size() == 5);
 	CHECK(int(mesh.nodes[1]->get_stats()["rejected_connections"]) == 1);
+	// The refused player learns why.
+	int busy = 0;
+	for (int t = 0; t < 2000 && busy == 0; t++) {
+		mesh.poll(1);
+		for (int i = 0; i < 6; i++) {
+			players[i]->poll();
+			busy += players[i]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_BUSY ? 1 : 0;
+		}
+	}
+	CHECK(busy == 1);
 	for (int i = 0; i < 6; i++) {
 		players[i]->close();
 	}
 	mesh.poll(20);
+}
+
+// A bare ENet socket on localhost, to play a host the protocol tests control (`ENetConnection` through the class
+// database: the tests don't include ENet's headers). Uses the players' compression (range coder).
+static Ref<RefCounted> bare_host(int &r_port) {
+	Ref<RefCounted> host = Object::cast_to<RefCounted>(ClassDB::instantiate("ENetConnection"));
+	r_port = 0;
+	for (int attempt = 0; host.is_valid() && attempt < 10 && r_port == 0; attempt++) {
+		const int candidate = 38000 + int((OS::get_singleton()->get_ticks_usec() + uint64_t(attempt) * 7919) % 4000);
+		if (int(host->call("create_host_bound", "127.0.0.1", candidate, 4, 27, 0, 0)) == OK) {
+			r_port = candidate;
+		}
+	}
+	if (r_port != 0) {
+		host->call("compress", 1);
+	}
+	return host;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Refused players learn why: a full mesh, another version of the protocol") {
+	// A mesh of two: the host and one player (on a random port, tried again if another program uses it).
+	int port = 0;
+	Ref<Mesh> host;
+	const bool printing = CoreGlobals::print_error_enabled;
+	CoreGlobals::print_error_enabled = false;
+	for (int attempt = 0; attempt < 10 && host.is_null(); attempt++) {
+		port = 36000 + 2 * int((OS::get_singleton()->get_ticks_usec() + uint64_t(attempt) * 7919) % 1000);
+		host = Mesh::create_host(port, 2);
+	}
+	CoreGlobals::print_error_enabled = printing;
+	REQUIRE(host.is_valid());
+	Ref<Mesh> first = Mesh::create_player("127.0.0.1", port);
+	REQUIRE(first.is_valid());
+	for (int t = 0; t < 3000 && first->get_status() == Mesh::STATUS_CONNECTING; t++) {
+		host->poll();
+		first->poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	REQUIRE(first->get_status() == Mesh::STATUS_CONNECTED);
+	Ref<Mesh> second = Mesh::create_player("127.0.0.1", port);
+	REQUIRE(second.is_valid());
+	for (int t = 0; t < 3000 && second->get_status() == Mesh::STATUS_CONNECTING; t++) {
+		host->poll();
+		first->poll();
+		second->poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(second->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK(second->get_disconnect_reason() == Mesh::DISCONNECT_REASON_FULL);
+	CHECK(host->get_peers() == PackedInt32Array({ 2 }));
+
+	// A player of version 1 ("TKM1", on a bare socket) learns the host's version ("TKV2"), full mesh or not.
+	Ref<RefCounted> old_player = Object::cast_to<RefCounted>(ClassDB::instantiate("ENetConnection"));
+	REQUIRE(old_player.is_valid());
+	REQUIRE(int(old_player->call("create_host", 1, 27, 0, 0)) == OK);
+	old_player->call("compress", 1);
+	old_player->call("connect_to_host", "127.0.0.1", port, 27, 0x544B4D31);
+	int refusal = 0;
+	for (int t = 0; t < 2000 && refusal == 0; t++) {
+		host->poll();
+		const Array event = old_player->call("service", 0);
+		if (int(event[0]) == 2) {
+			refusal = int(event[2]);
+		}
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(refusal == 0x544B5632);
+	old_player->call("destroy");
+
+	// A host of version 3 refuses this player the same way: the player tells why.
+	int future_port = 0;
+	Ref<RefCounted> future_host = bare_host(future_port);
+	REQUIRE(future_port != 0);
+	Ref<Mesh> player = Mesh::create_player("127.0.0.1", future_port);
+	REQUIRE(player.is_valid());
+	ERR_PRINT_OFF;
+	for (int t = 0; t < 2000 && player->get_status() == Mesh::STATUS_CONNECTING; t++) {
+		player->poll();
+		const Array event = future_host->call("service", 0);
+		if (int(event[0]) == 1) {
+			Object *link = event[1];
+			link->call("peer_disconnect_now", 0x544B5633);
+		}
+		OS::get_singleton()->delay_usec(1000);
+	}
+	ERR_PRINT_ON;
+	CHECK(player->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK(player->get_disconnect_reason() == Mesh::DISCONNECT_REASON_VERSION);
+	future_host->call("destroy");
+	first->close();
+	host->poll();
+	host->close();
 }
 
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player cut off from the host leaves instead of taking over") {
@@ -803,6 +912,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player cut off
 		mesh.poll(1);
 	}
 	CHECK(mesh.nodes[2]->get_status() == Mesh::STATUS_DISCONNECTED);
+	CHECK(mesh.nodes[2]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_LOST);
 	CHECK_FALSE(mesh.nodes[2]->is_hosting());
 	CHECK_FALSE(drain_events(mesh.nodes[2]));
 	CHECK(mesh.nodes[3]->get_host_peer() == 1);
@@ -877,18 +987,9 @@ static void send_control(const Variant &p_link, int p_type, const LocalVector<ui
 
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player keeps no more pairs than the mesh can have") {
 	// A fake host welcomes a player into a mesh of 4 players, then introduces it to 50 others.
-	Ref<RefCounted> host = Object::cast_to<RefCounted>(ClassDB::instantiate("ENetConnection"));
-	REQUIRE(host.is_valid());
 	int port = 0;
-	for (int attempt = 0; attempt < 10 && port == 0; attempt++) {
-		const int candidate = 38000 + int((OS::get_singleton()->get_ticks_usec() + uint64_t(attempt) * 7919) % 4000);
-		if (int(host->call("create_host_bound", "127.0.0.1", candidate, 4, 27, 0, 0)) == OK) {
-			port = candidate;
-		}
-	}
+	Ref<RefCounted> host = bare_host(port);
 	REQUIRE(port != 0);
-	// The players' compression (range coder).
-	host->call("compress", 1);
 	Ref<Mesh> player = Mesh::create_player("127.0.0.1", port);
 	REQUIRE(player.is_valid());
 	Variant link;

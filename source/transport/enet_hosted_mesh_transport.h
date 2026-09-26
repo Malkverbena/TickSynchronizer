@@ -24,6 +24,9 @@ class TickMultiplayerPeer;
 // A joining player first sends its join data; the host admits it (the game decides with `join_validator`) before
 // anybody learns about it (ADR-066). The host is trusted: it assigns the ids, introduces the players and relays their
 // packets. When it disappears, a player takes over only if other players it reaches directly lost the host too.
+//
+// The protocol, with its version (a player of another version is refused), is specified in
+// `notes/hosted-mesh-protocol.md` (ADR-069).
 class EnetHostedMeshTransport : public TickTransport {
 	GDCLASS(EnetHostedMeshTransport, TickTransport);
 	friend class TickMultiplayerPeer;
@@ -42,6 +45,24 @@ public:
 		STATUS_DISCONNECTED,
 		STATUS_CONNECTING,
 		STATUS_CONNECTED,
+	};
+
+	// Why this node left the mesh.
+	enum DisconnectReason {
+		DISCONNECT_REASON_NONE,
+		// This node closed its connections, or left the host.
+		DISCONNECT_REASON_CLOSED,
+		// The host stopped answering (or couldn't be reached), and no other host could take its place for this node.
+		DISCONNECT_REASON_LOST,
+		// The host refused this player (itself or through the game), or removed it.
+		DISCONNECT_REASON_REFUSED,
+		DISCONNECT_REASON_FULL,
+		// Too many joins from this address: it can try again a bit later.
+		DISCONNECT_REASON_BUSY,
+		// The host uses another version of the protocol.
+		DISCONNECT_REASON_VERSION,
+		// The host ended the mesh.
+		DISCONNECT_REASON_ENDED,
 	};
 
 	// How this node reaches another one.
@@ -145,6 +166,7 @@ private:
 	// This player asked to leave the host: its disconnection isn't the host leaving.
 	bool leaving = false;
 	Status status = STATUS_DISCONNECTED;
+	DisconnectReason disconnect_reason = DISCONNECT_REASON_NONE;
 	Compression compression = COMPRESSION_RANGE_CODER;
 	double punch_timeout = 3.0;
 	bool direct_connections = true;
@@ -279,7 +301,7 @@ private:
 	void player_confirm_host_loss();
 	void player_check_confirmation();
 	// The mesh ends for this player.
-	void player_lost_host();
+	void player_lost_host(DisconnectReason p_reason);
 	// The host left: the first living player of the succession takes over. `false` when there's none to reach.
 	bool player_migrate(int p_old_host);
 	void player_become_host(int p_old_host);
@@ -303,6 +325,8 @@ public:
 	static Ref<EnetHostedMeshTransport> create_player(const String &p_address, int p_port, Compression p_compression = COMPRESSION_RANGE_CODER, const Ref<TLSOptions> &p_tls_options = Ref<TLSOptions>(), const String &p_tls_hostname = String(), const PackedByteArray &p_join_data = PackedByteArray());
 
 	Status get_status() const { return status; }
+	// Once the status is `STATUS_DISCONNECTED`.
+	DisconnectReason get_disconnect_reason() const { return disconnect_reason; }
 	bool is_hosting() const { return is_host; }
 	bool is_encrypted() const { return encrypted; }
 	PeerPath get_peer_path(int p_peer) const;
@@ -360,4 +384,5 @@ public:
 
 VARIANT_ENUM_CAST(EnetHostedMeshTransport::Compression);
 VARIANT_ENUM_CAST(EnetHostedMeshTransport::Status);
+VARIANT_ENUM_CAST(EnetHostedMeshTransport::DisconnectReason);
 VARIANT_ENUM_CAST(EnetHostedMeshTransport::PeerPath);

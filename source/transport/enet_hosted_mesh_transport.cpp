@@ -14,12 +14,21 @@
 
 static_assert(int(EnetHostedMeshTransport::COMPRESSION_ZSTD) == int(ENetConnection::COMPRESS_ZSTD), "The compression modes must match ENet's.");
 
-// Connection data of a player joining the host ("TKM1"); any other value is a registration token.
-static constexpr uint32_t JOIN_MAGIC = 0x544B4D31;
-// Disconnection data. A player the host removes (refused by the host or by the game) doesn't migrate ("TKRX"), nor do
-// the players of a host that ends the mesh ("TKEN"); the players of a host that hands the mesh over migrate right away
-// ("TKHO"). Any other disconnection of the host is confirmed with the other players before migrating.
+// Version of the protocol (`notes/hosted-mesh-protocol.md`), changed only by incompatible changes. A joining player
+// sends it as the ASCII digit after "TKM" in its connection data ("TKM2"); any other value is a registration token.
+// Version 1 had no admission and no confirmed migration.
+static constexpr uint32_t MESH_PROTOCOL_VERSION = 2;
+static constexpr uint32_t JOIN_MAGIC_PREFIX = 0x544B4D00;
+static constexpr uint32_t JOIN_MAGIC = JOIN_MAGIC_PREFIX | ('0' + MESH_PROTOCOL_VERSION);
+// Disconnection data. A player the host refuses (itself or through the game) or removes doesn't migrate ("TKRX"); the
+// host also refuses joins when the mesh is full ("TKFL"), when their address started too many ("TKBZ"), and from
+// another version of the protocol ("TKV" and the host's version digit). The players of a host that ends the mesh don't
+// migrate ("TKEN"); those of a host that hands it over migrate right away ("TKHO"). Any other disconnection of the host
+// is confirmed with the other players before migrating.
 static constexpr int DISCONNECT_REMOVED = 0x544B5258;
+static constexpr int DISCONNECT_FULL = 0x544B464C;
+static constexpr int DISCONNECT_BUSY = 0x544B425A;
+static constexpr int DISCONNECT_VERSION_PREFIX = 0x544B5600;
 static constexpr int DISCONNECT_ENDED = 0x544B454E;
 static constexpr int DISCONNECT_HANDOVER = 0x544B484F;
 
@@ -299,6 +308,9 @@ Error EnetHostedMeshTransport::hand_over() {
 }
 
 void EnetHostedMeshTransport::close_links(int p_member_reason) {
+	if (status != STATUS_DISCONNECTED) {
+		disconnect_reason = DISCONNECT_REASON_CLOSED;
+	}
 	if (key_job) {
 		WorkerThreadPool::get_singleton()->wait_for_task_completion(key_task);
 		memdelete(key_job);
@@ -368,9 +380,9 @@ uint64_t EnetHostedMeshTransport::make_pair_key(int p_a, int p_b) {
 }
 
 uint32_t EnetHostedMeshTransport::make_token() {
-	// Unpredictable: whoever knows a token can take the place of a player in a pair.
+	// Unpredictable: whoever knows a token can take the place of a player in a pair. Never a join, of any version.
 	uint32_t token = 0;
-	while (token == 0 || token == JOIN_MAGIC) {
+	while (token == 0 || (token & 0xFFFFFF00) == JOIN_MAGIC_PREFIX) {
 		uint8_t bytes[4] = {};
 		if (OS::get_singleton()->get_entropy(bytes, 4) != OK) {
 			bytes[0] = uint8_t(OS::get_singleton()->get_ticks_usec());
@@ -906,14 +918,24 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 		link->peer_disconnect_now();
 		return;
 	}
-	if (p_data == JOIN_MAGIC) {
-		// Players join on the main socket (DTLS when encrypted), never on the rendezvous one, within the budget of
-		// their address; the players still joining count toward the limit. Nobody learns about a joining player until
-		// it's admitted: its join data comes first.
+	if ((p_data & 0xFFFFFF00) == JOIN_MAGIC_PREFIX) {
+		// Players of this version join on the main socket (DTLS when encrypted), never on the rendezvous one, within
+		// the budget of their address; the players still joining count toward the limit. The refused ones learn why.
+		// Nobody learns about a joining player until it's admitted: its join data comes first.
 		const String address = String(link->get_remote_address());
-		if (p_kind == 1 || int(members.size() + pending_joins.size()) >= max_players - 1 || !host_take_join_budget(address)) {
+		int refusal = 0;
+		if (p_data != JOIN_MAGIC) {
+			refusal = DISCONNECT_VERSION_PREFIX | int(JOIN_MAGIC & 0xFF);
+		} else if (p_kind == 1) {
+			refusal = DISCONNECT_REMOVED;
+		} else if (int(members.size() + pending_joins.size()) >= max_players - 1) {
+			refusal = DISCONNECT_FULL;
+		} else if (!host_take_join_budget(address)) {
+			refusal = DISCONNECT_BUSY;
+		}
+		if (refusal != 0) {
 			rejected_connections++;
-			link->peer_disconnect_now(DISCONNECT_REMOVED);
+			link->peer_disconnect_now(refusal);
 			return;
 		}
 		PendingJoin pending;
@@ -1671,15 +1693,40 @@ void EnetHostedMeshTransport::player_report_disconnected(int p_peer, Pair &r_pai
 }
 
 void EnetHostedMeshTransport::player_on_host_disconnect(int p_reason) {
-	// A player removed by the host, or leaving, or whose host ended the mesh, doesn't take the host's place.
-	if (leaving || p_reason == DISCONNECT_REMOVED || p_reason == DISCONNECT_ENDED || !host_migration || status != STATUS_CONNECTED) {
-		player_lost_host();
+	// A player leaving, refused or removed by the host, or whose host ended the mesh, doesn't take the host's place.
+	if (leaving) {
+		player_lost_host(DISCONNECT_REASON_CLOSED);
+		return;
+	}
+	if (p_reason == DISCONNECT_REMOVED) {
+		player_lost_host(DISCONNECT_REASON_REFUSED);
+		return;
+	}
+	if (p_reason == DISCONNECT_FULL) {
+		player_lost_host(DISCONNECT_REASON_FULL);
+		return;
+	}
+	if (p_reason == DISCONNECT_BUSY) {
+		player_lost_host(DISCONNECT_REASON_BUSY);
+		return;
+	}
+	if ((p_reason & 0xFFFFFF00) == DISCONNECT_VERSION_PREFIX) {
+		ERR_PRINT(vformat("The mesh host uses version %d of the hosted mesh protocol, and this node version %d: they can't connect.", (p_reason & 0xFF) - '0', MESH_PROTOCOL_VERSION));
+		player_lost_host(DISCONNECT_REASON_VERSION);
+		return;
+	}
+	if (p_reason == DISCONNECT_ENDED) {
+		player_lost_host(DISCONNECT_REASON_ENDED);
+		return;
+	}
+	if (!host_migration || status != STATUS_CONNECTED) {
+		player_lost_host(DISCONNECT_REASON_LOST);
 		return;
 	}
 	if (p_reason == DISCONNECT_HANDOVER) {
 		// The host left on purpose: the successor takes over right away.
 		if (!player_migrate(host_id)) {
-			player_lost_host();
+			player_lost_host(DISCONNECT_REASON_LOST);
 		}
 		return;
 	}
@@ -1715,7 +1762,7 @@ void EnetHostedMeshTransport::player_confirm_host_loss() {
 		}
 	}
 	if (confirm_asked.is_empty()) {
-		player_lost_host();
+		player_lost_host(DISCONNECT_REASON_LOST);
 		return;
 	}
 	confirming = true;
@@ -1732,7 +1779,7 @@ void EnetHostedMeshTransport::player_check_confirmation() {
 			answered = false;
 		} else if (*alive) {
 			// Another player still hears from the host.
-			player_lost_host();
+			player_lost_host(DISCONNECT_REASON_LOST);
 			return;
 		} else {
 			lost++;
@@ -1744,12 +1791,13 @@ void EnetHostedMeshTransport::player_check_confirmation() {
 	confirming = false;
 	// Nobody answered: this player is the one cut off.
 	if (lost == 0 || !player_migrate(confirm_old_host)) {
-		player_lost_host();
+		player_lost_host(DISCONNECT_REASON_LOST);
 	}
 }
 
-void EnetHostedMeshTransport::player_lost_host() {
+void EnetHostedMeshTransport::player_lost_host(DisconnectReason p_reason) {
 	const bool was_connected = status == STATUS_CONNECTED;
+	disconnect_reason = p_reason;
 	confirming = false;
 	pending_rejoins.clear();
 	for (KeyValue<int, Pair> &E : pairs) {
@@ -1967,6 +2015,7 @@ void EnetHostedMeshTransport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_host_timeout", "seconds"), &EnetHostedMeshTransport::set_host_timeout);
 	ClassDB::bind_method(D_METHOD("get_host_timeout"), &EnetHostedMeshTransport::get_host_timeout);
 	ClassDB::bind_method(D_METHOD("get_status"), &EnetHostedMeshTransport::get_status);
+	ClassDB::bind_method(D_METHOD("get_disconnect_reason"), &EnetHostedMeshTransport::get_disconnect_reason);
 	ClassDB::bind_method(D_METHOD("is_hosting"), &EnetHostedMeshTransport::is_hosting);
 	ClassDB::bind_method(D_METHOD("get_peer_path", "peer"), &EnetHostedMeshTransport::get_peer_path);
 	ClassDB::bind_method(D_METHOD("get_peers"), &EnetHostedMeshTransport::get_peers);
@@ -2000,6 +2049,14 @@ void EnetHostedMeshTransport::_bind_methods() {
 	BIND_ENUM_CONSTANT(STATUS_DISCONNECTED);
 	BIND_ENUM_CONSTANT(STATUS_CONNECTING);
 	BIND_ENUM_CONSTANT(STATUS_CONNECTED);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_NONE);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_CLOSED);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_LOST);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_REFUSED);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_FULL);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_BUSY);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_VERSION);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_ENDED);
 	BIND_ENUM_CONSTANT(PATH_NONE);
 	BIND_ENUM_CONSTANT(PATH_HOST);
 	BIND_ENUM_CONSTANT(PATH_CONNECTING);
