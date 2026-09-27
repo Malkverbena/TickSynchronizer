@@ -3,7 +3,7 @@ extends Node
 
 const Player := preload("res://player.gd")
 
-var options := {"role": "", "address": "", "port": 9500, "dtls": 0, "duration": 60.0, "relay": 0, "password": "", "end": 0}
+var options := {"role": "", "address": "", "port": 9500, "dtls": 0, "duration": 60.0, "relay": 0, "password": "", "end": 0, "freeze": 0.0}
 var transport: EnetHostedMeshTransport
 var network: TickNetwork
 var bodies := {}
@@ -12,17 +12,20 @@ var next_report := 1.0
 var running := false
 var last_paths := {}
 var left := false
+var frozen := false
 var log_label: Label
 var address_edit: LineEdit
 var lines: PackedStringArray = []
 
 
 func _ready() -> void:
-	var config := ConfigFile.new()
-	if config.load("res://nat_test.cfg") == OK:
-		options.address = config.get_value("test", "address", "")
-		options.port = config.get_value("test", "port", 9500)
-		options.password = config.get_value("test", "password", "")
+	# The defaults exported with the app, then a configuration pushed to the device for automated runs (README.md): with
+	# a `role`, it starts right away.
+	for path in ["res://nat_test.cfg", "user://nat_test.cfg"]:
+		var config := ConfigFile.new()
+		if config.load(path) == OK and config.has_section("test"):
+			for key in config.get_section_keys("test"):
+				options[key] = config.get_value("test", key)
 	for arg in OS.get_cmdline_user_args():
 		if arg in ["host", "player"]:
 			options.role = arg
@@ -127,6 +130,18 @@ func _process(delta: float) -> void:
 	if not running:
 		return
 	elapsed += delta
+	if not frozen and float(options.freeze) > 0.0 and elapsed >= float(options.freeze):
+		# `--freeze=S`: from then on, this node doesn't touch the network (a hung process, or one without network).
+		frozen = true
+		network.process_mode = Node.PROCESS_MODE_DISABLED
+		_log("t=%.1f id=%d freezes: the network isn't serviced anymore" % [elapsed, transport.get_local_peer_id()])
+	if frozen:
+		if elapsed >= options.duration:
+			running = false
+			_log("done (frozen)")
+			if not options.role.is_empty():
+				get_tree().quit()
+		return
 	# Path changes as they happen.
 	var paths := {}
 	for peer in transport.get_peers():
