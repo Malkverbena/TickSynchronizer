@@ -93,6 +93,8 @@ enum HostedMeshControl {
 	// Between players that reach each other directly, when one lost the host: did you lose it too?
 	CONTROL_HOST_QUERY,
 	CONTROL_HOST_STATUS,
+	// Host that took over to its players: the ports the pairs register on now (it takes new players).
+	CONTROL_HOST_PORTS,
 };
 
 static ENetConnection *as_socket(const Ref<RefCounted> &p_socket) {
@@ -321,6 +323,7 @@ void EnetHostedMeshTransport::close_links(int p_member_reason) {
 	}
 	confirming = false;
 	pending_rejoins.clear();
+	pending_certificates.clear();
 	for (KeyValue<int, Pair> &E : pairs) {
 		player_close_pair(E.value);
 	}
@@ -829,9 +832,11 @@ void EnetHostedMeshTransport::host_admit(ObjectID p_link) {
 	apply_link_timeout(link);
 	HostedMeshWriter welcome(CONTROL_WELCOME);
 	welcome.put_u32(uint32_t(id));
-	// Where the pairs register their endpoints (0: this port), and how many players the mesh can have.
+	// Where the pairs register their endpoints (0: this port), how many players the mesh can have, and this host's id
+	// (1, unless it took over after a migration).
 	welcome.put_u32(rendezvous.is_valid() ? uint32_t(as_socket(rendezvous)->get_local_port()) : 0);
 	welcome.put_u32(uint32_t(max_players));
+	welcome.put_u32(uint32_t(local_id));
 	send_control(link, welcome.bytes);
 	push_event(EVENT_PEER_CONNECTED, id);
 	for (const KeyValue<int, Ref<RefCounted>> &E : members) {
@@ -1113,6 +1118,13 @@ void EnetHostedMeshTransport::host_handle_rejoin(int p_from, const LocalVector<i
 	// are relayed here.
 	const Ref<RefCounted> *rejoined = members.getptr(p_from);
 	ERR_FAIL_NULL(rejoined);
+	if (listener.is_valid()) {
+		// This host takes new players: the pairs they form with this player register on its ports.
+		HostedMeshWriter ports(CONTROL_HOST_PORTS);
+		ports.put_u32(uint32_t(as_socket(listener)->get_local_port()));
+		ports.put_u32(rendezvous.is_valid() ? uint32_t(as_socket(rendezvous)->get_local_port()) : 0);
+		send_control(*rejoined, ports.bytes);
+	}
 	for (const KeyValue<int, Ref<RefCounted>> &E : members) {
 		if (E.key == p_from) {
 			continue;
@@ -1138,6 +1150,33 @@ void EnetHostedMeshTransport::host_handle_rejoin(int p_from, const LocalVector<i
 		}
 	}
 	host_send_succession();
+}
+
+void EnetHostedMeshTransport::host_open_takeover_sockets() {
+	if (takeover_port <= 0) {
+		return;
+	}
+	ERR_FAIL_COND_MSG(encrypted && takeover_tls_options.is_null(), "This node took over a mesh that uses DTLS, without `takeover_tls_options`: no new players can join it.");
+	const int max_peers = MIN(4095, max_players * 3);
+	Ref<ENetConnection> socket;
+	socket.instantiate();
+	Error err = socket->create_host_bound(IPAddress("*"), takeover_port, max_peers, ENET_CHANNEL_COUNT, 0, 0);
+	ERR_FAIL_COND_MSG(err != OK, vformat("This node took over the mesh but can't take new players on port %d.", takeover_port));
+	socket->compress(ENetConnection::CompressionMode(compression));
+	if (encrypted) {
+		err = socket->dtls_server_setup(takeover_tls_options);
+		ERR_FAIL_COND_MSG(err != OK, "Can't set up DTLS on the port for new players.");
+		// A DTLS socket only takes DTLS: the pairs register their endpoints on a plain one.
+		Ref<ENetConnection> rendezvous_socket;
+		rendezvous_socket.instantiate();
+		const int rendezvous_port = takeover_rendezvous_port > 0 ? takeover_rendezvous_port : takeover_port + 1;
+		err = rendezvous_socket->create_host_bound(IPAddress("*"), rendezvous_port, max_peers, ENET_CHANNEL_COUNT, 0, 0);
+		ERR_FAIL_COND_MSG(err != OK, vformat("Can't open the rendezvous port %d for new players.", rendezvous_port));
+		rendezvous_socket->compress(ENetConnection::CompressionMode(compression));
+		rendezvous = rendezvous_socket;
+		tls_options = takeover_tls_options;
+	}
+	listener = socket;
 }
 
 void EnetHostedMeshTransport::host_introduce(int p_first, int p_second) {
@@ -1308,17 +1347,26 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			if (reader.failed) {
 				return;
 			}
+			// The host's id: 1, unless it took over after a migration (a host that doesn't send it is 1).
+			const uint32_t welcoming_host = reader.get_u32();
+			host_id = (!reader.failed && welcoming_host > 0 && welcoming_host != uint32_t(peer)) ? int(welcoming_host) : PEER_SERVER;
 			local_id = peer;
+			highest_peer_id = MAX(highest_peer_id, MAX(peer, host_id));
 			host_rendezvous_port = int(rendezvous_port);
 			host_max_players = int(CLAMP(player_limit, 2u, 1024u));
 			status = STATUS_CONNECTED;
 			player_send_certificate();
 			push_event(EVENT_PEER_CONNECTED, host_id);
+			if (host_id != PEER_SERVER) {
+				// For the engines the host isn't peer 1: it's as if it had migrated before this player joined.
+				push_event(EVENT_HOST_MIGRATED, host_id);
+			}
 		} break;
 		case CONTROL_PAIR_OPEN: {
 			// A pair is introduced once, and a player never has more pairs than the mesh has other players.
 			const uint32_t token = reader.get_u32();
 			if (!reader.failed && peer > 0 && peer != host_id && peer != local_id && !pairs.has(peer) && int(pairs.size()) < host_max_players - 2) {
+				highest_peer_id = MAX(highest_peer_id, peer);
 				player_open_pair(peer, token);
 			}
 		} break;
@@ -1341,6 +1389,7 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			}
 		} break;
 		case CONTROL_PAIR_RELAY: {
+			highest_peer_id = MAX(highest_peer_id, peer);
 			player_set_relayed(peer);
 		} break;
 		case CONTROL_SUCCESSION: {
@@ -1351,9 +1400,13 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			}
 			if (!reader.failed) {
 				succession = ids;
+				for (const int id : ids) {
+					highest_peer_id = MAX(highest_peer_id, id);
+				}
 			}
 		} break;
 		case CONTROL_MEMBER_LEFT: {
+			highest_peer_id = MAX(highest_peer_id, peer);
 			Pair *pair = pairs.getptr(peer);
 			if (pair) {
 				player_close_pair(*pair);
@@ -1369,6 +1422,17 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			const bool alive = reader.get_u32() != 0;
 			if (!reader.failed && confirming && peer == confirm_old_host && confirm_asked.has(host_id)) {
 				confirm_answers[host_id] = alive;
+			}
+		} break;
+		case CONTROL_HOST_PORTS: {
+			// The host took over after a migration and takes new players: the pairs register on its ports now. `peer` is
+			// the main port here.
+			const uint32_t rendezvous_port = reader.get_u32();
+			ENetPacketPeer *link = as_link(host_link);
+			if (!reader.failed && link && peer > 0 && peer <= 65535 && rendezvous_port <= 65535) {
+				host_address = String(link->get_remote_address());
+				host_port = peer;
+				host_rendezvous_port = int(rendezvous_port);
 			}
 		} break;
 		default:
@@ -1389,6 +1453,14 @@ void EnetHostedMeshTransport::player_on_pair_control(int p_peer, Pair &r_pair, c
 		return;
 	}
 	if (r_pair.state != PAIR_DIRECT) {
+		return;
+	}
+	if (type == CONTROL_CERTIFICATE) {
+		// Sent with a rejoin request (see below): kept for when this player becomes the host.
+		const String certificate = reader.get_string();
+		if (!reader.failed && encrypted && !pending_certificates.has(p_peer)) {
+			pending_certificates.insert(p_peer, certificate);
+		}
 		return;
 	}
 	const int value = int(reader.get_u32());
@@ -1814,6 +1886,7 @@ void EnetHostedMeshTransport::player_lost_host(DisconnectReason p_reason) {
 	disconnect_reason = p_reason;
 	confirming = false;
 	pending_rejoins.clear();
+	pending_certificates.clear();
 	for (KeyValue<int, Pair> &E : pairs) {
 		player_close_pair(E.value);
 		player_report_disconnected(E.key, E.value);
@@ -1875,15 +1948,24 @@ void EnetHostedMeshTransport::player_become_host(int p_old_host) {
 		}
 	}
 	pairs.clear();
-	next_player_id = local_id + 1;
+	// New players never get the id of one that was in the mesh.
+	next_player_id = MAX(local_id, highest_peer_id) + 1;
 	for (const KeyValue<int, Ref<RefCounted>> &E : members) {
 		next_player_id = MAX(next_player_id, E.key + 1);
 	}
+	max_players = host_max_players;
+	host_open_takeover_sockets();
 	next_heartbeat_usec = 0;
 	push_event(EVENT_HOST_MIGRATED, local_id);
 	push_event(EVENT_PEER_DISCONNECTED, p_old_host);
 	host_send_succession();
 	// The players that followed this one before it noticed the old host was gone.
+	for (const KeyValue<int, String> &E : pending_certificates) {
+		if (members.has(E.key)) {
+			member_certificates.insert(E.key, E.value);
+		}
+	}
+	pending_certificates.clear();
 	for (const KeyValue<int, LocalVector<int>> &E : pending_rejoins) {
 		if (members.has(E.key)) {
 			host_handle_rejoin(E.key, E.value);
@@ -1902,6 +1984,10 @@ void EnetHostedMeshTransport::player_follow_host(int p_old_host, int p_new_host)
 	apply_link_timeout(host_link);
 	host_heard_usec = OS::get_singleton()->get_ticks_usec();
 	pending_rejoins.clear();
+	pending_certificates.clear();
+	// The new host hands this player's certificate to the players it introduces later.
+	certificate_sent = false;
+	player_send_certificate();
 	// The pairs that weren't direct went through the old host: the new host relays them again once both players
 	// followed it (a player it lost stays gone).
 	LocalVector<int> dropped;
@@ -1951,6 +2037,16 @@ void EnetHostedMeshTransport::set_host_timeout(double p_seconds) {
 			apply_link_timeout(E.value.link);
 		}
 	}
+}
+
+void EnetHostedMeshTransport::set_takeover_port(int p_port) {
+	ERR_FAIL_COND_MSG(p_port < 0 || p_port > 65535, "The takeover port must be between 0 and 65535.");
+	takeover_port = p_port;
+}
+
+void EnetHostedMeshTransport::set_takeover_rendezvous_port(int p_port) {
+	ERR_FAIL_COND_MSG(p_port < 0 || p_port > 65535, "The takeover rendezvous port must be between 0 and 65535.");
+	takeover_rendezvous_port = p_port;
 }
 
 void EnetHostedMeshTransport::set_join_timeout(double p_seconds) {
@@ -2045,6 +2141,12 @@ void EnetHostedMeshTransport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("admit_player", "peer"), &EnetHostedMeshTransport::admit_player);
 	ClassDB::bind_method(D_METHOD("refuse_player", "peer"), &EnetHostedMeshTransport::refuse_player);
 	ClassDB::bind_method(D_METHOD("hand_over"), &EnetHostedMeshTransport::hand_over);
+	ClassDB::bind_method(D_METHOD("set_takeover_port", "port"), &EnetHostedMeshTransport::set_takeover_port);
+	ClassDB::bind_method(D_METHOD("get_takeover_port"), &EnetHostedMeshTransport::get_takeover_port);
+	ClassDB::bind_method(D_METHOD("set_takeover_rendezvous_port", "port"), &EnetHostedMeshTransport::set_takeover_rendezvous_port);
+	ClassDB::bind_method(D_METHOD("get_takeover_rendezvous_port"), &EnetHostedMeshTransport::get_takeover_rendezvous_port);
+	ClassDB::bind_method(D_METHOD("set_takeover_tls_options", "options"), &EnetHostedMeshTransport::set_takeover_tls_options);
+	ClassDB::bind_method(D_METHOD("get_takeover_tls_options"), &EnetHostedMeshTransport::get_takeover_tls_options);
 	ClassDB::bind_method(D_METHOD("get_multiplayer_peer"), &EnetHostedMeshTransport::get_multiplayer_peer);
 	ClassDB::bind_method(D_METHOD("close"), &EnetHostedMeshTransport::close);
 
@@ -2054,6 +2156,9 @@ void EnetHostedMeshTransport::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "host_timeout", PROPERTY_HINT_RANGE, "0.1,60,0.1,suffix:s"), "set_host_timeout", "get_host_timeout");
 	ADD_PROPERTY(PropertyInfo(Variant::CALLABLE, "join_validator"), "set_join_validator", "get_join_validator");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "join_timeout", PROPERTY_HINT_RANGE, "0.1,120,0.1,suffix:s"), "set_join_timeout", "get_join_timeout");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "takeover_port", PROPERTY_HINT_RANGE, "0,65535,1"), "set_takeover_port", "get_takeover_port");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "takeover_rendezvous_port", PROPERTY_HINT_RANGE, "0,65535,1"), "set_takeover_rendezvous_port", "get_takeover_rendezvous_port");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "takeover_tls_options", PROPERTY_HINT_RESOURCE_TYPE, "TLSOptions"), "set_takeover_tls_options", "get_takeover_tls_options");
 
 	BIND_ENUM_CONSTANT(COMPRESSION_NONE);
 	BIND_ENUM_CONSTANT(COMPRESSION_RANGE_CODER);

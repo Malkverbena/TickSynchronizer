@@ -18,7 +18,7 @@
 		$Game.start(mesh)
 		[/codeblock]
 		[b]DTLS:[/b] pass [TLSOptions] to [method create_host] ([method TLSOptions.server]) and [method create_player] ([method TLSOptions.client], or [method TLSOptions.client_unsafe] for testing) to encrypt every link. The direct links between players use a certificate each player generates when it joins; the host hands it to the other player of the pair, who accepts only that certificate. A DTLS socket only takes DTLS, so the players register their endpoints on a second, plain port of the host (the rendezvous port, the next port by default), which must be reachable too; only single-use tokens go through it.
-		[b]Host migration:[/b] the host keeps every player informed of a succession (players without relayed pairs first, then by id). When the host leaves with [method hand_over], or stops answering (see [member host_timeout]), the first player of the succession still in the mesh becomes the host: its direct links become the host links, and the others follow it through their direct link with it. A [TickNetwork] with [constant TickNetwork.AUTHORITY_SINGLE] moves its authority to the new host (see [signal TickNetwork.host_migrated]); [SceneMultiplayer] doesn't (see [signal TickMultiplayerPeer.host_migrated]). A player that can't reach the new host directly leaves the mesh. The new host has no listening port, so no new players can join after a migration.
+		[b]Host migration:[/b] the host keeps every player informed of a succession (players without relayed pairs first, then by id). When the host leaves with [method hand_over], or stops answering (see [member host_timeout]), the first player of the succession still in the mesh becomes the host: its direct links become the host links, and the others follow it through their direct link with it. A [TickNetwork] with [constant TickNetwork.AUTHORITY_SINGLE] moves its authority to the new host (see [signal TickNetwork.host_migrated]); [SceneMultiplayer] doesn't (see [signal TickMultiplayerPeer.host_migrated]). A player that can't reach the new host directly leaves the mesh. New players can join the new host if it has a [member takeover_port] (and, with DTLS, [member takeover_tls_options]); the game tells them where it is, for example through its lobby, since it isn't the address they first joined. For a player that joins it, the host isn't peer 1: [signal TickNetwork.host_migrated] and [signal TickMultiplayerPeer.host_migrated] are emitted when it joins, as if the host had migrated then.
 		A host that stops answering may be gone, or only cut off from one player: before migrating, a player asks the players it reaches directly whether they lost the host too. If one of them still hears from it, or none of them answers, this player is the one cut off, and it leaves the mesh instead of taking over. A host that calls [method close] ends the mesh for everybody.
 	</description>
 	<tutorials>
@@ -166,6 +166,15 @@
 		</member>
 		<member name="punch_timeout" type="float" setter="set_punch_timeout" getter="get_punch_timeout" default="3.0">
 			Seconds to establish a direct link between two players before relaying them.
+		</member>
+		<member name="takeover_port" type="int" setter="set_takeover_port" getter="get_takeover_port" default="0">
+			Player: the port it takes new players on if it becomes the host after a migration; 0 takes none. It must be reachable like the first host's port, and the game tells the new players this node's address. With DTLS, set [member takeover_tls_options] too.
+		</member>
+		<member name="takeover_rendezvous_port" type="int" setter="set_takeover_rendezvous_port" getter="get_takeover_rendezvous_port" default="0">
+			Player, with DTLS: the plain port where the pairs register their endpoints if it becomes the host ([member takeover_port] + 1 when 0). It must be reachable too.
+		</member>
+		<member name="takeover_tls_options" type="TLSOptions" setter="set_takeover_tls_options" getter="get_takeover_tls_options">
+			Player, with DTLS: its certificate ([method TLSOptions.server]) for the players that join it if it becomes the host. Without it, a mesh that uses DTLS takes no new players after a migration.
 		</member>
 	</members>
 	<constants>

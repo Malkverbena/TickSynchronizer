@@ -3,7 +3,7 @@ extends Node
 
 const Player := preload("res://player.gd")
 
-var options := {"role": "", "address": "", "port": 9500, "dtls": 0, "duration": 60.0, "relay": 0, "password": "", "end": 0, "freeze": 0.0}
+var options := {"role": "", "address": "", "port": 9500, "dtls": 0, "duration": 60.0, "relay": 0, "password": "", "end": 0, "freeze": 0.0, "takeover": 0}
 var transport: EnetHostedMeshTransport
 var network: TickNetwork
 var bodies := {}
@@ -92,6 +92,9 @@ func _start(role: String, dtls: bool) -> void:
 				return join_data.get_string_from_utf8() == password
 	else:
 		transport = EnetHostedMeshTransport.create_player(options.address, options.port, EnetHostedMeshTransport.COMPRESSION_RANGE_CODER, tls, "", password.to_utf8_buffer())
+		if transport:
+			# `--takeover=PORT`: if this player becomes the host, new players join it there.
+			transport.takeover_port = int(options.takeover)
 	if transport == null:
 		_log("FAILED to create the %s transport (address %s, port %d)" % [role, options.address, options.port])
 		return

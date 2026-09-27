@@ -504,6 +504,91 @@ TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer
 	multiplayer_report_count = 0;
 }
 
+// Hands the mesh over from the host (1) and waits until player 2 hosts and the players `p_first`..`p_last` follow it.
+static void hand_over_to_player_2(HostedMesh &r_mesh, int p_first, int p_last) {
+	CHECK(r_mesh.nodes[1]->hand_over() == OK);
+	bool done = false;
+	for (int t = 0; t < 3000 && !done; t++) {
+		r_mesh.poll(1);
+		done = r_mesh.nodes[2]->is_hosting();
+		for (int i = p_first; i <= p_last; i++) {
+			done = done && r_mesh.nodes[i]->get_host_peer() == 2;
+		}
+	}
+	REQUIRE(done);
+	// The players' rejoin requests, and the ports the new host tells them.
+	r_mesh.poll(50);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] New players join the host that took over") {
+	HostedMesh mesh(3);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	// Player 4 leaves: its id isn't given to anyone else.
+	mesh.nodes[4]->close();
+	for (int t = 0; t < 2000 && mesh.nodes[2]->is_peer_connected(4); t++) {
+		mesh.poll(1);
+	}
+	REQUIRE_FALSE(mesh.nodes[2]->is_peer_connected(4));
+	mesh.poll(20);
+
+	// The successor takes new players on a port of its own (the host's rendezvous port, free without DTLS).
+	const int takeover = mesh.port + 1;
+	mesh.nodes[2]->set_takeover_port(takeover);
+	hand_over_to_player_2(mesh, 3, 3);
+
+	// A new player joins the new host, where the game told it.
+	mesh.nodes[5] = Mesh::create_player("127.0.0.1", takeover);
+	REQUIRE(mesh.nodes[5].is_valid());
+	mesh.count = 5;
+	for (int t = 0; t < 8000 && !(mesh.nodes[5]->get_peer_path(3) == Mesh::PATH_DIRECT && mesh.nodes[3]->get_peer_path(5) == Mesh::PATH_DIRECT); t++) {
+		mesh.poll(1);
+	}
+	CHECK(mesh.nodes[5]->get_local_peer_id() == 5);
+	// The welcome says who hosts; for the engines, it's as if the host had migrated before this player joined.
+	CHECK(mesh.nodes[5]->get_host_peer() == 2);
+	CHECK(mesh.nodes[5]->get_peers() == PackedInt32Array({ 2, 3 }));
+	bool migrated = false;
+	TickTransport::Event event;
+	while (mesh.nodes[5]->pop_event(event)) {
+		migrated = migrated || (event.type == TickTransport::EVENT_HOST_MIGRATED && event.peer == 2);
+	}
+	CHECK(migrated);
+	CHECK(mesh.nodes[2]->get_peers() == PackedInt32Array({ 3, 5 }));
+	// The pair with the player that followed was introduced and punched through the new host's port.
+	CHECK(mesh.nodes[3]->get_peer_path(5) == Mesh::PATH_DIRECT);
+	CHECK(mesh.nodes[5]->get_peer_path(3) == Mesh::PATH_DIRECT);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] New players join the host that took over, with DTLS") {
+	TestCertificate host;
+	TestCertificate successor;
+	REQUIRE(successor.certificate.is_valid());
+	HostedMesh mesh(2, 0, TLSOptions::server(host.key, host.certificate), TLSOptions::client(host.certificate));
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.poll(20);
+
+	// The successor's port for new players and its certificate; the pairs register on the next port.
+	const int takeover = mesh.port + 2;
+	mesh.nodes[2]->set_takeover_port(takeover);
+	mesh.nodes[2]->set_takeover_tls_options(TLSOptions::server(successor.key, successor.certificate));
+	hand_over_to_player_2(mesh, 3, 3);
+
+	mesh.nodes[4] = Mesh::create_player("127.0.0.1", takeover, Mesh::COMPRESSION_RANGE_CODER, TLSOptions::client(successor.certificate), "localhost");
+	REQUIRE(mesh.nodes[4].is_valid());
+	mesh.count = 4;
+	for (int t = 0; t < 10000 && !(mesh.nodes[4]->get_peer_path(3) == Mesh::PATH_DIRECT && mesh.nodes[3]->get_peer_path(4) == Mesh::PATH_DIRECT); t++) {
+		mesh.poll(1);
+	}
+	CHECK(mesh.nodes[4]->is_encrypted());
+	CHECK(mesh.nodes[4]->get_local_peer_id() == 4);
+	CHECK(mesh.nodes[2]->get_peers() == PackedInt32Array({ 3, 4 }));
+	// Player 3 sent its certificate again to the new host, which handed it to the new player.
+	CHECK(mesh.nodes[3]->get_peer_path(4) == Mesh::PATH_DIRECT);
+	CHECK(mesh.nodes[4]->get_peer_path(3) == Mesh::PATH_DIRECT);
+}
+
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that stops answering is replaced; relayed players are lost") {
 	// Player 4 is only relayed: it can't reach the successor.
 	HostedMesh mesh(3, 4);
@@ -612,6 +697,83 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority mi
 	CHECK(Math::abs(movers[3][1]->position.x - npc) < 1.5);
 	CHECK(mover_3 > 20.0);
 	CHECK(Math::abs(movers[3][3]->position.x - mover_3) < 1.5);
+
+	for (int peer = 1; peer <= 4; peer++) {
+		cores[peer].stop();
+		for (int controller = 1; controller <= 4; controller++) {
+			memdelete(movers[peer][controller]);
+		}
+	}
+}
+
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that joins after a migration plays with the new host") {
+	HostedMesh mesh(2);
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.nodes[2]->set_takeover_port(mesh.port + 1);
+
+	// Every node has the host's NPC (controller 1) and the movers of players 2, 3 and 4 (who joins later).
+	TickSyncCore cores[5];
+	TestTickSyncCore::TestListener listeners[5];
+	TestMover *movers[5][5] = {};
+	for (int peer = 1; peer <= 4; peer++) {
+		for (int controller = 1; controller <= 4; controller++) {
+			TestMover *mover = memnew(TestMover(controller == 1 ? String("npc") : vformat("mover_%d", controller), controller, TickCodec::PRECISION_SINGLE));
+			mover->constant_direction = true;
+			mover->direction_override = 1;
+			movers[peer][controller] = mover;
+			cores[peer].register_object(mover);
+		}
+		cores[peer].set_listener(&listeners[peer]);
+	}
+	for (int peer = 1; peer <= 3; peer++) {
+		TickTransport::Event event;
+		while (mesh.nodes[peer]->pop_event(event)) {
+		}
+		REQUIRE(cores[peer].start(mesh.nodes[peer], OS::get_singleton()->get_ticks_usec()) == OK);
+	}
+	uint64_t last = OS::get_singleton()->get_ticks_usec();
+	bool running[5] = { false, true, true, true, false };
+	const uint64_t durations[3] = { 2500000, 2500000, 4000000 };
+	for (int phase = 0; phase < 3; phase++) {
+		const uint64_t end = last + durations[phase];
+		while (OS::get_singleton()->get_ticks_usec() < end) {
+			const uint64_t now = OS::get_singleton()->get_ticks_usec();
+			const double delta = double(now - last) / 1000000.0;
+			last = now;
+			for (int peer = 1; peer <= 4; peer++) {
+				if (running[peer]) {
+					cores[peer].process(delta, now);
+				} else if (mesh.nodes[peer].is_valid()) {
+					mesh.nodes[peer]->poll();
+				}
+			}
+			OS::get_singleton()->delay_usec(2000);
+		}
+		if (phase == 0) {
+			// The host leaves, handing the mesh over to player 2.
+			cores[1].stop();
+			running[1] = false;
+			mesh.nodes[1]->hand_over();
+		} else if (phase == 1) {
+			REQUIRE(cores[2].is_server());
+			// A new player joins player 2, which took over; its network starts before it's even connected.
+			mesh.nodes[4] = Mesh::create_player("127.0.0.1", mesh.port + 1);
+			REQUIRE(mesh.nodes[4].is_valid());
+			mesh.count = 4;
+			REQUIRE(cores[4].start(mesh.nodes[4], OS::get_singleton()->get_ticks_usec()) == OK);
+			running[4] = true;
+		}
+	}
+
+	// The new player's authority is the new host, which welcomed it, and its inputs are simulated there.
+	CHECK(mesh.nodes[4]->get_host_peer() == 2);
+	CHECK(cores[4].get_settings().authority_peer == 2);
+	CHECK(cores[4].is_welcomed());
+	CHECK(cores[4].is_predicting());
+	CHECK(cores[4].get_stats().malformed_packets == 0);
+	CHECK(movers[2][4]->position.x > 10.0);
+	CHECK(Math::abs(movers[4][1]->position.x - movers[2][1]->position.x) < 1.5);
 
 	for (int peer = 1; peer <= 4; peer++) {
 		cores[peer].stop();

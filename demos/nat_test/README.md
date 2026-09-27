@@ -6,7 +6,7 @@ punched direct link and fall back to the host's relay; every node reports its pa
 
 ```bash
 godot --headless --path . -- host [--port=9500] [--dtls=1] [--duration=S] [--password=P] [--end=1] [--freeze=S]
-godot --headless --path . -- player --address=<host address> [--port=9500] [--dtls=1] [--relay=1] [--duration=S] [--password=P] [--freeze=S]
+godot --headless --path . -- player --address=<host address> [--port=9500] [--dtls=1] [--relay=1] [--duration=S] [--password=P] [--freeze=S] [--takeover=PORT]
 ```
 
 On a phone, export the project (Android, `INTERNET` permission) with a `nat_test.cfg` next to `project.godot` holding the
@@ -24,7 +24,9 @@ The app shows the address and two buttons, without and with DTLS. With DTLS, the
 a shorter `--duration` than the players hands the mesh over when its time is up, which shows the host migration; with
 `--end=1`, it ends the mesh instead. With `--password`, the host admits only the players that send the same one (the
 phone reads it from `nat_test.cfg`). With `--freeze=S`, a node stops servicing the network after S seconds, like a hung
-process: a frozen host shows how the players confirm its loss and migrate. Every node logs why it left the mesh.
+process: a frozen host shows how the players confirm its loss and migrate. A player with `--takeover=PORT` takes new
+players on that port if it becomes the host (without DTLS: the demo gives the players no server certificate). Every
+node logs why it left the mesh.
 
 Automated runs on a phone: the app also reads `user://nat_test.cfg`, with the same keys as the command line (`role`,
 `address`, `dtls`, `duration`, `password`...); with a `role`, it starts without the buttons and quits at the end. The

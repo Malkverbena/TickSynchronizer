@@ -26,7 +26,8 @@ class TickMultiplayerPeer;
 // packets. When it disappears, a player takes over only if other players it reaches directly lost the host too.
 //
 // The protocol, with its version (a player of another version is refused), is specified in
-// `notes/hosted-mesh-protocol.md` (ADR-069).
+// `notes/hosted-mesh-protocol.md` (ADR-069). A player with a `takeover_port` takes new players there if it becomes the
+// host (ADR-072).
 class EnetHostedMeshTransport : public TickTransport {
 	GDCLASS(EnetHostedMeshTransport, TickTransport);
 	friend class TickMultiplayerPeer;
@@ -224,6 +225,14 @@ private:
 	HashMap<int, bool> confirm_answers;
 	// Players that chose this one as the new host before it noticed the old one was gone: their rejoin requests.
 	HashMap<int, LocalVector<int>> pending_rejoins;
+	// DTLS: the certificates those players sent with their rejoin requests.
+	HashMap<int, String> pending_certificates;
+	// Where this player takes new players if it becomes the host (0: nowhere).
+	int takeover_port = 0;
+	int takeover_rendezvous_port = 0;
+	Ref<TLSOptions> takeover_tls_options;
+	// The highest player id this node heard of: a host that took over never gives another player's id to a new one.
+	int highest_peer_id = 0;
 
 	LocalVector<Event> events;
 	LocalVector<Packet> packets;
@@ -265,6 +274,8 @@ private:
 	void host_admit(ObjectID p_link);
 	void host_refuse(ObjectID p_link);
 	void host_handle_rejoin(int p_from, const LocalVector<int> &p_direct);
+	// A player that took over opens its `takeover_port`, if it has one.
+	void host_open_takeover_sockets();
 	// `p_kind`: 0 the main socket, 1 the rendezvous one, 2 a member's own socket (after a migration).
 	void host_service(const Ref<RefCounted> &p_socket, int p_kind);
 	void host_send_succession();
@@ -364,6 +375,15 @@ public:
 	Error refuse_player(int p_peer);
 	// Host: leaves the mesh, and the next player of the succession takes its place (`close()` ends the mesh).
 	Error hand_over();
+	// Player: the port it takes new players on if it becomes the host after a migration (0: none). With DTLS, it needs
+	// `takeover_tls_options` (`TLSOptions.server()`), and the pairs register on `takeover_rendezvous_port` (the next port
+	// when 0). The game tells the new players where the new host is.
+	void set_takeover_port(int p_port);
+	int get_takeover_port() const { return takeover_port; }
+	void set_takeover_rendezvous_port(int p_port);
+	int get_takeover_rendezvous_port() const { return takeover_rendezvous_port; }
+	void set_takeover_tls_options(const Ref<TLSOptions> &p_options) { takeover_tls_options = p_options; }
+	Ref<TLSOptions> get_takeover_tls_options() const { return takeover_tls_options; }
 
 	// A `MultiplayerPeer` on this mesh, for `SceneMultiplayer` (RPCs, spawners, synchronizers).
 	Ref<TickMultiplayerPeer> get_multiplayer_peer();
