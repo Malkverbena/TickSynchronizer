@@ -63,6 +63,7 @@ Error TickMeshCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 	stepper.reset();
 	stepper.set_ticks_per_second(settings.ticks_per_second);
 	clock.set_ticks_per_second(settings.ticks_per_second);
+	stepped_usec = 0;
 	if (is_clock_master()) {
 		clock.set_master(true);
 		clock.set_master_epoch_usec(int64_t(p_now_usec));
@@ -505,7 +506,8 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 
 int64_t TickMeshCore::compute_epoch() const {
 	const double elapsed_frames = double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
-	return int64_t(now_usec) - int64_t(elapsed_frames * 1000000.0 * get_tick_delta());
+	const uint64_t stepped_at = stepped_usec != 0 ? stepped_usec : now_usec;
+	return int64_t(stepped_at) - int64_t(elapsed_frames * 1000000.0 * get_tick_delta());
 }
 
 void TickMeshCore::handle_ping(int p_peer, TickDataBuffer &p_message) {
@@ -605,6 +607,7 @@ void TickMeshCore::process(double p_delta, uint64_t p_now_usec) {
 				tick(stepper.pop_tick());
 			}
 		}
+		stepped_usec = now_usec;
 	} else {
 		follow_timeline(clock.is_synchronized() ? clock.get_master_frame_time(now_usec) : -1.0);
 		if (is_peer_ready(settings.clock_master)) {

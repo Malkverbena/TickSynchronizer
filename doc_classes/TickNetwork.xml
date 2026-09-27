@@ -135,7 +135,7 @@
 			With [constant AUTHORITY_SINGLE]: the peer that simulates every object, is the destination of inputs and events, and is the clock master — the hub of a star (1), or the node of a mesh chosen by the project. It changes with a host migration (see [signal host_migrated]).
 		</member>
 		<member name="clock_master" type="int" setter="set_clock_master" getter="get_clock_master" default="1">
-			With [constant AUTHORITY_DISTRIBUTED]: the node whose timeline the others follow.
+			With [constant AUTHORITY_DISTRIBUTED]: the node whose timeline the others follow. It can only be set before [method start]: it doesn't change while the network runs, nor with a host migration of [EnetHostedMeshTransport]. If it leaves, the other nodes go on with their last estimate of its clock, without correcting their drift, until it's back.
 		</member>
 		<member name="clock_network" type="NodePath" setter="set_clock_network" getter="get_clock_network" default="NodePath(&quot;&quot;)">
 			Another [TickNetwork] of this process whose timeline this one follows (only for the [member authority_peer] of this network). A game server's star with its clients follows the cluster's network, so the clients, the game server and the cluster's authority use the same frames. Place the followed network before this one in the tree.
@@ -180,7 +180,7 @@
 			Smallest number of inputs the client tries to keep buffered on the server; more jitter increases it up to [member max_input_buffer].
 		</member>
 		<member name="registry_peer" type="int" setter="set_registry_peer" getter="get_registry_peer" default="1">
-			With [constant AUTHORITY_DISTRIBUTED]: the node that keeps the registry of owners. Every change of owner goes through it and increases the object's version; state with an older version is discarded. Choose a node that stays up: the registry isn't replaced if it leaves.
+			With [constant AUTHORITY_DISTRIBUTED]: the node that keeps the registry of owners. Every change of owner goes through it and increases the object's version; state with an older version is discarded. It can only be set before [method start]: it doesn't change while the network runs, nor with a host migration of [EnetHostedMeshTransport]. Choose a node that stays up: while it's gone, no owner can change ([method TickObject.request_authority], [method TickObject.release_authority] and [method TickObject.assign_authority] return [constant ERR_UNAVAILABLE]).
 		</member>
 		<member name="root_path" type="NodePath" setter="set_root_path" getter="get_root_path" default="NodePath(&quot;..&quot;)">
 			Node the paths of the objects are relative to. The same object must have the same path on every peer.
@@ -284,7 +284,7 @@
 			One peer simulates every object.
 		</constant>
 		<constant name="AUTHORITY_DISTRIBUTED" value="1" enum="AuthorityMode">
-			Every object has an owner node, and ownership can change. Every node is trusted (events, ownership, spawns): use it only between servers you control.
+			Every object has an owner node, and ownership can change. Every node is trusted (events, ownership, spawns): use it only between servers you control. [member registry_peer] and [member clock_master] are fixed while the network runs.
 		</constant>
 	</constants>
 </class>

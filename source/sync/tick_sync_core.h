@@ -206,6 +206,9 @@ private:
 	HashMap<int, PeerState> peers;
 	LocalVector<SnapshotRecord> server_history;
 	int64_t server_epoch_usec = 0;
+	// When the server's frames last advanced. The epoch is computed at that time: pings are answered before the frames
+	// advance, and the time of the current frame would make the epoch vary with the frame time (ADR-071).
+	uint64_t server_stepped_usec = 0;
 	// Net ids released recently, with the frame they were released at (ADR-034).
 	HashMap<uint16_t, uint32_t> quarantined_ids;
 	HashMap<uint32_t, SpawnRecord> spawns;

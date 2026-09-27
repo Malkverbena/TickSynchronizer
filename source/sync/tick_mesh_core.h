@@ -127,6 +127,8 @@ private:
 	TickFixedStepper stepper;
 	TickClock clock;
 	uint64_t now_usec = 0;
+	// Clock master: when its frames last advanced; the epoch is computed at that time (see `TickSyncCore`).
+	uint64_t stepped_usec = 0;
 	const TickEngine *clock_source = nullptr;
 	uint64_t last_ping_usec = 0;
 

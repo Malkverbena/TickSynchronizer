@@ -21,6 +21,10 @@ void TickClock::add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, u
 		return;
 	}
 
+	// Until the clock is synchronized nothing uses it: the estimate applies right away.
+	const bool was_synchronized = is_synchronized();
+	const int64_t applied = offset_at(p_local_receive_usec);
+
 	Sample sample;
 	sample.rtt_usec = p_local_receive_usec - p_local_send_usec;
 	// The master wrote its time, on average, half a round trip before the pong arrived.
@@ -34,6 +38,10 @@ void TickClock::add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, u
 	}
 	next_sample = (next_sample + 1) % max_samples;
 	update_estimate();
+
+	const int64_t difference = offset_usec - applied;
+	slew_from_usec = (!was_synchronized || difference > STEP_USEC || difference < -STEP_USEC) ? offset_usec : applied;
+	slew_start_usec = p_local_receive_usec;
 }
 
 void TickClock::clear_samples() {
@@ -41,6 +49,8 @@ void TickClock::clear_samples() {
 	next_sample = 0;
 	offset_usec = 0;
 	rtt_usec = 0;
+	slew_from_usec = 0;
+	slew_start_usec = 0;
 }
 
 bool TickClock::is_synchronized() const {
@@ -61,6 +71,21 @@ void TickClock::update_estimate() {
 	rtt_usec = samples[best].rtt_usec;
 }
 
+int64_t TickClock::offset_at(uint64_t p_local_usec) const {
+	const int64_t remaining = offset_usec - slew_from_usec;
+	if (remaining == 0) {
+		return offset_usec;
+	}
+	if (p_local_usec <= slew_start_usec) {
+		return slew_from_usec;
+	}
+	const int64_t moved = int64_t((p_local_usec - slew_start_usec) * uint64_t(SLEW_PER_MILLE) / 1000);
+	if (remaining > 0) {
+		return slew_from_usec + MIN(moved, remaining);
+	}
+	return slew_from_usec - MIN(moved, -remaining);
+}
+
 uint64_t TickClock::get_rtt_spread_usec() const {
 	if (samples.is_empty()) {
 		return 0;
@@ -76,11 +101,20 @@ uint64_t TickClock::get_rtt_spread_usec() const {
 
 uint64_t TickClock::local_to_master_usec(uint64_t p_local_usec) const {
 	// Unsigned arithmetic wraps, which is the intended result for negative offsets.
-	return master ? p_local_usec : p_local_usec + uint64_t(offset_usec);
+	return master ? p_local_usec : p_local_usec + uint64_t(offset_at(p_local_usec));
 }
 
 uint64_t TickClock::master_to_local_usec(uint64_t p_master_usec) const {
-	return master ? p_master_usec : p_master_usec - uint64_t(offset_usec);
+	if (master) {
+		return p_master_usec;
+	}
+	// The applied offset depends on the local time: a few steps from the estimate converge, since it moves at 5% of the
+	// time (each step divides the error by 20).
+	uint64_t local = p_master_usec - uint64_t(offset_usec);
+	for (int i = 0; i < 3; i++) {
+		local = p_master_usec - uint64_t(offset_at(local));
+	}
+	return local;
 }
 
 void TickClock::set_ticks_per_second(int p_ticks_per_second) {
@@ -90,7 +124,7 @@ void TickClock::set_ticks_per_second(int p_ticks_per_second) {
 
 uint32_t TickClock::get_master_frame(uint64_t p_local_usec) const {
 	// Signed, so a local time before the master's clock started doesn't wrap around.
-	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_usec);
+	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_at(p_local_usec));
 	if (master_usec < master_epoch_usec) {
 		return 0;
 	}
@@ -99,6 +133,6 @@ uint32_t TickClock::get_master_frame(uint64_t p_local_usec) const {
 }
 
 double TickClock::get_master_frame_time(uint64_t p_local_usec) const {
-	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_usec);
+	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_at(p_local_usec));
 	return double(master_usec - master_epoch_usec) * double(ticks_per_second) / 1000000.0;
 }

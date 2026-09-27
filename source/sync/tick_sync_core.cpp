@@ -104,6 +104,7 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 	stepper.set_time_scale(1.0);
 	clock.set_ticks_per_second(settings.ticks_per_second);
 
+	server_stepped_usec = 0;
 	if (role == ROLE_SERVER) {
 		clock.set_master(true);
 		server_epoch_usec = int64_t(p_now_usec);
@@ -417,6 +418,7 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 				server_tick(stepper.pop_tick());
 			}
 		}
+		server_stepped_usec = now_usec;
 		if (!is_active()) {
 			return;
 		}
@@ -762,7 +764,8 @@ int64_t TickSyncCore::server_compute_epoch() const {
 	// The epoch that matches the frame the server is really at, including the part of the next frame already
 	// accumulated: the server's frames can drift from its start time (startup, hitches, another network's clock).
 	const double elapsed_frames = double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
-	return int64_t(now_usec) - int64_t(elapsed_frames * 1000000.0 * get_tick_delta());
+	const uint64_t stepped_at = server_stepped_usec != 0 ? server_stepped_usec : now_usec;
+	return int64_t(stepped_at) - int64_t(elapsed_frames * 1000000.0 * get_tick_delta());
 }
 
 void TickSyncCore::server_resolve_input(PeerState &r_peer, uint32_t p_frame) {
@@ -2348,6 +2351,7 @@ void TickSyncCore::client_become_server(int p_old_authority) {
 
 	role = ROLE_SERVER;
 	settings.authority_peer = local_peer;
+	server_stepped_usec = 0;
 	stepper.reset();
 	stepper.set_ticks_per_second(settings.ticks_per_second);
 	stepper.set_time_scale(1.0);
