@@ -920,6 +920,49 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player cut off
 	CHECK(mesh.nodes[1]->is_peer_connected(3));
 }
 
+TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that vanishes leaves once for the others") {
+	HostedMesh mesh(3);
+	// The players' direct links time out before the host's link, as seen over the internet.
+	mesh.nodes[1]->set_host_timeout(1.5);
+	for (int i = 2; i <= 4; i++) {
+		mesh.nodes[i]->set_host_timeout(1.0);
+	}
+	mesh.wait_everyone_connected();
+	REQUIRE(mesh.everyone_connected());
+	mesh.poll(20);
+	REQUIRE(mesh.nodes[2]->get_peer_path(4) == Mesh::PATH_DIRECT);
+	REQUIRE(mesh.nodes[3]->get_peer_path(4) == Mesh::PATH_DIRECT);
+	for (int i = 1; i <= 3; i++) {
+		drain_events(mesh.nodes[i]);
+	}
+
+	// Player 4 stops answering (it isn't polled anymore): the others don't ask for a relay before the host says it left.
+	int connected[4] = {};
+	int disconnected[4] = {};
+	const uint64_t end = OS::get_singleton()->get_ticks_usec() + 4000000;
+	while (OS::get_singleton()->get_ticks_usec() < end) {
+		for (int i = 1; i <= 3; i++) {
+			mesh.nodes[i]->poll();
+			TickTransport::Event event;
+			while (mesh.nodes[i]->pop_event(event)) {
+				if (event.peer == 4) {
+					connected[i] += event.type == TickTransport::EVENT_PEER_CONNECTED ? 1 : 0;
+					disconnected[i] += event.type == TickTransport::EVENT_PEER_DISCONNECTED ? 1 : 0;
+				}
+			}
+		}
+		OS::get_singleton()->delay_usec(1000);
+	}
+	for (int i = 1; i <= 3; i++) {
+		CHECK(disconnected[i] == 1);
+		CHECK(connected[i] == 0);
+		CHECK_FALSE(mesh.nodes[i]->is_peer_connected(4));
+	}
+	// A direct link that dropped isn't a failed punch.
+	CHECK(int(mesh.nodes[2]->get_stats()["failed_punches"]) == 0);
+	CHECK(int(mesh.nodes[3]->get_stats()["failed_punches"]) == 0);
+}
+
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Players that follow the successor before it notices the host is gone") {
 	// Players 2 and 3 link directly; then player 3 refuses direct links, so 3-4 is relayed while 2-4 is direct.
 	HostedMesh mesh(2);

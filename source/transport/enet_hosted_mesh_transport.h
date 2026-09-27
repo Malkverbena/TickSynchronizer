@@ -109,6 +109,8 @@ private:
 		uint64_t connect_at_usec = 0;
 		// DTLS: when the punching starts, once the registration's disconnection is over on both sides.
 		uint64_t punch_at_usec = 0;
+		// A direct link that dropped: when the relay is asked for, unless the host says first that the other player left.
+		uint64_t relay_at_usec = 0;
 		// The engines were told this peer is connected.
 		bool reported = false;
 	};
@@ -285,7 +287,9 @@ private:
 	void player_start_punching(int p_peer, Pair &r_pair);
 	void player_connect_pair(int p_peer, Pair &r_pair);
 	void player_service_pair(int p_peer, Pair &r_pair);
+	// The direct link couldn't be made: the host relays the pair.
 	void player_fail_pair(int p_peer, Pair &r_pair);
+	void player_request_relay(int p_peer);
 	void player_set_relayed(int p_peer);
 	void player_close_pair(Pair &r_pair);
 	void player_report_connected(int p_peer, Pair &r_pair);

@@ -156,7 +156,8 @@ func _process(delta: float) -> void:
 	if elapsed >= next_report:
 		next_report += 5.0 if elapsed > 10.0 else 1.0
 		var stats: Dictionary = network.get_stats()
-		_log("t=%.0f id=%d host=%d rtt=%.0fms predicting=%s npc_x=%.1f doll_delays=%s rewinds=%d doll_rewinds=%d transport=%s" % [elapsed, transport.get_local_peer_id(), transport.get_host_peer(), network.get_rtt() * 1000.0, network.is_predicting(), bodies[1].position.x, stats.get("doll_delays", {}), stats.rewinds, stats.get("doll_rewinds", 0), transport.get_stats()])
+		# fps: a slow device predicts late; late and ghost inputs (host): inputs that came after their frame, or never.
+		_log("t=%.0f id=%d host=%d rtt=%.0fms fps=%d predicting=%s npc_x=%.1f doll_delays=%s rewinds=%d doll_rewinds=%d late=%d ghost=%d scale=%.3f transport=%s" % [elapsed, transport.get_local_peer_id(), transport.get_host_peer(), network.get_rtt() * 1000.0, Engine.get_frames_per_second(), network.is_predicting(), bodies[1].position.x, stats.get("doll_delays", {}), stats.rewinds, stats.get("doll_rewinds", 0), stats.get("late_inputs", 0), stats.get("ghost_inputs", 0), stats.get("time_scale", 1.0), transport.get_stats()])
 	if elapsed >= options.duration:
 		running = false
 		_log("done: paths %s, transport %s" % [last_paths, transport.get_stats()])

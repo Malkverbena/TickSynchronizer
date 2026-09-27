@@ -60,6 +60,9 @@ static constexpr uint64_t DTLS_SETTLE_USEC = 200000;
 static constexpr uint64_t PUNCH_INTERVAL_USEC = 100000;
 // The connecting side waits this much longer than the accepting side, which decides.
 static constexpr uint64_t CONNECTOR_GRACE_USEC = 1000000;
+// A direct link that drops asks for the relay this much later. When the other player is gone, the host's link with it
+// times out at about the same time, and its MEMBER_LEFT comes first: the pair isn't relayed only to leave right after.
+static constexpr uint64_t RELAY_GRACE_USEC = 1500000;
 
 // Largest join data a player sends.
 static constexpr int MAX_JOIN_DATA_BYTES = 4096;
@@ -1579,9 +1582,11 @@ void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 			} else if (is_link) {
 				r_pair.link.unref();
 				if (r_pair.state == PAIR_DIRECT) {
-					// A direct link that drops is a disconnection; the pair comes back relayed.
+					// A direct link that drops is a disconnection; the pair comes back relayed, unless the other player left.
 					player_report_disconnected(p_peer, r_pair);
-					player_fail_pair(p_peer, r_pair);
+					player_close_pair(r_pair);
+					r_pair.state = PAIR_FAILED;
+					r_pair.relay_at_usec = OS::get_singleton()->get_ticks_usec() + RELAY_GRACE_USEC;
 					return;
 				}
 				if (r_pair.state == PAIR_PUNCHING && !accepts && OS::get_singleton()->get_ticks_usec() < r_pair.deadline_usec) {
@@ -1611,6 +1616,11 @@ void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 		player_start_punching(p_peer, r_pair);
 		return;
 	}
+	if (r_pair.state == PAIR_FAILED && r_pair.relay_at_usec != 0 && now >= r_pair.relay_at_usec) {
+		r_pair.relay_at_usec = 0;
+		player_request_relay(p_peer);
+		return;
+	}
 	if (r_pair.state != PAIR_PUNCHING) {
 		return;
 	}
@@ -1637,6 +1647,10 @@ void EnetHostedMeshTransport::player_fail_pair(int p_peer, Pair &r_pair) {
 	player_close_pair(r_pair);
 	r_pair.state = PAIR_FAILED;
 	failed_punches += direct_connections ? 1 : 0;
+	player_request_relay(p_peer);
+}
+
+void EnetHostedMeshTransport::player_request_relay(int p_peer) {
 	HostedMeshWriter failed(CONTROL_PAIR_FAILED);
 	failed.put_u32(uint32_t(p_peer));
 	send_control(host_link, failed.bytes);
