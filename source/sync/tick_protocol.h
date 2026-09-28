@@ -5,7 +5,8 @@
 // Wire protocol of `TickSyncCore`. Every message starts with its type, in 8 bits.
 
 // 2: interest (`RELEVANCE`) and snapshots split in parts (F8).
-static constexpr uint16_t TICK_PROTOCOL_VERSION = 2;
+// 3: the roles of a distributed mesh move (`ROLES`, `REGISTRY_REPORT`, the roles in the mesh hello; ADR-073).
+static constexpr uint16_t TICK_PROTOCOL_VERSION = 3;
 
 // Frame index meaning "none".
 static constexpr uint32_t TICK_FRAME_NONE = UINT32_MAX;
@@ -44,6 +45,9 @@ enum TickMessageType {
 	TICK_MESSAGE_MESH_EVENT,
 	// Interest (F8).
 	TICK_MESSAGE_RELEVANCE,
+	// Roles of a distributed mesh (ADR-073).
+	TICK_MESSAGE_ROLES,
+	TICK_MESSAGE_REGISTRY_REPORT,
 };
 
 enum TickChannel {

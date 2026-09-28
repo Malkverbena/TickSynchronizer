@@ -54,6 +54,7 @@ struct MeshNodeWorld {
 		recorder.instantiate();
 		recorder->set_script(p_recorder_script);
 		network->connect(SNAME("authority_changed"), Callable(recorder.ptr(), "on_changed"));
+		network->connect(SNAME("roles_changed"), Callable(recorder.ptr(), "on_roles"));
 		SceneTree::get_singleton()->get_root()->add_child(network);
 	}
 
@@ -86,9 +87,13 @@ func _approve_authority_request(requester: int) -> bool:
 extends RefCounted
 
 var signals := []
+var roles := []
 
 func on_changed(object, old_owner, new_owner):
 	signals.push_back([object, old_owner, new_owner])
+
+func on_roles(registry_peer, clock_master):
+	roles.push_back([registry_peer, clock_master])
 )");
 
 	TickLocalNetwork local_network;
@@ -141,6 +146,31 @@ func on_changed(object, old_owner, new_owner):
 	}
 	CHECK(b.sync->is_owner());
 	CHECK(int(a.network->get_stats()["denied_requests"]) == 1);
+
+	// The registry and the clock move while the mesh runs, through the network's properties (ADR-073).
+	b.network->set_registry_peer(2);
+	b.network->set_clock_master(2);
+	b.sync->set("refuse", false);
+	for (int i = 0; i < 60; i++) {
+		local_network.process(1.0 / 60.0);
+		a.network->advance(1.0 / 60.0, local_network.get_time_usec());
+		b.network->advance(1.0 / 60.0, local_network.get_time_usec());
+	}
+	CHECK(a.network->get_registry_peer() == 2);
+	CHECK(a.network->get_clock_master() == 2);
+	CHECK(b.network->get_registry_peer() == 2);
+	const Array roles = a.recorder->get("roles");
+	REQUIRE(roles.size() == 2);
+	CHECK(int(Array(roles[1])[0]) == 2);
+	CHECK(int(Array(roles[1])[1]) == 2);
+	// Ownership changes through the new registry.
+	CHECK(a.sync->request_authority() == OK);
+	for (int i = 0; i < 30; i++) {
+		local_network.process(1.0 / 60.0);
+		a.network->advance(1.0 / 60.0, local_network.get_time_usec());
+		b.network->advance(1.0 / 60.0, local_network.get_time_usec());
+	}
+	CHECK(a.sync->is_owner());
 }
 
 #endif // MODULE_GDSCRIPT_ENABLED

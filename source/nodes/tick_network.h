@@ -65,6 +65,7 @@ public:
 	virtual int filter_relevance(int p_peer, TickSyncObject *p_object) override;
 	virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) override;
 	virtual void on_host_migrated(int p_old_host, int p_new_host) override;
+	virtual void on_roles_changed(int p_registry, int p_clock_master) override;
 
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const;

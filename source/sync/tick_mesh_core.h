@@ -17,6 +17,8 @@
 //   with another version than the current one is discarded (ADR-041).
 // - When an owner leaves, the registry marks its objects as orphaned; the project decides who adopts them.
 // - The nodes follow the timeline of the clock master (`clock_master`, ADR-042).
+// - Both roles move while the mesh runs (ADR-073): the project changes them, or the lowest node still in the mesh
+//   takes them when their node leaves. A registry that takes over merges every node's view of the objects first.
 //
 // Meant for trusted networks of servers: there's no prediction, and forwarded events carry their origin (ADR-044).
 class TickMeshCore : public TickEngine {
@@ -35,6 +37,7 @@ public:
 		uint64_t events_rejected = 0;
 		uint64_t spawns = 0;
 		uint64_t despawns = 0;
+		uint64_t role_changes = 0;
 	};
 
 	// Largest number of times an event is forwarded to the current owner of its target (ADR-044).
@@ -153,6 +156,23 @@ private:
 	LocalVector<PendingEvent> pending_events;
 	uint64_t next_event_sequence = 0;
 
+	// Roles (ADR-073). An assignment wins over another with a higher term; with the same term, the one with the lower
+	// registry id, then the lower clock master id.
+	uint32_t roles_term = 0;
+	// The node with a role left: the lowest node still here takes it.
+	bool registry_vacant = false;
+	bool clock_vacant = false;
+	// A registry that took over merges the other nodes' views until they all reported or the settle time passed; the
+	// messages for the registry wait meanwhile.
+	bool registry_settling = false;
+	uint64_t registry_settle_usec = 0;
+	HashSet<int> registry_unreported;
+	LocalVector<TickTransport::Packet> registry_deferred;
+	// Objects this node asked the registry for (requests, assignments) without an answer yet.
+	HashSet<uint16_t> pending_requests;
+	// The highest net id this node heard of: a registry that takes over doesn't give it again.
+	uint16_t highest_net_id = 0;
+
 	bool is_registry() const { return local_id == settings.registry_peer; }
 	bool is_clock_master() const { return local_id == settings.clock_master; }
 	double get_tick_delta() const { return 1.0 / double(settings.ticks_per_second); }
@@ -203,6 +223,18 @@ private:
 	void registry_on_peer_left(int p_peer);
 	void registry_check_timeouts();
 	bool registry_local_state(uint16_t p_id, TickDataBuffer &r_state) const;
+
+	// Roles.
+	static bool roles_beat(uint32_t p_term, int p_registry, int p_clock, uint32_t p_other_term, int p_other_registry, int p_other_clock);
+	// `p_resync`: this node joined a mesh whose registry isn't the one it knew, so its view of the objects starts over.
+	void adopt_roles(uint32_t p_term, int p_registry, int p_clock, bool p_resync);
+	void send_roles(int p_peer, uint32_t p_term, int p_registry, int p_clock);
+	void handle_roles(int p_peer, TickDataBuffer &p_message);
+	void fill_vacant_roles();
+	void send_registry_report();
+	void handle_registry_report(int p_peer, TickDataBuffer &p_message);
+	void registry_take_over();
+	void registry_finish_take_over();
 
 	void tick(uint32_t p_frame);
 	void follow_timeline(double p_target_frame);
@@ -261,4 +293,7 @@ public:
 	virtual Error release_authority(TickSyncObject *p_object, int p_to_peer) override;
 	virtual Error assign_authority(TickSyncObject *p_object, int p_peer) override;
 	uint32_t get_version(const TickSyncObject *p_object) const;
+	// Moves the registry and the clock master to connected nodes (this one included) while the mesh runs.
+	virtual Error change_roles(int p_registry, int p_clock_master) override;
+	uint32_t get_roles_term() const { return roles_term; }
 };

@@ -1,7 +1,7 @@
 extends SceneTree
 ## Headless distributed authority demo: `godot --headless --path . --script main.gd -- --id=N [--duration=S]`.
 ## Node 1 is the registry and clock master; the crate starts with node 2. Node 3 requests it at 4 s; when node 3
-## leaves, node 1 gets the orphan and gives it back to node 2.
+## leaves, the registry gets the orphan and gives it back to node 2. When node 1 leaves, node 2 takes both roles.
 
 const Crate := preload("res://crate.gd")
 
@@ -39,6 +39,7 @@ func _initialize() -> void:
 
 	network.authority_orphaned.connect(_on_orphaned)
 	network.authority_request_denied.connect(func(_object): print("[node %d] request denied" % options.id))
+	network.roles_changed.connect(func(registry_peer: int, clock_master: int): print("[node %d] roles moved: registry %d, clock master %d" % [options.id, registry_peer, clock_master]))
 
 	var mesh := EnetMeshTransport.create(options.id, options.base_port + options.id)
 	for id in [1, 2, 3]:
@@ -50,8 +51,8 @@ func _initialize() -> void:
 
 func _on_orphaned(object: TickObject, last_owner: int, last_frame: int) -> void:
 	print("[node %d] crate orphaned: last owner %d, last frame %d" % [options.id, last_owner, last_frame])
-	if options.id == 1:
-		# The project's policy: node 2 adopts orphans.
+	if network.registry_peer == options.id:
+		# The project's policy: the registry gives orphans to node 2.
 		object.assign_authority(2)
 
 

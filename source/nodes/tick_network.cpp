@@ -124,6 +124,10 @@ void TickNetwork::on_relevance_changed(TickSyncObject *p_object, bool p_relevant
 	emit_signal(SNAME("relevance_changed"), get_instance(p_object), p_relevant);
 }
 
+void TickNetwork::on_roles_changed(int p_registry, int p_clock_master) {
+	emit_signal(SNAME("roles_changed"), p_registry, p_clock_master);
+}
+
 void TickNetwork::on_host_migrated(int p_old_host, int p_new_host) {
 	emit_signal(SNAME("host_migrated"), p_old_host, p_new_host);
 }
@@ -211,23 +215,32 @@ void TickNetwork::set_authority_mode(AuthorityMode p_mode) {
 }
 
 void TickNetwork::set_registry_peer(int p_peer) {
-	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
 	ERR_FAIL_COND_MSG(p_peer <= 0, "The registry peer must be positive.");
+	if (running) {
+		// The mesh moves the role while it runs (ADR-073); the configured one is for the next start.
+		ERR_FAIL_COND_MSG(authority_mode != AUTHORITY_DISTRIBUTED, "Can't change the settings while the network is running.");
+		engine->change_roles(p_peer, engine->get_settings().clock_master);
+		return;
+	}
 	settings.registry_peer = p_peer;
 }
 
 int TickNetwork::get_registry_peer() const {
-	return settings.registry_peer;
+	return running ? engine->get_settings().registry_peer : settings.registry_peer;
 }
 
 void TickNetwork::set_clock_master(int p_peer) {
-	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
 	ERR_FAIL_COND_MSG(p_peer <= 0, "The clock master must be positive.");
+	if (running) {
+		ERR_FAIL_COND_MSG(authority_mode != AUTHORITY_DISTRIBUTED, "Can't change the settings while the network is running.");
+		engine->change_roles(engine->get_settings().registry_peer, p_peer);
+		return;
+	}
 	settings.clock_master = p_peer;
 }
 
 int TickNetwork::get_clock_master() const {
-	return settings.clock_master;
+	return running ? engine->get_settings().clock_master : settings.clock_master;
 }
 
 void TickNetwork::set_keyframe_interval(int p_ticks) {
@@ -622,6 +635,7 @@ void TickNetwork::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("authority_orphaned", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::INT, "last_owner"), PropertyInfo(Variant::INT, "last_frame")));
 	ADD_SIGNAL(MethodInfo("authority_request_denied", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject")));
 	ADD_SIGNAL(MethodInfo("host_migrated", PropertyInfo(Variant::INT, "old_host"), PropertyInfo(Variant::INT, "new_host")));
+	ADD_SIGNAL(MethodInfo("roles_changed", PropertyInfo(Variant::INT, "registry_peer"), PropertyInfo(Variant::INT, "clock_master")));
 	ADD_SIGNAL(MethodInfo("relevance_changed", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::BOOL, "relevant")));
 	ADD_SIGNAL(MethodInfo("event_received", PropertyInfo(Variant::INT, "sender"), PropertyInfo(Variant::STRING_NAME, "event"), PropertyInfo(Variant::NIL, "payload", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT), PropertyInfo(Variant::INT, "frame")));
 }
