@@ -112,6 +112,10 @@ void EnetStarTransport::_on_peer_disconnected(int p_peer) {
 }
 
 void EnetStarTransport::_on_peer_packet(int p_peer, const PackedByteArray &p_packet) {
+	if (!queue_has_room(packets.size() - next_packet, queued_bytes, p_packet.size())) {
+		WARN_PRINT_ONCE("EnetStarTransport drops the packets it receives: nothing consumes them (is the TickNetwork running?).");
+		return;
+	}
 	Packet packet;
 	// The sender id comes from `SceneMultiplayer`, which takes it from the connection.
 	packet.from_peer = p_peer;
@@ -119,6 +123,7 @@ void EnetStarTransport::_on_peer_packet(int p_peer, const PackedByteArray &p_pac
 	if (p_packet.size() > 0) {
 		memcpy(packet.data.ptr(), p_packet.ptr(), p_packet.size());
 	}
+	queued_bytes += uint64_t(p_packet.size());
 	packets.push_back(packet);
 }
 
@@ -274,9 +279,11 @@ bool EnetStarTransport::pop_packet(Packet &r_packet) {
 	if (next_packet >= packets.size()) {
 		packets.clear();
 		next_packet = 0;
+		queued_bytes = 0;
 		return false;
 	}
 	r_packet = packets[next_packet++];
+	queued_bytes -= r_packet.data.size();
 	return true;
 }
 

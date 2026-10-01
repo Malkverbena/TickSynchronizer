@@ -64,6 +64,7 @@ private:
 	LocalVector<Packet> packets;
 	uint32_t next_event = 0;
 	uint32_t next_packet = 0;
+	uint64_t queued_bytes = 0;
 	LocalVector<Outgoing> delayed_packets;
 	uint64_t next_sequence = 0;
 

@@ -20,6 +20,14 @@ class TickMultiplayerPeer;
 // With DTLS (ADR-061), the host link uses the game's `TLSOptions`, and each direct link the certificate its accepting
 // player generates, pinned by the other player through the host. The endpoints are then registered on a second port
 // of the host (the rendezvous port), because a DTLS socket only takes DTLS.
+//
+// A joining player first sends its join data; the host admits it (the game decides with `join_validator`) before
+// anybody learns about it (ADR-066). The host is trusted: it assigns the ids, introduces the players and relays their
+// packets. When it disappears, a player takes over only if other players it reaches directly lost the host too.
+//
+// The protocol, with its version (a player of another version is refused), is specified in
+// `notes/hosted-mesh-protocol.md` (ADR-069). A player with a `takeover_port` takes new players there if it becomes the
+// host (ADR-072).
 class EnetHostedMeshTransport : public TickTransport {
 	GDCLASS(EnetHostedMeshTransport, TickTransport);
 	friend class TickMultiplayerPeer;
@@ -38,6 +46,24 @@ public:
 		STATUS_DISCONNECTED,
 		STATUS_CONNECTING,
 		STATUS_CONNECTED,
+	};
+
+	// Why this node left the mesh.
+	enum DisconnectReason {
+		DISCONNECT_REASON_NONE,
+		// This node closed its connections, or left the host.
+		DISCONNECT_REASON_CLOSED,
+		// The host stopped answering (or couldn't be reached), and no other host could take its place for this node.
+		DISCONNECT_REASON_LOST,
+		// The host refused this player (itself or through the game), or removed it.
+		DISCONNECT_REASON_REFUSED,
+		DISCONNECT_REASON_FULL,
+		// Too many joins from this address: it can try again a bit later.
+		DISCONNECT_REASON_BUSY,
+		// The host uses another version of the protocol.
+		DISCONNECT_REASON_VERSION,
+		// The host ended the mesh.
+		DISCONNECT_REASON_ENDED,
 	};
 
 	// How this node reaches another one.
@@ -84,6 +110,8 @@ private:
 		uint64_t connect_at_usec = 0;
 		// DTLS: when the punching starts, once the registration's disconnection is over on both sides.
 		uint64_t punch_at_usec = 0;
+		// A direct link that dropped: when the relay is asked for, unless the host says first that the other player left.
+		uint64_t relay_at_usec = 0;
 		// The engines were told this peer is connected.
 		bool reported = false;
 	};
@@ -109,6 +137,27 @@ private:
 		LocalVector<uint8_t> data;
 	};
 
+	// Host: a player that connected and isn't admitted yet. Its id is only told to it with the welcome.
+	struct PendingJoin {
+		int id = 0;
+		Ref<RefCounted> link;
+		String address;
+		uint64_t deadline_usec = 0;
+		// Its join data arrived: the game decides.
+		bool received = false;
+		PackedByteArray data;
+	};
+
+	// Host: the joins an address can still start (refilled over time).
+	struct JoinBudget {
+		double tokens = 0.0;
+		uint64_t last_usec = 0;
+	};
+
+	// Player: the key and certificate of its direct links, generated on a worker thread (defined in the source).
+	struct PlayerKeyJob;
+	static void generate_player_key(void *p_job);
+
 	bool is_host = false;
 	int local_id = 0;
 	// The node that hosts the mesh now: 1, or the successor after a migration.
@@ -120,6 +169,7 @@ private:
 	// This player asked to leave the host: its disconnection isn't the host leaving.
 	bool leaving = false;
 	Status status = STATUS_DISCONNECTED;
+	DisconnectReason disconnect_reason = DISCONNECT_REASON_NONE;
 	Compression compression = COMPRESSION_RANGE_CODER;
 	double punch_timeout = 3.0;
 	bool direct_connections = true;
@@ -139,6 +189,14 @@ private:
 	HashMap<int, Ref<RefCounted>> member_sockets;
 	HashMap<uint64_t, Introduction> introductions;
 	HashMap<uint32_t, uint64_t> introductions_by_token;
+	Callable join_validator;
+	double join_timeout = 10.0;
+	HashMap<ObjectID, PendingJoin> pending_joins;
+	// Joins whose data arrived during this poll: the game's validator runs once the sockets are serviced.
+	LocalVector<ObjectID> joins_to_validate;
+	HashMap<String, JoinBudget> join_budgets;
+	uint64_t next_budget_prune_usec = 0;
+	uint64_t next_heartbeat_usec = 0;
 
 	// Player: the host's socket and link, and the other players.
 	String host_address;
@@ -147,23 +205,51 @@ private:
 	// DTLS: this player's key and self-signed certificate, for the direct links it accepts.
 	Ref<CryptoKey> player_key;
 	Ref<X509Certificate> player_certificate;
+	PlayerKeyJob *key_job = nullptr;
+	int64_t key_task = -1;
+	bool certificate_sent = false;
+	PackedByteArray join_data;
+	// The host's player limit, from its welcome: a player never keeps more pairs than the mesh can have.
+	int host_max_players = 0;
+	// When the host was last heard from (it sends heartbeats, so a silent host is a gone one).
+	uint64_t host_heard_usec = 0;
 	Ref<RefCounted> host_socket;
 	Ref<RefCounted> host_link;
 	HashMap<int, Pair> pairs;
+	// The host's link dropped without a word: this player asked the players it reaches directly whether they lost the
+	// host too, and waits for their answers (`true` when the host is alive for them).
+	bool confirming = false;
+	int confirm_old_host = 0;
+	uint64_t confirm_deadline_usec = 0;
+	LocalVector<int> confirm_asked;
+	HashMap<int, bool> confirm_answers;
+	// Players that chose this one as the new host before it noticed the old one was gone: their rejoin requests.
+	HashMap<int, LocalVector<int>> pending_rejoins;
+	// DTLS: the certificates those players sent with their rejoin requests.
+	HashMap<int, String> pending_certificates;
+	// Where this player takes new players if it becomes the host (0: nowhere).
+	int takeover_port = 0;
+	int takeover_rendezvous_port = 0;
+	Ref<TLSOptions> takeover_tls_options;
+	// The highest player id this node heard of: a host that took over never gives another player's id to a new one.
+	int highest_peer_id = 0;
 
 	LocalVector<Event> events;
 	LocalVector<Packet> packets;
 	uint32_t next_event = 0;
 	uint32_t next_packet = 0;
+	uint64_t queued_bytes = 0;
 
 	TickMultiplayerPeer *multiplayer_peer = nullptr;
 	LocalVector<Event> multiplayer_events;
 	LocalVector<MultiplayerPacket> multiplayer_packets;
 	uint32_t next_multiplayer_packet = 0;
+	uint64_t multiplayer_queued_bytes = 0;
 
 	uint64_t relayed_packets = 0;
 	uint64_t rejected_connections = 0;
 	uint64_t failed_punches = 0;
+	uint64_t dropped_packets = 0;
 
 	static uint64_t make_pair_key(int p_a, int p_b);
 	static uint32_t make_token();
@@ -175,8 +261,21 @@ private:
 	Error send_on_link(const Ref<RefCounted> &p_link, int p_channel, int p_flags, const uint8_t *p_data, int p_size);
 	void send_control(const Ref<RefCounted> &p_link, const LocalVector<uint8_t> &p_message);
 
+	// Links drop after `host_timeout` without an answer, on both ends.
+	void apply_link_timeout(const Ref<RefCounted> &p_link);
+	// Closes every link: the members get `p_member_reason` as the reason.
+	void close_links(int p_member_reason);
+
 	// Host.
 	void host_poll();
+	bool host_take_join_budget(const String &p_address);
+	void host_on_join(ObjectID p_link, const uint8_t *p_data, int p_size);
+	void host_validate_joins();
+	void host_admit(ObjectID p_link);
+	void host_refuse(ObjectID p_link);
+	void host_handle_rejoin(int p_from, const LocalVector<int> &p_direct);
+	// A player that took over opens its `takeover_port`, if it has one.
+	void host_open_takeover_sockets();
 	// `p_kind`: 0 the main socket, 1 the rendezvous one, 2 a member's own socket (after a migration).
 	void host_service(const Ref<RefCounted> &p_socket, int p_kind);
 	void host_send_succession();
@@ -199,18 +298,29 @@ private:
 	void player_start_punching(int p_peer, Pair &r_pair);
 	void player_connect_pair(int p_peer, Pair &r_pair);
 	void player_service_pair(int p_peer, Pair &r_pair);
+	// The direct link couldn't be made: the host relays the pair.
 	void player_fail_pair(int p_peer, Pair &r_pair);
+	void player_request_relay(int p_peer);
 	void player_set_relayed(int p_peer);
 	void player_close_pair(Pair &r_pair);
 	void player_report_connected(int p_peer, Pair &r_pair);
 	void player_report_disconnected(int p_peer, Pair &r_pair);
-	// `p_migrate`: `false` when the host removed this player, or the player left: then the mesh ends for it.
-	void player_lost_host(bool p_migrate);
+	void player_on_pair_control(int p_peer, Pair &r_pair, const uint8_t *p_data, int p_size);
+	void player_send_certificate();
+	void player_finish_key_job();
+	// The link with the host dropped, for `p_reason` (the ENet disconnection data).
+	void player_on_host_disconnect(int p_reason);
+	// Whether the host `p_host` is alive for this player (it was heard from recently).
+	bool player_sees_host(int p_host) const;
+	void player_answer_host_query(const Ref<RefCounted> &p_link, int p_host);
+	void player_confirm_host_loss();
+	void player_check_confirmation();
+	// The mesh ends for this player.
+	void player_lost_host(DisconnectReason p_reason);
 	// The host left: the first living player of the succession takes over. `false` when there's none to reach.
 	bool player_migrate(int p_old_host);
 	void player_become_host(int p_old_host);
 	void player_follow_host(int p_old_host, int p_new_host);
-	void apply_host_timeout(const Ref<RefCounted> &p_link);
 
 	// Multiplayer peer.
 	void attach_multiplayer_peer(TickMultiplayerPeer *p_peer);
@@ -226,9 +336,12 @@ public:
 	static Ref<EnetHostedMeshTransport> create_host(int p_port, int p_max_players = 32, const String &p_bind_address = "*", Compression p_compression = COMPRESSION_RANGE_CODER, const Ref<TLSOptions> &p_tls_options = Ref<TLSOptions>(), int p_rendezvous_port = 0);
 	// Joins the mesh hosted at `p_address`; the host gives this node its id. With `p_tls_options` (`TLSOptions.client()`
 	// or `client_unsafe()`), the host must use DTLS too.
-	static Ref<EnetHostedMeshTransport> create_player(const String &p_address, int p_port, Compression p_compression = COMPRESSION_RANGE_CODER, const Ref<TLSOptions> &p_tls_options = Ref<TLSOptions>(), const String &p_tls_hostname = String());
+	// `p_join_data` goes to the host's `join_validator` (a password or a token, for example; encrypted only with DTLS).
+	static Ref<EnetHostedMeshTransport> create_player(const String &p_address, int p_port, Compression p_compression = COMPRESSION_RANGE_CODER, const Ref<TLSOptions> &p_tls_options = Ref<TLSOptions>(), const String &p_tls_hostname = String(), const PackedByteArray &p_join_data = PackedByteArray());
 
 	Status get_status() const { return status; }
+	// Once the status is `STATUS_DISCONNECTED`.
+	DisconnectReason get_disconnect_reason() const { return disconnect_reason; }
 	bool is_hosting() const { return is_host; }
 	bool is_encrypted() const { return encrypted; }
 	PeerPath get_peer_path(int p_peer) const;
@@ -246,14 +359,36 @@ public:
 	// When the host leaves, a player takes its place (ADR-062) instead of the mesh ending.
 	void set_host_migration(bool p_enabled) { host_migration = p_enabled; }
 	bool is_host_migration_enabled() const { return host_migration; }
-	// Seconds without an answer from the host before a player considers it gone.
+	// Seconds without an answer before a link (with the host, a player, or another player) is considered gone.
 	void set_host_timeout(double p_seconds);
 	double get_host_timeout() const { return host_timeout; }
+
+	// Host: decides who joins. Called as `validator(peer, join_data, address)`: `true` admits the player, `false`
+	// refuses it, anything else waits for `admit_player()` or `refuse_player()` (until `join_timeout`). Without a
+	// validator, everybody is admitted.
+	void set_join_validator(const Callable &p_validator) { join_validator = p_validator; }
+	Callable get_join_validator() const { return join_validator; }
+	// Seconds a player has to send its join data and be admitted.
+	void set_join_timeout(double p_seconds);
+	double get_join_timeout() const { return join_timeout; }
+	Error admit_player(int p_peer);
+	Error refuse_player(int p_peer);
+	// Host: leaves the mesh, and the next player of the succession takes its place (`close()` ends the mesh).
+	Error hand_over();
+	// Player: the port it takes new players on if it becomes the host after a migration (0: none). With DTLS, it needs
+	// `takeover_tls_options` (`TLSOptions.server()`), and the pairs register on `takeover_rendezvous_port` (the next port
+	// when 0). The game tells the new players where the new host is.
+	void set_takeover_port(int p_port);
+	int get_takeover_port() const { return takeover_port; }
+	void set_takeover_rendezvous_port(int p_port);
+	int get_takeover_rendezvous_port() const { return takeover_rendezvous_port; }
+	void set_takeover_tls_options(const Ref<TLSOptions> &p_options) { takeover_tls_options = p_options; }
+	Ref<TLSOptions> get_takeover_tls_options() const { return takeover_tls_options; }
 
 	// A `MultiplayerPeer` on this mesh, for `SceneMultiplayer` (RPCs, spawners, synchronizers).
 	Ref<TickMultiplayerPeer> get_multiplayer_peer();
 
-	// Closes every connection.
+	// Closes every connection. On the host, the mesh ends for every player.
 	void close();
 
 	// TickTransport.
@@ -273,4 +408,5 @@ public:
 
 VARIANT_ENUM_CAST(EnetHostedMeshTransport::Compression);
 VARIANT_ENUM_CAST(EnetHostedMeshTransport::Status);
+VARIANT_ENUM_CAST(EnetHostedMeshTransport::DisconnectReason);
 VARIANT_ENUM_CAST(EnetHostedMeshTransport::PeerPath);

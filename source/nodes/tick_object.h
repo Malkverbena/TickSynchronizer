@@ -33,7 +33,8 @@ private:
 	LocalVector<NodePath> property_paths;
 	bool setup_done = false;
 	bool declaring = false;
-	TickNetwork *network = nullptr;
+	// The network this object is registered with. Weak: the game may free the network before its objects.
+	ObjectID network_id;
 	String sync_path;
 	Ref<DataBuffer> input_wrapper;
 
@@ -65,7 +66,8 @@ public:
 	void set_network_path(const NodePath &p_path);
 	NodePath get_network_path() const { return network_path; }
 	Node *get_root_node() const;
-	TickNetwork *get_network() const { return network; }
+	// The network this object is registered with, or null (also once that network was freed).
+	TickNetwork *get_network() const;
 
 	// Declares a synchronized property of the root node; only valid inside `_setup_sync()`.
 	void declare_var(const StringName &p_property, const Ref<TickCodec> &p_codec);

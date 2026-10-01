@@ -71,12 +71,20 @@ public:
 	int ready_peers = 0;
 	int prediction_started = 0;
 	int rewinds = 0;
+	int spawns = 0;
+	int despawns = 0;
+	uint32_t last_despawn = 0;
 	String rejected;
 
 	virtual void on_peer_ready(int p_peer) override { ready_peers++; }
 	virtual void on_prediction_started(uint32_t p_frame) override { prediction_started++; }
 	virtual void on_rewound(uint32_t p_frame, int p_frame_count) override { rewinds++; }
 	virtual void on_rejected(const String &p_reason) override { rejected = p_reason; }
+	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override { spawns++; }
+	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override {
+		despawns++;
+		last_despawn = p_spawn_id;
+	}
 };
 
 // A server and two clients in a star, over a simulated network.
@@ -152,6 +160,37 @@ struct TestWorld {
 		}
 	}
 };
+
+TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] The interpolation timeline doesn't jump with jitter") {
+	// 40 ms each way with up to 120 ms of jitter per packet: the clock's estimate moves by milliseconds whenever its best
+	// sample changes, and the frames take alternating times. The frame the client interpolates at follows smoothly
+	// (ADR-071): the estimate is slewed, and the server's epoch doesn't vary with its frame time.
+	TestWorld world(40000, 120000, 0.0, 0);
+	world.run(3.0);
+	REQUIRE(world.client_a.get_clock().is_synchronized());
+	uint64_t last_usec = world.network.get_time_usec();
+	double last = world.client_a.get_view_frame(last_usec);
+	int64_t last_estimate = world.client_a.get_clock().get_offset_usec();
+	int estimate_changes = 0;
+	double worst = 0.0;
+	for (int i = 0; i < 600; i++) {
+		world.run(1.0 / 60.0);
+		const uint64_t now = world.network.get_time_usec();
+		const double frame = world.client_a.get_view_frame(now);
+		// The frames the elapsed time accounts for, at 60 per second.
+		const double expected = double(now - last_usec) * 60.0 / 1000000.0;
+		worst = MAX(worst, Math::abs((frame - last) - expected));
+		if (world.client_a.get_clock().get_offset_usec() != last_estimate) {
+			last_estimate = world.client_a.get_clock().get_offset_usec();
+			estimate_changes++;
+		}
+		last = frame;
+		last_usec = now;
+	}
+	CHECK(estimate_changes > 0);
+	// At most 5% faster or slower than the elapsed time: no jump.
+	CHECK(worst < 0.06);
+}
 
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Handshake, clock and registration") {
 	TestWorld world(30000, 5000, 0.0, 0);

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/templates/hash_set.h"
+#include "core/templates/hash_map.h"
 #include "core/variant/typed_array.h"
 #include "scene/main/node.h"
 
@@ -10,7 +10,8 @@ class TickNetwork;
 //
 // The server calls `spawn()` with one of `spawnable_scenes`, or `spawn_custom()` with data for `spawn_function`;
 // every client creates the same node under `spawn_path`. A spawned node removed from the tree on the server is
-// removed on the clients. Clients joining later receive the live spawns.
+// removed on the clients. Clients joining later receive the live spawns. After a host migration, the new server owns
+// the old one's spawns too.
 class TickSpawner : public Node {
 	GDCLASS(TickSpawner, Node);
 
@@ -19,9 +20,8 @@ class TickSpawner : public Node {
 	PackedStringArray spawnable_scenes;
 	Callable spawn_function;
 
+	// Removing the node of a spawn this peer owns (see `TickNetwork::owns_spawn()`) despawns it on the others.
 	HashMap<uint32_t, ObjectID> nodes_by_spawn;
-	// Spawns made by this peer: removing their node despawns them on the others.
-	HashSet<uint32_t> local_spawns;
 
 	TickNetwork *find_network() const;
 	Node *instantiate(int p_scene, const Variant &p_data) const;

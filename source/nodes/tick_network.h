@@ -65,6 +65,7 @@ public:
 	virtual int filter_relevance(int p_peer, TickSyncObject *p_object) override;
 	virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) override;
 	virtual void on_host_migrated(int p_old_host, int p_new_host) override;
+	virtual void on_roles_changed(int p_registry, int p_clock_master) override;
 
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const;
@@ -144,6 +145,7 @@ public:
 	void despawn(uint32_t p_spawn_id);
 	uint32_t get_next_spawn_id() const { return engine->get_next_spawn_id(); }
 	bool can_spawn() const { return running && engine->can_spawn(); }
+	bool owns_spawn(uint32_t p_spawn_id) const { return running && engine->owns_spawn(p_spawn_id); }
 
 	// Distributed authority (ADR-041).
 	int get_object_owner(const TickSyncObject *p_object) const;

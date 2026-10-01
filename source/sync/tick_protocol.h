@@ -5,10 +5,17 @@
 // Wire protocol of `TickSyncCore`. Every message starts with its type, in 8 bits.
 
 // 2: interest (`RELEVANCE`) and snapshots split in parts (F8).
-static constexpr uint16_t TICK_PROTOCOL_VERSION = 2;
+// 3: the roles of a distributed mesh move (`ROLES`, `REGISTRY_REPORT`, the roles in the mesh hello; ADR-073).
+static constexpr uint16_t TICK_PROTOCOL_VERSION = 3;
 
 // Frame index meaning "none".
 static constexpr uint32_t TICK_FRAME_NONE = UINT32_MAX;
+
+// Longest event name, in bytes of UTF-8; a longer one makes the message malformed.
+static constexpr int TICK_MAX_EVENT_NAME_BYTES = 255;
+
+// Most frames an input message describes (`input_redundancy` is at most this); a message with more is malformed.
+static constexpr int TICK_MAX_INPUT_FRAMES = 64;
 
 enum TickMessageType {
 	TICK_MESSAGE_HELLO = 1,
@@ -38,6 +45,9 @@ enum TickMessageType {
 	TICK_MESSAGE_MESH_EVENT,
 	// Interest (F8).
 	TICK_MESSAGE_RELEVANCE,
+	// Roles of a distributed mesh (ADR-073).
+	TICK_MESSAGE_ROLES,
+	TICK_MESSAGE_REGISTRY_REPORT,
 };
 
 enum TickChannel {

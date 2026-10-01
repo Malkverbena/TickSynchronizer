@@ -121,4 +121,51 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Negative offsets and frames") 
 	CHECK(master.local_to_master_usec(123) == 123);
 }
 
+TEST_CASE("[Modules][TickSynchronizer][TickClock] Offset changes are slewed, big ones applied at once") {
+	TickClock clock;
+	clock.set_sample_window(4, 2);
+	const int64_t offset = 3000000;
+	// Until the clock is synchronized, the estimate applies right away.
+	clock.add_sample(1000000, 1000000 + 20000 + uint64_t(offset), 1040000);
+	clock.add_sample(1100000, 1100000 + 20000 + uint64_t(offset), 1140000);
+	REQUIRE(clock.is_synchronized());
+	CHECK(clock.get_applied_offset_usec(1140000) == offset);
+
+	// A sample with a lower round trip moves the estimate 10 ms: the frames follow at 5% of the elapsed time.
+	const uint64_t t = 1200000;
+	clock.add_sample(t, t + 10000 + uint64_t(offset + 10000), t + 20000);
+	CHECK(clock.get_offset_usec() == offset + 10000);
+	CHECK(clock.get_applied_offset_usec(t + 20000) == offset);
+	CHECK(clock.get_applied_offset_usec(t + 120000) == offset + 5000);
+	CHECK(clock.get_applied_offset_usec(t + 220000) == offset + 10000);
+	CHECK(clock.get_applied_offset_usec(t + 1020000) == offset + 10000);
+	CHECK(clock.local_to_master_usec(t + 120000) == t + 120000 + uint64_t(offset + 5000));
+	// The inverse, within the microsecond the forward rounding loses.
+	const int64_t back = int64_t(clock.master_to_local_usec(t + 120000 + uint64_t(offset + 5000))) - int64_t(t + 120000);
+	CHECK((back >= -1 && back <= 1));
+
+	// While the offset goes down, the master frame still only goes forward.
+	const uint64_t t2 = 2000000;
+	clock.add_sample(t2, t2 + 5000 + uint64_t(offset - 10000), t2 + 10000);
+	bool forward = true;
+	double last = clock.get_master_frame_time(t2 + 10000);
+	for (uint64_t now = t2 + 11000; now < t2 + 610000; now += 1000) {
+		const double frame = clock.get_master_frame_time(now);
+		forward = forward && frame > last;
+		last = frame;
+	}
+	CHECK(forward);
+	CHECK(clock.get_applied_offset_usec(t2 + 510000) == offset - 10000);
+
+	// A difference above 100 ms (another master, a long outage) applies at once.
+	const uint64_t t3 = 3000000;
+	clock.add_sample(t3, t3 + 2500 + uint64_t(offset + 500000), t3 + 5000);
+	CHECK(clock.get_applied_offset_usec(t3 + 5000) == offset + 500000);
+
+	// Starting over: nothing to slew from.
+	clock.clear_samples();
+	clock.add_sample(4000000, 4000000 + 10000 + uint64_t(offset), 4020000);
+	CHECK(clock.get_applied_offset_usec(4020000) == offset);
+}
+
 } // namespace TestTickClock

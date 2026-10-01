@@ -2,6 +2,10 @@
 
 #include "core/string/string_name.h"
 
+void TickMultiplayerPeer::_bind_methods() {
+	ADD_SIGNAL(MethodInfo("host_migrated", PropertyInfo(Variant::INT, "old_host"), PropertyInfo(Variant::INT, "new_host")));
+}
+
 TickMultiplayerPeer::~TickMultiplayerPeer() {
 	if (transport.is_valid() && transport->multiplayer_peer == this) {
 		transport->attach_multiplayer_peer(nullptr);
@@ -27,9 +31,11 @@ Error TickMultiplayerPeer::get_packet(const uint8_t **r_buffer, int &r_buffer_si
 	ERR_FAIL_NULL_V_MSG(packet, ERR_UNAVAILABLE, "No packet available.");
 	current_packet = packet->data;
 	transport->next_multiplayer_packet++;
+	transport->multiplayer_queued_bytes -= current_packet.size();
 	if (transport->next_multiplayer_packet >= transport->multiplayer_packets.size()) {
 		transport->multiplayer_packets.clear();
 		transport->next_multiplayer_packet = 0;
+		transport->multiplayer_queued_bytes = 0;
 	}
 	*r_buffer = current_packet.ptr();
 	r_buffer_size = int(current_packet.size());
@@ -85,6 +91,13 @@ void TickMultiplayerPeer::poll() {
 	pending = transport->multiplayer_events;
 	transport->multiplayer_events.clear();
 	for (const TickTransport::Event &event : pending) {
+		if (event.type == TickTransport::EVENT_HOST_MIGRATED) {
+			// Before the old host's `peer_disconnected`.
+			const int old_host = host_peer;
+			host_peer = event.peer;
+			emit_signal(SNAME("host_migrated"), old_host, event.peer);
+			continue;
+		}
 		emit_signal(event.type == TickTransport::EVENT_PEER_CONNECTED ? SNAME("peer_connected") : SNAME("peer_disconnected"), event.peer);
 	}
 }

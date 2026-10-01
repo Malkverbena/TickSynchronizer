@@ -47,6 +47,7 @@ private:
 	LocalVector<Packet> packets;
 	uint32_t next_event = 0;
 	uint32_t next_packet = 0;
+	uint64_t queued_bytes = 0;
 
 	uint64_t simulated_latency_usec = 0;
 	uint64_t simulated_jitter_usec = 0;

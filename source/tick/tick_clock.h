@@ -10,6 +10,10 @@
 // monotonic local clock (for example `OS::get_ticks_usec()`), so the result doesn't depend on `real_t`.
 //
 // The master answers pings with its own time; its clock is the reference and it needs no samples.
+//
+// The estimate changes whenever a sample with a lower round trip arrives or the best one leaves the window. The frames
+// don't follow it at once: once synchronized, the applied offset moves toward the estimate at 5% of the elapsed time,
+// so the master frame never jumps nor goes back (ADR-071). A difference above 100 ms is applied at once.
 class TickClock {
 	struct Sample {
 		uint64_t rtt_usec = 0;
@@ -22,16 +26,27 @@ class TickClock {
 	LocalVector<Sample> samples;
 	int next_sample = 0;
 
+	// The estimate, from the sample with the lowest round trip.
 	int64_t offset_usec = 0;
 	uint64_t rtt_usec = 0;
+	// The applied offset: `slew_from_usec` at the local time `slew_start_usec`, then moving toward the estimate.
+	int64_t slew_from_usec = 0;
+	uint64_t slew_start_usec = 0;
 
 	int ticks_per_second = 60;
 	// Master time of frame 0; negative when the timeline started before the master's clock (another process).
 	int64_t master_epoch_usec = 0;
 
 	void update_estimate();
+	// The offset applied at the given local time.
+	int64_t offset_at(uint64_t p_local_usec) const;
 
 public:
+	// The applied offset moves toward the estimate by this much per thousand of the elapsed time; a difference above
+	// `STEP_USEC` is applied at once.
+	static constexpr int64_t SLEW_PER_MILLE = 50;
+	static constexpr int64_t STEP_USEC = 100000;
+
 	void set_master(bool p_master);
 	bool is_master() const { return master; }
 
@@ -48,8 +63,9 @@ public:
 	bool is_synchronized() const;
 
 	// Estimated `master time - local time`, from the sample with the lowest round trip, which has the least
-	// queuing delay.
+	// queuing delay. The frames use the applied offset, which moves toward it.
 	int64_t get_offset_usec() const { return offset_usec; }
+	int64_t get_applied_offset_usec(uint64_t p_local_usec) const { return master ? 0 : offset_at(p_local_usec); }
 	// Lowest round trip time among the current samples.
 	uint64_t get_rtt_usec() const { return rtt_usec; }
 	// Difference between the highest and the lowest round trip time among the current samples; an estimate of

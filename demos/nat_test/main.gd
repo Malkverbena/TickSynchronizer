@@ -3,7 +3,7 @@ extends Node
 
 const Player := preload("res://player.gd")
 
-var options := {"role": "", "address": "", "port": 9500, "dtls": 0, "duration": 60.0, "relay": 0}
+var options := {"role": "", "address": "", "port": 9500, "dtls": 0, "duration": 60.0, "relay": 0, "password": "", "end": 0, "freeze": 0.0, "takeover": 0}
 var transport: EnetHostedMeshTransport
 var network: TickNetwork
 var bodies := {}
@@ -11,16 +11,21 @@ var elapsed := 0.0
 var next_report := 1.0
 var running := false
 var last_paths := {}
+var left := false
+var frozen := false
 var log_label: Label
 var address_edit: LineEdit
 var lines: PackedStringArray = []
 
 
 func _ready() -> void:
-	var config := ConfigFile.new()
-	if config.load("res://nat_test.cfg") == OK:
-		options.address = config.get_value("test", "address", "")
-		options.port = config.get_value("test", "port", 9500)
+	# The defaults exported with the app, then a configuration pushed to the device for automated runs (README.md): with
+	# a `role`, it starts right away.
+	for path in ["res://nat_test.cfg", "user://nat_test.cfg"]:
+		var config := ConfigFile.new()
+		if config.load(path) == OK and config.has_section("test"):
+			for key in config.get_section_keys("test"):
+				options[key] = config.get_value("test", key)
 	for arg in OS.get_cmdline_user_args():
 		if arg in ["host", "player"]:
 			options.role = arg
@@ -78,10 +83,18 @@ func _start(role: String, dtls: bool) -> void:
 			tls = TLSOptions.server(key, crypto.generate_self_signed_certificate(key, "CN=nat-test,O=TickSynchronizer,C=BR"))
 		else:
 			tls = TLSOptions.client_unsafe()
+	# `--password`: the host admits only the players that send the same one (their join data).
+	var password := str(options.password)
 	if role == "host":
 		transport = EnetHostedMeshTransport.create_host(options.port, 8, "*", EnetHostedMeshTransport.COMPRESSION_RANGE_CODER, tls)
+		if transport and not password.is_empty():
+			transport.join_validator = func(_peer: int, join_data: PackedByteArray, _address: String) -> bool:
+				return join_data.get_string_from_utf8() == password
 	else:
-		transport = EnetHostedMeshTransport.create_player(options.address, options.port, EnetHostedMeshTransport.COMPRESSION_RANGE_CODER, tls)
+		transport = EnetHostedMeshTransport.create_player(options.address, options.port, EnetHostedMeshTransport.COMPRESSION_RANGE_CODER, tls, "", password.to_utf8_buffer())
+		if transport:
+			# `--takeover=PORT`: if this player becomes the host, new players join it there.
+			transport.takeover_port = int(options.takeover)
 	if transport == null:
 		_log("FAILED to create the %s transport (address %s, port %d)" % [role, options.address, options.port])
 		return
@@ -120,6 +133,18 @@ func _process(delta: float) -> void:
 	if not running:
 		return
 	elapsed += delta
+	if not frozen and float(options.freeze) > 0.0 and elapsed >= float(options.freeze):
+		# `--freeze=S`: from then on, this node doesn't touch the network (a hung process, or one without network).
+		frozen = true
+		network.process_mode = Node.PROCESS_MODE_DISABLED
+		_log("t=%.1f id=%d freezes: the network isn't serviced anymore" % [elapsed, transport.get_local_peer_id()])
+	if frozen:
+		if elapsed >= options.duration:
+			running = false
+			_log("done (frozen)")
+			if not options.role.is_empty():
+				get_tree().quit()
+		return
 	# Path changes as they happen.
 	var paths := {}
 	for peer in transport.get_peers():
@@ -127,14 +152,24 @@ func _process(delta: float) -> void:
 	if paths != last_paths:
 		_log("t=%.1f id=%d paths %s" % [elapsed, transport.get_local_peer_id(), paths])
 		last_paths = paths
+	if not left and transport.get_status() == EnetHostedMeshTransport.STATUS_DISCONNECTED:
+		left = true
+		var reasons := ["none", "closed", "lost", "refused", "full", "busy", "version", "ended"]
+		_log("t=%.1f id=%d left the mesh: %s" % [elapsed, transport.get_local_peer_id(), reasons[transport.get_disconnect_reason()]])
 	if elapsed >= next_report:
 		next_report += 5.0 if elapsed > 10.0 else 1.0
 		var stats: Dictionary = network.get_stats()
-		_log("t=%.0f id=%d host=%d rtt=%.0fms predicting=%s npc_x=%.1f doll_delays=%s rewinds=%d doll_rewinds=%d transport=%s" % [elapsed, transport.get_local_peer_id(), transport.get_host_peer(), network.get_rtt() * 1000.0, network.is_predicting(), bodies[1].position.x, stats.get("doll_delays", {}), stats.rewinds, stats.get("doll_rewinds", 0), transport.get_stats()])
+		# fps: a slow device predicts late; late and ghost inputs (host): inputs that came after their frame, or never.
+		_log("t=%.0f id=%d host=%d rtt=%.0fms fps=%d predicting=%s npc_x=%.1f doll_delays=%s rewinds=%d doll_rewinds=%d late=%d ghost=%d scale=%.3f transport=%s" % [elapsed, transport.get_local_peer_id(), transport.get_host_peer(), network.get_rtt() * 1000.0, Engine.get_frames_per_second(), network.is_predicting(), bodies[1].position.x, stats.get("doll_delays", {}), stats.rewinds, stats.get("doll_rewinds", 0), stats.get("late_inputs", 0), stats.get("ghost_inputs", 0), stats.get("time_scale", 1.0), transport.get_stats()])
 	if elapsed >= options.duration:
 		running = false
 		_log("done: paths %s, transport %s" % [last_paths, transport.get_stats()])
 		network.stop()
-		transport.close()
+		if transport.is_hosting() and int(options.end) == 0 and not transport.get_peers().is_empty():
+			# The next player of the succession takes over (`--end=1`: the mesh ends instead).
+			_log("hands the mesh over")
+			transport.hand_over()
+		else:
+			transport.close()
 		if not options.role.is_empty():
 			get_tree().quit()

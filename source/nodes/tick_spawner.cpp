@@ -93,7 +93,11 @@ Node *TickSpawner::server_spawn(int p_scene, const String &p_name, int p_control
 
 	// The spawn message goes before the objects of the node register.
 	const uint32_t spawn_id = network->spawn(String(network_root->get_path_to(this)), p_scene, name, controller, p_data);
-	local_spawns.insert(spawn_id);
+	if (spawn_id == 0) {
+		// The network refused it (and said why): the node would exist only here.
+		memdelete(node);
+		return nullptr;
+	}
 	return add_spawned(node, spawn_id, name);
 }
 
@@ -123,11 +127,8 @@ void TickSpawner::_on_spawned_exiting(uint32_t p_spawn_id) {
 	Node *node = id ? ObjectDB::get_instance<Node>(*id) : nullptr;
 	nodes_by_spawn.erase(p_spawn_id);
 	TickNetwork *network = find_network();
-	if (local_spawns.has(p_spawn_id)) {
-		local_spawns.erase(p_spawn_id);
-		if (network && network->is_running()) {
-			network->despawn(p_spawn_id);
-		}
+	if (network && network->owns_spawn(p_spawn_id)) {
+		network->despawn(p_spawn_id);
 	}
 	if (node) {
 		emit_signal(SNAME("despawned"), node);

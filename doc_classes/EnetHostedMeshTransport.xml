@@ -5,7 +5,8 @@
 	</brief_description>
 	<description>
 		One node hosts the mesh ([method create_host]) and is player 1; it must be reachable on its port (a public address, or a port forwarded by the project). The other players join through it ([method create_player]) and get their id from it. The host introduces every pair of players: each player of the pair opens a socket, the host learns its public endpoint, and both punch through their NATs to connect directly. A pair that can't connect within [member punch_timeout] is relayed by the host. The engines see every player as connected either way; [method get_peer_path] tells how a player is reached.
-		The sender of every packet comes from the connection, and the host assigns the ids: a player can't take another one's place. A relayed packet carries its origin, written by the host.
+		The sender of every packet comes from the connection, and the host assigns the ids: a player can't take another one's place. A relayed packet carries its origin, written by the host. The host is trusted: it assigns the ids, introduces the players and relays their packets.
+		[b]Admission:[/b] a joining player first sends the join data passed to [method create_player] (a password or a token, for example). The host gives it to [member join_validator], which admits or refuses the player; nobody learns about a player, not even its id, until it's admitted. The players still joining count toward the limit of players, and an address can start a few joins at once, then one more every two seconds. A refused player learns why ([method get_disconnect_reason]). Every node must run the same version of the mesh protocol: the host refuses players of another version. [member SceneMultiplayer.auth_callback] only guards the [SceneMultiplayer] on [method get_multiplayer_peer]: the [TickNetwork] sees every admitted player, so check the players with [member join_validator].
 		The same mesh can carry [SceneMultiplayer] ([method get_multiplayer_peer]), so RPCs, spawners and synchronizers reach every player, relayed ones included.
 		[codeblock]
 		# On the host:
@@ -17,15 +18,23 @@
 		$Game.start(mesh)
 		[/codeblock]
 		[b]DTLS:[/b] pass [TLSOptions] to [method create_host] ([method TLSOptions.server]) and [method create_player] ([method TLSOptions.client], or [method TLSOptions.client_unsafe] for testing) to encrypt every link. The direct links between players use a certificate each player generates when it joins; the host hands it to the other player of the pair, who accepts only that certificate. A DTLS socket only takes DTLS, so the players register their endpoints on a second, plain port of the host (the rendezvous port, the next port by default), which must be reachable too; only single-use tokens go through it.
-		[b]Host migration:[/b] the host keeps every player informed of a succession (players without relayed pairs first, then by id). When the host leaves or stops answering (see [member host_timeout]), the first player of the succession still in the mesh becomes the host: its direct links become the host links, and the others follow it through their direct link with it. A [TickNetwork] with [constant TickNetwork.AUTHORITY_SINGLE] moves its authority to the new host (see [signal TickNetwork.host_migrated]). A player that can't reach the new host directly leaves the mesh. The new host has no listening port, so no new players can join after a migration.
+		[b]Host migration:[/b] the host keeps every player informed of a succession (players without relayed pairs first, then by id). When the host leaves with [method hand_over], or stops answering (see [member host_timeout]), the first player of the succession still in the mesh becomes the host: its direct links become the host links, and the others follow it through their direct link with it. A [TickNetwork] with [constant TickNetwork.AUTHORITY_SINGLE] moves its authority to the new host (see [signal TickNetwork.host_migrated]); [SceneMultiplayer] doesn't (see [signal TickMultiplayerPeer.host_migrated]). A player that can't reach the new host directly leaves the mesh. New players can join the new host if it has a [member takeover_port] (and, with DTLS, [member takeover_tls_options]); the game tells them where it is, for example through its lobby, since it isn't the address they first joined. For a player that joins it, the host isn't peer 1: [signal TickNetwork.host_migrated] and [signal TickMultiplayerPeer.host_migrated] are emitted when it joins, as if the host had migrated then.
+		A host that stops answering may be gone, or only cut off from one player: before migrating, a player asks the players it reaches directly whether they lost the host too. If one of them still hears from it, or none of them answers, this player is the one cut off, and it leaves the mesh instead of taking over. A host that calls [method close] ends the mesh for everybody.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
+		<method name="admit_player">
+			<return type="int" enum="Error" />
+			<param index="0" name="peer" type="int" />
+			<description>
+				Host: admits [param peer], a player whose join data arrived and that [member join_validator] left waiting. Returns [constant ERR_INVALID_PARAMETER] if no such player is waiting.
+			</description>
+		</method>
 		<method name="close">
 			<return type="void" />
 			<description>
-				Closes every connection. On the host, the mesh ends for every player.
+				Closes every connection. On the host, the mesh ends for every player; [method hand_over] leaves it to the next player of the succession instead.
 			</description>
 		</method>
 		<method name="create_host" qualifiers="static">
@@ -47,8 +56,23 @@
 			<param index="2" name="compression" type="int" enum="EnetHostedMeshTransport.Compression" default="1" />
 			<param index="3" name="tls_options" type="TLSOptions" default="null" />
 			<param index="4" name="tls_hostname" type="String" default="&quot;&quot;" />
+			<param index="5" name="join_data" type="PackedByteArray" default="PackedByteArray()" />
 			<description>
-				Joins the mesh hosted at [param address]:[param port]; the id comes from the host (see [method get_status]). With [param tls_options] ([method TLSOptions.client] or [method TLSOptions.client_unsafe]), the host must use DTLS too; [param tls_hostname] is the name checked in the host's certificate ([param address] when empty). Joining with DTLS generates an RSA key for the player, which can take a moment. Returns [code]null[/code] on failure.
+				Joins the mesh hosted at [param address]:[param port]; the id comes from the host, once it admits this player (see [method get_status]). [param join_data], up to 4096 bytes, goes to the host's [member join_validator]; it's only encrypted with DTLS. With [param tls_options] ([method TLSOptions.client] or [method TLSOptions.client_unsafe]), the host must use DTLS too; [param tls_hostname] is the name checked in the host's certificate ([param address] when empty). Joining with DTLS generates an RSA key for the player on a worker thread; the direct links this player accepts wait for it. Returns [code]null[/code] on failure.
+			</description>
+		</method>
+		<method name="get_disconnect_reason" qualifiers="const">
+			<return type="int" enum="EnetHostedMeshTransport.DisconnectReason" />
+			<description>
+				Returns why this node left the mesh, once [method get_status] is [constant STATUS_DISCONNECTED]: for example, to tell a player that the game is full or that its version is different. [constant DISCONNECT_REASON_NONE] until then.
+				[codeblock]
+				if mesh.get_status() == EnetHostedMeshTransport.STATUS_DISCONNECTED:
+					match mesh.get_disconnect_reason():
+						EnetHostedMeshTransport.DISCONNECT_REASON_FULL:
+							show_message("The game is full.")
+						EnetHostedMeshTransport.DISCONNECT_REASON_REFUSED:
+							show_message("The host refused you.")
+				[/codeblock]
 			</description>
 		</method>
 		<method name="get_host_peer" qualifiers="const">
@@ -79,19 +103,25 @@
 		<method name="get_stats" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns a [Dictionary] with [code]direct_pairs[/code] and [code]relayed_pairs[/code] (on a player, its links; on the host, the relayed pairs), [code]relayed_packets[/code] (host), [code]rejected_connections[/code] and [code]failed_punches[/code].
+				Returns a [Dictionary] with [code]direct_pairs[/code] and [code]relayed_pairs[/code] (on a player, its links; on the host, the relayed pairs), [code]relayed_packets[/code] (host), [code]rejected_connections[/code], [code]failed_punches[/code] (direct links that couldn't be made; a direct link that drops later isn't counted) and [code]dropped_packets[/code] (received packets dropped because nothing consumed them: no [TickNetwork] running, or a [TickMultiplayerPeer] that isn't polled).
 			</description>
 		</method>
 		<method name="get_status" qualifiers="const">
 			<return type="int" enum="EnetHostedMeshTransport.Status" />
 			<description>
-				Returns the connection status. A player is [constant STATUS_CONNECTING] until the host gives it an id.
+				Returns the connection status. A player is [constant STATUS_CONNECTING] until the host admits it and gives it an id; see [method get_disconnect_reason] once it's [constant STATUS_DISCONNECTED].
 			</description>
 		</method>
 		<method name="get_succession" qualifiers="const">
 			<return type="PackedInt32Array" />
 			<description>
 				Returns the order in which the players take over when the host leaves, as last sent by the host.
+			</description>
+		</method>
+		<method name="hand_over">
+			<return type="int" enum="Error" />
+			<description>
+				Host: leaves the mesh, and the first player of the succession takes its place right away (on the players with [member host_migration] enabled). Returns [constant ERR_UNCONFIGURED] if this node isn't the connected host.
 			</description>
 		</method>
 		<method name="is_encrypted" qualifiers="const">
@@ -106,6 +136,13 @@
 				Returns [code]true[/code] on the host.
 			</description>
 		</method>
+		<method name="refuse_player">
+			<return type="int" enum="Error" />
+			<param index="0" name="peer" type="int" />
+			<description>
+				Host: refuses [param peer], a player waiting to join, and closes its connection. Returns [constant ERR_INVALID_PARAMETER] if no such player is waiting.
+			</description>
+		</method>
 	</methods>
 	<members>
 		<member name="direct_connections" type="bool" setter="set_direct_connections" getter="is_direct_connections_enabled" default="true">
@@ -115,10 +152,29 @@
 			When [code]true[/code], a player takes the host's place when it leaves (see the class description); when [code]false[/code], the mesh ends with the host.
 		</member>
 		<member name="host_timeout" type="float" setter="set_host_timeout" getter="get_host_timeout" default="5.0">
-			Seconds without an answer from the host before a player considers it gone. A host that closes the mesh is noticed right away.
+			Seconds without an answer before a link is considered gone: a player's link with the host, the host's links with the players, and the direct links between players. A host that closes the mesh or hands it over is noticed right away.
+		</member>
+		<member name="join_timeout" type="float" setter="set_join_timeout" getter="get_join_timeout" default="10.0">
+			Host: seconds a joining player has to send its join data and be admitted; then it's refused.
+		</member>
+		<member name="join_validator" type="Callable" setter="set_join_validator" getter="get_join_validator" default="Callable()">
+			Host: decides who joins. Called as [code]validator(peer: int, join_data: PackedByteArray, address: String)[/code] once the player's join data arrives: [code]true[/code] admits the player, [code]false[/code] refuses it, and anything else leaves it waiting for [method admit_player] or [method refuse_player] (until [member join_timeout]). Without a validator, every player is admitted.
+			[codeblock]
+			mesh.join_validator = func(peer: int, join_data: PackedByteArray, address: String) -&gt; bool:
+				return join_data.get_string_from_utf8() == password
+			[/codeblock]
 		</member>
 		<member name="punch_timeout" type="float" setter="set_punch_timeout" getter="get_punch_timeout" default="3.0">
 			Seconds to establish a direct link between two players before relaying them.
+		</member>
+		<member name="takeover_port" type="int" setter="set_takeover_port" getter="get_takeover_port" default="0">
+			Player: the port it takes new players on if it becomes the host after a migration; 0 takes none. It must be reachable like the first host's port, and the game tells the new players this node's address. With DTLS, set [member takeover_tls_options] too.
+		</member>
+		<member name="takeover_rendezvous_port" type="int" setter="set_takeover_rendezvous_port" getter="get_takeover_rendezvous_port" default="0">
+			Player, with DTLS: the plain port where the pairs register their endpoints if it becomes the host ([member takeover_port] + 1 when 0). It must be reachable too.
+		</member>
+		<member name="takeover_tls_options" type="TLSOptions" setter="set_takeover_tls_options" getter="get_takeover_tls_options">
+			Player, with DTLS: its certificate ([method TLSOptions.server]) for the players that join it if it becomes the host. Without it, a mesh that uses DTLS takes no new players after a migration.
 		</member>
 	</members>
 	<constants>
@@ -145,6 +201,30 @@
 		</constant>
 		<constant name="STATUS_CONNECTED" value="2" enum="Status">
 			Connected: the host, or a player with its id.
+		</constant>
+		<constant name="DISCONNECT_REASON_NONE" value="0" enum="DisconnectReason">
+			Still connected, or never connected.
+		</constant>
+		<constant name="DISCONNECT_REASON_CLOSED" value="1" enum="DisconnectReason">
+			This node closed its connections ([method close] or [method hand_over]), or left the host ([method TickTransport.disconnect_peer]).
+		</constant>
+		<constant name="DISCONNECT_REASON_LOST" value="2" enum="DisconnectReason">
+			The host couldn't be reached, or stopped answering and no other node could take its place for this player: the host crashed in a mesh of two, this player was the one cut off, or it couldn't reach the successor directly.
+		</constant>
+		<constant name="DISCONNECT_REASON_REFUSED" value="3" enum="DisconnectReason">
+			The host refused this player ([member join_validator], [method refuse_player] or [member join_timeout]), or removed it ([method TickTransport.disconnect_peer]).
+		</constant>
+		<constant name="DISCONNECT_REASON_FULL" value="4" enum="DisconnectReason">
+			The mesh already has its maximum number of players.
+		</constant>
+		<constant name="DISCONNECT_REASON_BUSY" value="5" enum="DisconnectReason">
+			Too many joins came from this player's address: it can try again a few seconds later.
+		</constant>
+		<constant name="DISCONNECT_REASON_VERSION" value="6" enum="DisconnectReason">
+			The host uses another version of the mesh protocol (another version of the module).
+		</constant>
+		<constant name="DISCONNECT_REASON_ENDED" value="7" enum="DisconnectReason">
+			The host ended the mesh ([method close]).
 		</constant>
 		<constant name="PATH_NONE" value="0" enum="PeerPath">
 			Not a node of the mesh.

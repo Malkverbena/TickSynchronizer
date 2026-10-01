@@ -141,6 +141,10 @@ Error EnetMeshTransport::send_now(int p_node, MeshNode &r_node, int p_channel, T
 	}
 	ENetPacketPeer *peer = as_peer(r_node.peer);
 	ERR_FAIL_NULL_V(peer, ERR_UNAVAILABLE);
+	if (p_channel >= peer->get_channels()) {
+		// ENet already reset the link: its disconnection is on the way.
+		return ERR_UNAVAILABLE;
+	}
 	ENetPacket *packet = enet_packet_create(p_data, p_size, flags);
 	ERR_FAIL_NULL_V(packet, ERR_OUT_OF_MEMORY);
 	if (peer->send(uint8_t(p_channel), packet) < 0) {
@@ -160,8 +164,9 @@ Error EnetMeshTransport::send(int p_peer, int p_channel, TransferMode p_mode, co
 			continue;
 		}
 		if (E.value.simulated_latency_usec == 0) {
+			// A link being closed is skipped: its disconnection is on the way.
 			const Error err = send_now(E.key, E.value, p_channel, p_mode, p_data, p_size);
-			ERR_FAIL_COND_V(err != OK, err);
+			ERR_FAIL_COND_V(err != OK && err != ERR_UNAVAILABLE, err);
 			continue;
 		}
 		// The latency of a node is constant, so its packets keep their order.
@@ -322,7 +327,9 @@ void EnetMeshTransport::service_host(const Ref<RefCounted> &p_host, bool p_accep
 			}
 		} else if (type == ENetConnection::EVENT_RECEIVE) {
 			const int *id = ids_by_peer.getptr(event.peer->get_instance_id());
-			if (id && is_peer_connected(*id)) {
+			if (id && is_peer_connected(*id) && !queue_has_room(packets.size() - next_packet, queued_bytes, int(event.packet->dataLength))) {
+				WARN_PRINT_ONCE("EnetMeshTransport drops the packets it receives: nothing consumes them (is the TickNetwork running?).");
+			} else if (id && is_peer_connected(*id)) {
 				Packet packet;
 				packet.from_peer = *id;
 				packet.channel = event.channel_id;
@@ -330,6 +337,7 @@ void EnetMeshTransport::service_host(const Ref<RefCounted> &p_host, bool p_accep
 				if (event.packet->dataLength > 0) {
 					memcpy(packet.data.ptr(), event.packet->data, event.packet->dataLength);
 				}
+				queued_bytes += event.packet->dataLength;
 				packets.push_back(packet);
 			}
 			enet_packet_destroy(event.packet);
@@ -386,9 +394,11 @@ bool EnetMeshTransport::pop_packet(Packet &r_packet) {
 	if (next_packet >= packets.size()) {
 		packets.clear();
 		next_packet = 0;
+		queued_bytes = 0;
 		return false;
 	}
 	r_packet = packets[next_packet++];
+	queued_bytes -= r_packet.data.size();
 	return true;
 }
 

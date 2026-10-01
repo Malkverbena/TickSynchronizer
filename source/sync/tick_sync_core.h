@@ -174,6 +174,17 @@ private:
 		HashMap<uint16_t, uint32_t> relevant_since;
 	};
 
+	// Marks a call into the engine that may run game code (ticks, events, the listener). Game code may stop the
+	// engine: `stop()` then waits until the outermost call returns, so nothing the engine is working on is freed
+	// under it.
+	class BusyScope {
+		TickSyncCore *core = nullptr;
+
+	public:
+		explicit BusyScope(TickSyncCore *p_core);
+		~BusyScope();
+	};
+
 	Settings settings;
 	Stats stats;
 	Listener *listener = nullptr;
@@ -184,6 +195,8 @@ private:
 	uint64_t now_usec = 0;
 	bool rewinding = false;
 	const TickEngine *clock_source = nullptr;
+	int busy_depth = 0;
+	bool stop_requested = false;
 
 	// Server.
 	HashMap<uint16_t, ServerObject> server_objects;
@@ -193,6 +206,9 @@ private:
 	HashMap<int, PeerState> peers;
 	LocalVector<SnapshotRecord> server_history;
 	int64_t server_epoch_usec = 0;
+	// When the server's frames last advanced. The epoch is computed at that time: pings are answered before the frames
+	// advance, and the time of the current frame would make the epoch vary with the frame time (ADR-071).
+	uint64_t server_stepped_usec = 0;
 	// Net ids released recently, with the frame they were released at (ADR-034).
 	HashMap<uint16_t, uint32_t> quarantined_ids;
 	HashMap<uint32_t, SpawnRecord> spawns;
@@ -232,6 +248,9 @@ private:
 
 	int history_index(uint32_t p_frame) const { return int(p_frame % uint32_t(settings.history_size)); }
 	double get_tick_delta() const { return 1.0 / double(settings.ticks_per_second); }
+	// Running, and not asked to stop.
+	bool is_active() const { return role != ROLE_NONE && !stop_requested; }
+	void stop_now();
 
 	void send(int p_peer, TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message);
 	void read_states(TickSyncObject *p_object, LocalVector<Variant> &r_values) const;
@@ -339,8 +358,10 @@ public:
 
 	// The role comes from the transport: the `authority_peer` is the server.
 	virtual Error start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec) override;
+	// Called from game code the engine is running (a tick, an event, a signal), the engine stops once that call
+	// returns; it isn't running anymore from now on.
 	virtual void stop() override;
-	virtual bool is_running() const override { return role != ROLE_NONE; }
+	virtual bool is_running() const override { return is_active(); }
 	Role get_role() const { return role; }
 	virtual bool is_server() const override { return role == ROLE_SERVER; }
 	virtual bool can_spawn() const override { return role == ROLE_SERVER; }
@@ -383,6 +404,8 @@ public:
 	virtual uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override;
 	virtual void despawn(uint32_t p_spawn_id) override;
 	virtual uint32_t get_next_spawn_id() const override { return next_spawn_id; }
+	// The server owns every spawn: a client that becomes the server takes over the old one's (it kept their records).
+	virtual bool owns_spawn(uint32_t p_spawn_id) const override { return role == ROLE_SERVER && spawns.has(p_spawn_id); }
 
 	// Sends an event to `p_target` (or the network when null). Client: to the server. Server: to `p_peer`, or
 	// every client with 0. `p_frame` schedules it (`TICK_FRAME_NONE`: see `notes/f3-design.md`).

@@ -117,6 +117,8 @@ public:
 	// Returns `true` while reading, once all the data was read.
 	bool is_end_of_buffer() const { return is_reading && bit_offset >= total_size(); }
 	bool is_buffer_failed() const { return buffer_failed; }
+	// Fails the buffer for a value that fit but was malformed (see `TickCodec::decode()`).
+	void mark_failed() { buffer_failed = true; }
 
 	// Writes 0 on all the bytes.
 	void zero();
@@ -141,6 +143,8 @@ public:
 	int64_t add_int_bits(int64_t p_input, int p_bits);
 	int64_t read_int_bits(int p_bits);
 
+	// NaN and infinities are sent as 0 (with an error), and values beyond the range of the encoding as its largest
+	// value; reading one that isn't finite fails the buffer.
 	double add_real(double p_input, CompressionLevel p_compression_level);
 	double read_real(CompressionLevel p_compression_level);
 
@@ -168,7 +172,8 @@ public:
 
 	// Stores a UTF-8 string of at most `MAX_STRING_BYTES` bytes.
 	void add_string(const String &p_input);
-	String read_string();
+	// A string longer than `p_max_bytes`, or not valid UTF-8, fails the buffer.
+	String read_string(int p_max_bytes = MAX_STRING_BYTES);
 
 	// Nests the metadata and payload of another buffer, of at most `MAX_NESTED_BUFFER_BITS` bits.
 	void add_data_buffer(const TickDataBuffer &p_input);
@@ -203,6 +208,10 @@ public:
 
 	static uint64_t compress_unit_float(double p_value, double p_scale_factor);
 	static double decompress_unit_float(uint64_t p_value, double p_scale_factor);
+
+	// Whether the bytes are well-formed UTF-8 without NUL characters. Checked without printing anything, unlike the
+	// engine's decoder, which prints an error for every invalid byte: check untrusted data before decoding it.
+	static bool is_valid_utf8(const uint8_t *p_bytes, int p_length);
 
 private:
 	bool check_writing();

@@ -45,6 +45,8 @@ public:
 		virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) {}
 		// The host of a mesh left and `p_new_host` became the authority (ADR-062).
 		virtual void on_host_migrated(int p_old_host, int p_new_host) {}
+		// Mesh: the registry or the clock master moved to another node (ADR-073).
+		virtual void on_roles_changed(int p_registry, int p_clock_master) {}
 	};
 
 	struct Settings {
@@ -136,6 +138,9 @@ public:
 	virtual uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) = 0;
 	virtual void despawn(uint32_t p_spawn_id) = 0;
 	virtual uint32_t get_next_spawn_id() const = 0;
+	// Whether removing the node of `p_spawn_id` despawns it on the others: this peer spawned it, or took it over with
+	// the authority after a host migration (ADR-062).
+	virtual bool owns_spawn(uint32_t p_spawn_id) const = 0;
 
 	virtual Error send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) = 0;
 	virtual uint32_t get_event_frame(double p_seconds) const = 0;
@@ -145,6 +150,8 @@ public:
 	virtual Error request_authority(TickSyncObject *p_object) { return ERR_UNAVAILABLE; }
 	virtual Error release_authority(TickSyncObject *p_object, int p_to_peer) { return ERR_UNAVAILABLE; }
 	virtual Error assign_authority(TickSyncObject *p_object, int p_peer) { return ERR_UNAVAILABLE; }
+	// Mesh: moves the registry and the clock master to other connected nodes while it runs.
+	virtual Error change_roles(int p_registry, int p_clock_master) { return ERR_UNAVAILABLE; }
 
 	// Interest (ADR-053). Server: `p_peer` 0 means every client.
 	virtual Error set_relevant(TickSyncObject *p_object, int p_peer, bool p_relevant) { return ERR_UNAVAILABLE; }

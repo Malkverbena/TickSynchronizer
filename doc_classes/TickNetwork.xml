@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="TickNetwork" inherits="Node" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
-		Tick based network: server authority, client prediction and interpolation.
+		Tick based network: an authority with client prediction and interpolation, or an owner for each object.
 	</brief_description>
 	<description>
-		Synchronizes the [TickObject] nodes over a [TickTransport], in fixed ticks. The peer with id 1 is the server: it simulates every object, moving each one with the input of its controller. A client predicts the objects it controls and rewinds them when the server disagrees; the other objects are interpolated [member interpolation_delay] seconds behind the server.
+		Synchronizes the [TickObject] nodes over a [TickTransport], in fixed ticks. With [constant AUTHORITY_SINGLE] (the default), one peer is the authority, called the server in this reference: peer 1 in a star ([EnetStarTransport]), or [member authority_peer] in a mesh ([EnetMeshTransport], [EnetHostedMeshTransport]). It simulates every object, moving each one with the input of its controller. The other peers are its clients: a client predicts the objects it controls and rewinds them when the server disagrees; the other objects are interpolated [member interpolation_delay] seconds behind the server, or simulated as dolls in a mesh (see [member TickObject.remote_mode]).
+		With [constant AUTHORITY_DISTRIBUTED], for meshes of trusted servers, every object has an owner node that simulates it; the other nodes interpolate it, and nobody predicts. Ownership moves through [member registry_peer], and the nodes follow the timeline of [member clock_master].
+		A process can run several networks, for example a mesh with other servers and a star with its own clients that follows the mesh's timeline (see [member clock_network]).
 		The network ticks during the physics process; set [member ticks_per_second] equal to [member ProjectSettings.physics/common/physics_ticks_per_second], so bodies moved with the physics delta (like [method CharacterBody3D.move_and_slide]) advance one tick at a time. The client uses the server's tick rate.
 		The client's clock is synchronized with the server's, and the client runs ahead of the server just enough for its inputs to arrive in time, adapting its speed to the network conditions.
 	</description>
@@ -33,7 +35,7 @@
 		<method name="get_rtt" qualifiers="const">
 			<return type="float" />
 			<description>
-				Returns the round trip time to the server, in seconds, as measured by the clock synchronization (client only).
+				Returns the round trip time to the node this peer takes its clock from, in seconds, as measured by the clock synchronization: the server for a client, or [member clock_master] with [constant AUTHORITY_DISTRIBUTED]. 0 on that node itself.
 			</description>
 		</method>
 		<method name="get_state_at" qualifiers="const">
@@ -47,7 +49,7 @@
 		<method name="get_stats" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
-				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code], [code]rate_limited_packets[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]time_scale[/code] (the client's speed adjustment), [code]timeline_frame[/code] (this peer's estimate of the authority's current frame, negative while unknown), [code]latest_snapshot_frame[/code], and for dolls (see [member TickObject.remote_mode]): [code]doll_rewinds[/code], [code]doll_rewound_frames[/code], [code]doll_corrections[/code], [code]doll_resyncs[/code], [code]doll_ghost_inputs[/code], [code]doll_delays[/code] (a [Dictionary] with how many frames the dolls of each peer are behind this peer's timeline), [code]split_snapshots[/code] (server: deltas sent in more than one datagram), [code]incomplete_snapshots[/code] (client: split deltas dropped because a part was lost) and [code]relevance_changes[/code] (see [member interest_filter]). With [constant AUTHORITY_DISTRIBUTED]: [code]states_sent[/code], [code]states_received[/code], [code]stale_states[/code], [code]malformed_packets[/code], [code]transfers[/code], [code]orphans[/code], [code]denied_requests[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_forwarded[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code] and [code]timeline_frame[/code].
+				Returns a [Dictionary] with statistics: [code]rewinds[/code], [code]rewound_frames[/code], [code]ghost_inputs[/code] (inputs repeated by the server because they were missing), [code]late_inputs[/code], [code]rejected_inputs[/code], [code]full_snapshots_sent[/code], [code]delta_snapshots_sent[/code], [code]snapshots_received[/code], [code]snapshots_dropped[/code], [code]malformed_packets[/code], [code]rate_limited_packets[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]time_scale[/code] (the client's speed adjustment), [code]timeline_frame[/code] (this peer's estimate of the authority's current frame, negative while unknown), [code]latest_snapshot_frame[/code], and for dolls (see [member TickObject.remote_mode]): [code]doll_rewinds[/code], [code]doll_rewound_frames[/code], [code]doll_corrections[/code], [code]doll_resyncs[/code], [code]doll_ghost_inputs[/code], [code]doll_delays[/code] (a [Dictionary] with how many frames the dolls of each peer are behind this peer's timeline), [code]split_snapshots[/code] (server: deltas sent in more than one datagram), [code]incomplete_snapshots[/code] (client: split deltas dropped because a part was lost) and [code]relevance_changes[/code] (see [member interest_filter]). With [constant AUTHORITY_DISTRIBUTED]: [code]states_sent[/code], [code]states_received[/code], [code]stale_states[/code], [code]malformed_packets[/code], [code]transfers[/code], [code]orphans[/code], [code]denied_requests[/code], [code]events_sent[/code], [code]events_received[/code], [code]events_forwarded[/code], [code]events_rejected[/code], [code]spawns[/code], [code]despawns[/code], [code]role_changes[/code], [code]roles_term[/code] (how many times the roles moved in the mesh) and [code]timeline_frame[/code].
 			</description>
 		</method>
 		<method name="get_transport" qualifiers="const">
@@ -91,7 +93,7 @@
 		<method name="is_server" qualifiers="const">
 			<return type="bool" />
 			<description>
-				Returns [code]true[/code] if this peer is the server.
+				Returns [code]true[/code] if this peer is the server (see [member authority_peer]). Always [code]false[/code] with [constant AUTHORITY_DISTRIBUTED]: see [method TickObject.is_owner].
 			</description>
 		</method>
 		<method name="send_event">
@@ -101,7 +103,7 @@
 			<param index="2" name="frame" type="int" default="-1" />
 			<param index="3" name="peer" type="int" default="0" />
 			<description>
-				Sends an event without target object, received with [signal event_received]. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts). From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The [param payload] can't contain objects and is limited to [member max_event_size] bytes. Events aren't repeated during rewinds.
+				Sends an event without target object, received with [signal event_received]. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts). From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The name of the event takes at most 255 bytes in UTF-8; the [param payload] can't contain objects and is limited to [member max_event_size] bytes. Events aren't repeated during rewinds.
 			</description>
 		</method>
 		<method name="set_object_relevant">
@@ -117,13 +119,13 @@
 			<return type="int" enum="Error" />
 			<param index="0" name="transport" type="TickTransport" />
 			<description>
-				Starts the network over [param transport]. The peer with id 1 becomes the server; the others are clients and join when connected to it.
+				Starts the network over [param transport]. With [constant AUTHORITY_SINGLE], the peer [member authority_peer] (1 by default) is the server; the others are clients and join when connected to it. With [constant AUTHORITY_DISTRIBUTED], every node joins the other nodes of the mesh as they connect.
 			</description>
 		</method>
 		<method name="stop">
 			<return type="void" />
 			<description>
-				Stops the network. The objects stay registered and synchronize again on the next [method start].
+				Stops the network. The objects stay registered and synchronize again on the next [method start]. It can be called from the network's own callbacks and signals (an event, [method TickObject._process_tick]): the network then finishes what it was doing first, and [method start] works again once that call returns.
 			</description>
 		</method>
 	</methods>
@@ -135,7 +137,7 @@
 			With [constant AUTHORITY_SINGLE]: the peer that simulates every object, is the destination of inputs and events, and is the clock master — the hub of a star (1), or the node of a mesh chosen by the project. It changes with a host migration (see [signal host_migrated]).
 		</member>
 		<member name="clock_master" type="int" setter="set_clock_master" getter="get_clock_master" default="1">
-			With [constant AUTHORITY_DISTRIBUTED]: the node whose timeline the others follow.
+			With [constant AUTHORITY_DISTRIBUTED]: the node whose timeline the others follow. Every node must start with the same one. While the network runs, setting it moves the clock for the whole mesh (to a connected node), and reading it gives the current one; the configured value stays for the next [method start]. When its node leaves, the lowest node left takes the clock (see [member registry_peer]). After a change, the other nodes synchronize with the new clock, which pauses their simulation for a few pings. See [signal roles_changed].
 		</member>
 		<member name="clock_network" type="NodePath" setter="set_clock_network" getter="get_clock_network" default="NodePath(&quot;&quot;)">
 			Another [TickNetwork] of this process whose timeline this one follows (only for the [member authority_peer] of this network). A game server's star with its clients follows the cluster's network, so the clients, the game server and the cluster's authority use the same frames. Place the followed network before this one in the tree.
@@ -180,7 +182,7 @@
 			Smallest number of inputs the client tries to keep buffered on the server; more jitter increases it up to [member max_input_buffer].
 		</member>
 		<member name="registry_peer" type="int" setter="set_registry_peer" getter="get_registry_peer" default="1">
-			With [constant AUTHORITY_DISTRIBUTED]: the node that keeps the registry of owners. Every change of owner goes through it and increases the object's version; state with an older version is discarded. Choose a node that stays up: the registry isn't replaced if it leaves.
+			With [constant AUTHORITY_DISTRIBUTED]: the node that keeps the registry of owners. Every change of owner goes through it and increases the object's version; state with an older version is discarded. Every node must start with the same one. While the network runs, setting it moves the registry for the whole mesh (to a connected node), and reading it gives the current one; the configured value stays for the next [method start]. When its node leaves, the lowest node left takes the registry (and the clock, if the node had both): it first merges every node's view of the objects, so they keep their ids and owners, and the objects of the node that left become orphans. Requests waiting for the previous registry are denied ([signal authority_request_denied]). A node that comes back (even restarted, with nothing) joins as a plain node. See [signal roles_changed].
 		</member>
 		<member name="root_path" type="NodePath" setter="set_root_path" getter="get_root_path" default="NodePath(&quot;..&quot;)">
 			Node the paths of the objects are relative to. The same object must have the same path on every peer.
@@ -192,7 +194,7 @@
 			Ticks per second of the simulation. Clients use the server's value.
 		</member>
 		<member name="trust" type="int" setter="set_trust" getter="get_trust" enum="TickNetwork.Trust" default="0">
-			How much the server trusts the clients. With [constant TRUST_UNTRUSTED], it limits the rate and size of what they send, and accepts an event for an object only from its controller unless [method TickObject._validate_event] decides. The input of an object is always taken only from its controller, and state only from the server.
+			How much the server trusts the clients. With [constant TRUST_UNTRUSTED], it limits the rate and size of what they send, and accepts an event for an object only from its controller unless [method TickObject._validate_event] decides. The input of an object is always taken only from its controller, and state only from the server. It only applies to [constant AUTHORITY_SINGLE]: with [constant AUTHORITY_DISTRIBUTED], every node is trusted, and [method start] prints a warning while this is [constant TRUST_UNTRUSTED].
 		</member>
 	</members>
 	<signals>
@@ -215,7 +217,7 @@
 		<signal name="authority_request_denied">
 			<param index="0" name="object" type="TickObject" />
 			<description>
-				With [constant AUTHORITY_DISTRIBUTED]: emitted when a request for [param object] is refused: another transfer of it was in progress, or its owner refused it.
+				With [constant AUTHORITY_DISTRIBUTED]: emitted when a request for [param object] is refused: another transfer of it was in progress, its owner refused it, or the registry moved to another node before answering (see [member registry_peer]).
 			</description>
 		</signal>
 		<signal name="event_received">
@@ -231,19 +233,19 @@
 			<param index="0" name="old_host" type="int" />
 			<param index="1" name="new_host" type="int" />
 			<description>
-				With [constant AUTHORITY_SINGLE] over an [EnetHostedMeshTransport]: the host [param old_host] left and [param new_host] is the authority now. The new authority goes on from the latest state it had, with the same objects and timeline; the objects the old host controlled (its NPCs and its own player) are now controlled by the new one, so the game may want to remove the old host's player. The others join the new authority again, like after a reconnection.
+				With [constant AUTHORITY_SINGLE] over an [EnetHostedMeshTransport]: the host [param old_host] left and [param new_host] is the authority now. The new authority goes on from the latest state it had, with the same objects and timeline; the objects the old host controlled (its NPCs and its own player) are now controlled by the new one, so the game may want to remove the old host's player. The spawns of the old host are the new authority's too (see [TickSpawner]). The others join the new authority again, like after a reconnection. [SceneMultiplayer] doesn't follow: see [signal TickMultiplayerPeer.host_migrated].
 			</description>
 		</signal>
 		<signal name="peer_left">
 			<param index="0" name="peer" type="int" />
 			<description>
-				Emitted when a client leaves (on the server) or when the connection with the server is lost (on a client).
+				Emitted when a client leaves (on the server) or when the connection with the server is lost (on a client). With [constant AUTHORITY_DISTRIBUTED]: emitted when a node of the mesh leaves.
 			</description>
 		</signal>
 		<signal name="peer_ready">
 			<param index="0" name="peer" type="int" />
 			<description>
-				Emitted on the server when a client passes the handshake, and on a client when the server accepts it ([param peer] is 1).
+				Emitted on the server when a client passes the handshake, and on a client when the server accepts it ([param peer] is the server). With [constant AUTHORITY_DISTRIBUTED]: emitted when another node of the mesh passes the handshake.
 			</description>
 		</signal>
 		<signal name="prediction_started">
@@ -255,7 +257,7 @@
 		<signal name="rejected">
 			<param index="0" name="reason" type="String" />
 			<description>
-				Emitted on a client when the server refuses it, for example because of a different protocol version or precision build.
+				Emitted on a client when the server refuses it, for example because of a different protocol version (another version of the module) or precision build. With [constant AUTHORITY_DISTRIBUTED]: emitted when another node of the mesh refuses this one, for the same reasons, or because both started with a different [member registry_peer] or [member clock_master].
 			</description>
 		</signal>
 		<signal name="relevance_changed">
@@ -272,6 +274,13 @@
 				Emitted on a client after a rewind: the predicted objects diverged from the server at [param frame], and [param frame_count] frames were simulated again.
 			</description>
 		</signal>
+		<signal name="roles_changed">
+			<param index="0" name="registry_peer" type="int" />
+			<param index="1" name="clock_master" type="int" />
+			<description>
+				With [constant AUTHORITY_DISTRIBUTED]: the registry or the clock master moved to another node, because the project changed it or because its node left (see [member registry_peer]).
+			</description>
+		</signal>
 	</signals>
 	<constants>
 		<constant name="TRUST_UNTRUSTED" value="0" enum="Trust">
@@ -284,7 +293,7 @@
 			One peer simulates every object.
 		</constant>
 		<constant name="AUTHORITY_DISTRIBUTED" value="1" enum="AuthorityMode">
-			Every object has an owner node, and ownership can change.
+			Every object has an owner node, and ownership can change. Every node is trusted (events, ownership, spawns): use it only between servers you control. [member registry_peer] and [member clock_master] move when their node leaves, or when the project changes them.
 		</constant>
 	</constants>
 </class>

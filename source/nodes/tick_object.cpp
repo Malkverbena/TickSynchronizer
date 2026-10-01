@@ -41,8 +41,12 @@ TickNetwork *TickObject::find_network() const {
 	return Object::cast_to<TickNetwork>(get_tree()->get_first_node_in_group(SNAME("_tick_networks")));
 }
 
+TickNetwork *TickObject::get_network() const {
+	return ObjectDB::get_instance<TickNetwork>(network_id);
+}
+
 void TickObject::register_to_network() {
-	if (Engine::get_singleton()->is_editor_hint() || network) {
+	if (Engine::get_singleton()->is_editor_hint() || get_network()) {
 		return;
 	}
 	TickNetwork *found = find_network();
@@ -60,35 +64,36 @@ void TickObject::register_to_network() {
 	}
 
 	sync_path = String(network_root->get_path_to(root));
-	network = found;
-	network->register_object(this);
+	network_id = found->get_instance_id();
+	found->register_object(this);
 }
 
 void TickObject::unregister_from_network() {
+	TickNetwork *network = get_network();
 	if (network) {
 		network->unregister_object(this);
-		network = nullptr;
 	}
+	network_id = ObjectID();
 }
 
 void TickObject::set_controller_peer(int p_peer) {
-	ERR_FAIL_COND_MSG(network, "The controller can't change while the object is registered.");
+	ERR_FAIL_COND_MSG(get_network(), "The controller can't change while the object is registered.");
 	ERR_FAIL_COND_MSG(p_peer <= 0, "The controller peer must be positive (1 is the server).");
 	controller_peer = p_peer;
 }
 
 void TickObject::set_remote_mode(RemoteMode p_mode) {
-	ERR_FAIL_COND_MSG(network, "The remote mode can't change while the object is registered.");
+	ERR_FAIL_COND_MSG(get_network(), "The remote mode can't change while the object is registered.");
 	remote_mode = p_mode;
 }
 
 void TickObject::set_root_path(const NodePath &p_path) {
-	ERR_FAIL_COND_MSG(network, "The root path can't change while the object is registered.");
+	ERR_FAIL_COND_MSG(get_network(), "The root path can't change while the object is registered.");
 	root_path = p_path;
 }
 
 void TickObject::set_network_path(const NodePath &p_path) {
-	ERR_FAIL_COND_MSG(network, "The network path can't change while the object is registered.");
+	ERR_FAIL_COND_MSG(get_network(), "The network path can't change while the object is registered.");
 	network_path = p_path;
 }
 
@@ -115,10 +120,12 @@ PackedStringArray TickObject::get_declared_vars() const {
 }
 
 int TickObject::get_net_id() const {
+	const TickNetwork *network = get_network();
 	return network ? network->get_net_id(this) : 0;
 }
 
 Error TickObject::send_event(const StringName &p_event, const Variant &p_payload, int64_t p_frame, int p_peer) {
+	TickNetwork *network = get_network();
 	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
 	return network->send_object_event(this, p_event, p_payload, p_frame, p_peer);
 }
@@ -136,24 +143,29 @@ void TickObject::on_event(int p_sender, const StringName &p_event, const Variant
 }
 
 int TickObject::get_owner_peer() const {
+	const TickNetwork *network = get_network();
 	return network && network->is_running() ? network->get_object_owner(this) : 0;
 }
 
 bool TickObject::is_owner() const {
+	const TickNetwork *network = get_network();
 	return network && network->is_running() && network->get_object_owner(this) == network->get_local_peer_id();
 }
 
 Error TickObject::request_authority() {
+	TickNetwork *network = get_network();
 	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
 	return network->request_authority(this);
 }
 
 Error TickObject::release_authority(int p_to_peer) {
+	TickNetwork *network = get_network();
 	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
 	return network->release_authority(this, p_to_peer);
 }
 
 Error TickObject::assign_authority(int p_peer) {
+	TickNetwork *network = get_network();
 	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "The object isn't registered in a TickNetwork.");
 	return network->assign_authority(this, p_peer);
 }
@@ -175,6 +187,7 @@ void TickObject::on_relevance_changed(bool p_relevant) {
 }
 
 bool TickObject::is_relevant() const {
+	const TickNetwork *network = get_network();
 	if (network == nullptr || !network->is_running() || network->is_server()) {
 		return true;
 	}
@@ -182,11 +195,13 @@ bool TickObject::is_relevant() const {
 }
 
 Dictionary TickObject::get_state_at(double p_frame) const {
+	const TickNetwork *network = get_network();
 	ERR_FAIL_NULL_V_MSG(network, Dictionary(), "The object isn't registered in a TickNetwork.");
 	return network->get_state_at(this, p_frame);
 }
 
 bool TickObject::is_rewinding() const {
+	const TickNetwork *network = get_network();
 	return network && network->is_rewinding();
 }
 

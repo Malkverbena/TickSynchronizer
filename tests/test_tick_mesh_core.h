@@ -39,6 +39,7 @@ public:
 	int orphaned = 0;
 	int last_orphan_owner = 0;
 	int denied = 0;
+	int roles_changes = 0;
 	LocalVector<AuthMover *> spawned;
 
 	virtual void on_authority_orphaned(TickSyncObject *p_object, int p_last_owner, uint32_t p_last_frame) override {
@@ -47,6 +48,8 @@ public:
 	}
 
 	virtual void on_authority_request_denied(TickSyncObject *p_object) override { denied++; }
+
+	virtual void on_roles_changed(int p_registry, int p_clock_master) override { roles_changes++; }
 
 	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override {
 		AuthMover *mover = memnew(AuthMover(p_spawner + "/" + p_name, p_controller));
@@ -135,6 +138,50 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Objects register once and repli
 	CHECK(Math::abs(world.crates[3]->position.x - world.crates[2]->position.x) < 0.5);
 	CHECK(Math::abs(int32_t(world.cores[3].get_frame() - world.cores[1].get_frame())) <= 3);
 	CHECK(world.cores[1].get_stats().malformed_packets == 0);
+}
+
+// Node 1 registers the objects and drops them, a frame apart; returns how many of them got an id.
+static int churn_objects(MeshWorld &r_world, const LocalVector<AuthMover *> &p_movers) {
+	TickMeshCore &core = r_world.cores[1];
+	for (AuthMover *mover : p_movers) {
+		core.register_object(mover);
+	}
+	r_world.run(1.0 / 60.0);
+	int registered = 0;
+	for (AuthMover *mover : p_movers) {
+		registered += core.get_net_id(mover) != 0 ? 1 : 0;
+		core.unregister_object(mover);
+	}
+	r_world.run(1.0 / 60.0);
+	return registered;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] Registry ids past their quarantine are reused, however many came before") {
+	MeshWorld world(1);
+	world.run(0.2);
+	LocalVector<AuthMover *> movers;
+	for (int i = 0; i < 2000; i++) {
+		movers.push_back(memnew(AuthMover(vformat("churn_%d", i), 1)));
+	}
+
+	// 60,000 objects within the quarantine.
+	int registered = 0;
+	for (int batch = 0; batch < 30; batch++) {
+		registered += churn_objects(world, movers);
+	}
+	CHECK(registered == 60000);
+
+	// Past the quarantine, the registry keeps assigning ids beyond 65,535 objects in total.
+	world.run(5.0);
+	registered = 0;
+	for (int batch = 0; batch < 5; batch++) {
+		registered += churn_objects(world, movers);
+	}
+	CHECK(registered == 10000);
+
+	for (AuthMover *mover : movers) {
+		memdelete(mover);
+	}
 }
 
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A requested object changes owner and keeps its state") {
@@ -239,6 +286,152 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A lost owner orphans its object
 	CHECK(world.cores[2].get_owner(world.crates[2]) == 2);
 	CHECK(world.crates[2]->position.x > frozen + 3.0);
 	CHECK(Math::abs(world.crates[1]->position.x - world.crates[2]->position.x) < 0.5);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] When the registry and clock node is lost, the lowest node takes both roles") {
+	MeshWorld world(3);
+	world.run(2.0);
+	// Node 1 (registry and clock master) owns the crate.
+	CHECK(world.cores[1].request_authority(world.crates[1]) == OK);
+	world.run(0.5);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 1);
+
+	// Node 1's machine is lost.
+	world.network.remove_peer(1);
+	world.run(1.5);
+	for (int i = 2; i <= 3; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 2);
+		CHECK(world.cores[i].get_settings().clock_master == 2);
+		CHECK(world.cores[i].get_roles_term() == 1);
+		CHECK(world.listeners[i].roles_changes == 1);
+		// The new registry orphaned the lost node's crate.
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 0);
+		CHECK(world.listeners[i].orphaned == 1);
+		CHECK(world.listeners[i].last_orphan_owner == 1);
+	}
+
+	// Ownership changes again, through node 2.
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.run(1.0);
+	CHECK(world.cores[2].get_owner(world.crates[2]) == 3);
+	CHECK(world.cores[3].get_owner(world.crates[3]) == 3);
+	// Node 3 follows node 2's clock.
+	CHECK(world.cores[3].get_clock().is_synchronized());
+	const int64_t frames_apart = int64_t(world.cores[2].get_frame()) - int64_t(world.cores[3].get_frame());
+	CHECK((frames_apart >= -3 && frames_apart <= 3));
+	const float before = world.crates[2]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[2]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[2]->position.x - world.crates[3]->position.x) < 0.5);
+	CHECK(world.cores[2].get_stats().malformed_packets == 0);
+	CHECK(world.cores[3].get_stats().malformed_packets == 0);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A request the lost registry didn't answer is denied") {
+	MeshWorld world(3);
+	world.run(2.0);
+	REQUIRE(world.cores[3].get_owner(world.crates[3]) == 2);
+	// Node 3 asks for the crate, and the registry's node is lost with the request on the way.
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.network.remove_peer(1);
+	world.run(1.5);
+	CHECK(world.listeners[3].denied == 1);
+	CHECK(world.cores[3].get_owner(world.crates[3]) == 2);
+	// Asking again works, with the new registry.
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.run(1.0);
+	CHECK(world.cores[3].get_owner(world.crates[3]) == 3);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] The registry and the clock move while the mesh runs") {
+	MeshWorld world(3);
+	world.run(2.0);
+	// Any node moves them, to connected nodes only.
+	ERR_PRINT_OFF;
+	CHECK(world.cores[1].change_roles(4, 3) == ERR_UNAVAILABLE);
+	ERR_PRINT_ON;
+	CHECK(world.cores[2].change_roles(3, 3) == OK);
+	world.run(1.5);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 3);
+		CHECK(world.cores[i].get_settings().clock_master == 3);
+		CHECK(world.listeners[i].roles_changes == 1);
+		CHECK(world.cores[i].get_clock().is_synchronized());
+	}
+
+	// The new registry answers requests.
+	CHECK(world.cores[1].request_authority(world.crates[1]) == OK);
+	world.run(1.0);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 1);
+	}
+	// An object registered afterwards gets one net id everywhere, not one already in use.
+	AuthMover *barrels[4] = {};
+	for (int i = 1; i <= 3; i++) {
+		barrels[i] = memnew(AuthMover("barrel", 1));
+		world.cores[i].register_object(barrels[i]);
+	}
+	world.run(1.0);
+	const uint16_t barrel_id = world.cores[1].get_net_id(barrels[1]);
+	CHECK(barrel_id != 0);
+	CHECK(barrel_id != world.cores[1].get_net_id(world.crates[1]));
+	for (int i = 2; i <= 3; i++) {
+		CHECK(world.cores[i].get_net_id(barrels[i]) == barrel_id);
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+	}
+	for (int i = 1; i <= 3; i++) {
+		world.cores[i].unregister_object(barrels[i]);
+		memdelete(barrels[i]);
+	}
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] The registry's node comes back empty and joins as a plain node") {
+	MeshWorld world(3);
+	world.run(2.0);
+	const uint16_t crate_id = world.cores[2].get_net_id(world.crates[2]);
+	REQUIRE(crate_id != 0);
+	// Node 1 loses its links (its machine restarts), and node 2 takes the roles.
+	world.network.disconnect_peers(1, 2);
+	world.network.disconnect_peers(1, 3);
+	world.run(1.5);
+	REQUIRE(world.cores[3].get_settings().registry_peer == 2);
+	world.cores[1].stop();
+
+	// The restarted process: an empty network on the same id, configured as at the start.
+	TickMeshCore fresh;
+	MeshListener fresh_listener;
+	fresh_listener.core = &fresh;
+	TickEngine::Settings settings;
+	settings.trusted = true;
+	settings.interpolate_remote = false;
+	fresh.set_settings(settings);
+	fresh.set_listener(&fresh_listener);
+	AuthMover *fresh_crate = memnew(AuthMover("crate", 2));
+	fresh.register_object(fresh_crate);
+	REQUIRE(fresh.start(world.transports[1], world.network.get_time_usec()) == OK);
+	world.network.connect_peers(1, 2);
+	world.network.connect_peers(1, 3);
+	for (int f = 0; f < 120; f++) {
+		world.network.process(1.0 / 60.0);
+		const uint64_t now = world.network.get_time_usec();
+		fresh.process(1.0 / 60.0, now);
+		world.cores[2].process(1.0 / 60.0, now);
+		world.cores[3].process(1.0 / 60.0, now);
+	}
+	// It adopted the mesh's roles instead of being the registry again, and its crate has the mesh's id.
+	CHECK(fresh.get_settings().registry_peer == 2);
+	CHECK(fresh.get_settings().clock_master == 2);
+	CHECK(fresh.get_roles_term() == 1);
+	CHECK(fresh.get_net_id(fresh_crate) == crate_id);
+	CHECK(fresh.get_owner(fresh_crate) == 2);
+	CHECK(fresh.get_clock().is_synchronized());
+	for (int i = 2; i <= 3; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 2);
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+	}
+	fresh.stop();
+	fresh.unregister_object(fresh_crate);
+	memdelete(fresh_crate);
 }
 
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Owners approve requests, release objects and forward events") {

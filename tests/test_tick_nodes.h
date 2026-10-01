@@ -229,4 +229,42 @@ TEST_CASE("[Modules][TickSynchronizer][TickObject] Variables can only be declare
 	memdelete(object);
 }
 
+TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickObject] An object outlives a freed network") {
+	TickLocalNetwork local_network;
+	Ref<TickLocalTransport> transport = local_network.add_peer();
+
+	Node *root = memnew(Node);
+	root->set_name("FreedNetworkWorld");
+	TickNetwork *network = memnew(TickNetwork);
+	network->set_name("Net");
+	root->add_child(network);
+	Node2D *body = memnew(Node2D);
+	body->set_name("Body");
+	root->add_child(body);
+	TickObject *object = memnew(TickObject);
+	object->set_network_path(NodePath("../../Net"));
+	body->add_child(object);
+	SceneTree::get_singleton()->get_root()->add_child(root);
+	REQUIRE(network->start(transport) == OK);
+	CHECK(object->get_network() == network);
+	CHECK(object->get_net_id() != 0);
+
+	// The game frees the network, but the objects of the level stay: they're no longer registered anywhere.
+	memdelete(network);
+	CHECK(object->get_network() == nullptr);
+	CHECK(object->get_net_id() == 0);
+	CHECK_FALSE(object->is_owner());
+	ERR_PRINT_OFF;
+	CHECK(object->send_event("ping", Variant(), -1, 0) == ERR_UNCONFIGURED);
+	ERR_PRINT_ON;
+	// Without a network, the settings can change again.
+	object->set_controller_peer(2);
+	CHECK(object->get_controller_peer_id() == 2);
+
+	// Leaving the tree doesn't touch the freed network.
+	root->remove_child(body);
+	memdelete(body);
+	memdelete(root);
+}
+
 } // namespace TestTickNodes

@@ -91,7 +91,8 @@ public:
 	// Writes `p_value`. A value of the wrong type is an error and writes the default value, so the buffer keeps
 	// its layout.
 	void encode(const Variant &p_value, TickDataBuffer &r_buffer) const;
-	// Reads a value; on failure `r_buffer.is_buffer_failed()` is set and the default value is returned.
+	// Reads a value; on failure `r_buffer.is_buffer_failed()` is set and the default value is returned. Decoding
+	// never prints errors: the data may come from an untrusted peer.
 	Variant decode(TickDataBuffer &r_buffer) const;
 
 	// Returns the value as the readers receive it.
@@ -101,6 +102,10 @@ public:
 
 	// Identifies the encoding, to verify that all the peers use the same schema.
 	uint32_t hash(uint32_t p_seed) const;
+
+	// Whether `p_value` can be sent to another peer: no objects (null ones are fine), callables, signals or RIDs,
+	// which only mean something in this process, also inside arrays and dictionaries.
+	static bool is_sendable(const Variant &p_value);
 
 	// Expected `Variant` type, or `Variant::NIL` for `variant()`.
 	Variant::Type get_value_type() const;
