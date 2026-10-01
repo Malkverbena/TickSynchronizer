@@ -168,4 +168,67 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Offset changes are slewed, big
 	CHECK(clock.get_applied_offset_usec(4020000) == offset);
 }
 
+TEST_CASE("[Modules][TickSynchronizer][TickClock] The frames go on from the held timeline when the master changes") {
+	TickClock clock;
+	clock.set_ticks_per_second(100);
+	clock.set_sample_window(8, 3);
+	// Follows a master whose clock is 3 s ahead, with frame 0 at its time 1 s.
+	const int64_t offset = 3000000;
+	clock.set_master_epoch_usec(1000000);
+	for (uint64_t t = 1000000; t < 1300000; t += 100000) {
+		clock.add_sample(t, t + 10000 + uint64_t(offset), t + 20000);
+	}
+	REQUIRE(clock.is_synchronized());
+	const uint64_t change = 2000000;
+	const double frame_at_change = clock.get_master_frame_time(change);
+	CHECK(frame_at_change == doctest::Approx(400.0));
+
+	// Another node is the master now: its clock is 7 s behind this one, and it says the same timeline, 2 ms later.
+	clock.hold(clock.get_timeline_offset_usec(change), clock.get_timeline_epoch_usec());
+	CHECK(clock.is_holding());
+	CHECK(clock.is_synchronized());
+	CHECK(clock.needs_samples());
+	CHECK(clock.get_master_frame_time(change) == doctest::Approx(frame_at_change));
+	CHECK(clock.get_master_frame_time(change + 100000) == doctest::Approx(frame_at_change + 10.0));
+	const int64_t new_offset = -7000000;
+	const int64_t new_epoch = 1000000 - offset + new_offset + 2000;
+	uint64_t t = change + 100000;
+	for (int i = 0; i < 2; i++) {
+		clock.set_master_epoch_usec(new_epoch);
+		clock.add_sample(t, uint64_t(int64_t(t) + 10000 + new_offset), t + 20000);
+		t += 100000;
+	}
+	// Not enough samples yet: still the held timeline.
+	CHECK(clock.is_holding());
+	CHECK(clock.get_master_frame_time(t) == doctest::Approx(frame_at_change + double(t - change) / 10000.0));
+	clock.set_master_epoch_usec(new_epoch);
+	clock.add_sample(t, uint64_t(int64_t(t) + 10000 + new_offset), t + 20000);
+	CHECK_FALSE(clock.is_holding());
+	CHECK_FALSE(clock.needs_samples());
+	// The frames start where they were, and move to the new master's timeline (0.2 frame behind) without going back.
+	const uint64_t switched = t + 20000;
+	const double held = frame_at_change + double(switched - change) / 10000.0;
+	CHECK(clock.get_master_frame_time(switched) == doctest::Approx(held));
+	bool forward = true;
+	double last = clock.get_master_frame_time(switched);
+	for (uint64_t now = switched + 1000; now < switched + 200000; now += 1000) {
+		const double frame = clock.get_master_frame_time(now);
+		forward = forward && frame > last;
+		last = frame;
+	}
+	CHECK(forward);
+	CHECK(clock.get_master_frame_time(switched + 200000) == doctest::Approx(held + 20.0 - 0.2));
+
+	// A new master on a timeline far from the held one: applied at once.
+	clock.hold(clock.get_timeline_offset_usec(switched + 200000), clock.get_timeline_epoch_usec());
+	t = switched + 300000;
+	for (int i = 0; i < 3; i++) {
+		clock.set_master_epoch_usec(new_epoch - 5000000);
+		clock.add_sample(t, uint64_t(int64_t(t) + 10000 + new_offset), t + 20000);
+		t += 100000;
+	}
+	CHECK_FALSE(clock.is_holding());
+	CHECK(clock.get_master_frame_time(t) == doctest::Approx(double(int64_t(t) + new_offset - (new_epoch - 5000000)) / 10000.0));
+}
+
 } // namespace TestTickClock

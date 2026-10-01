@@ -39,6 +39,20 @@ void TickClock::add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, u
 	next_sample = (next_sample + 1) % max_samples;
 	update_estimate();
 
+	if (holding) {
+		if (int(samples.size()) < min_samples) {
+			return;
+		}
+		// The new master's samples are enough: the frames go on from where the held timeline is, on its clock.
+		holding = false;
+		master_epoch_usec = pending_epoch_usec;
+		const int64_t continued = held_offset_usec - held_epoch_usec + master_epoch_usec;
+		const int64_t apart = offset_usec - continued;
+		slew_from_usec = (apart > STEP_USEC || apart < -STEP_USEC) ? offset_usec : continued;
+		slew_start_usec = p_local_receive_usec;
+		return;
+	}
+
 	const int64_t difference = offset_usec - applied;
 	slew_from_usec = (!was_synchronized || difference > STEP_USEC || difference < -STEP_USEC) ? offset_usec : applied;
 	slew_start_usec = p_local_receive_usec;
@@ -51,10 +65,28 @@ void TickClock::clear_samples() {
 	rtt_usec = 0;
 	slew_from_usec = 0;
 	slew_start_usec = 0;
+	holding = false;
 }
 
 bool TickClock::is_synchronized() const {
-	return master || int(samples.size()) >= min_samples;
+	return master || holding || int(samples.size()) >= min_samples;
+}
+
+void TickClock::hold(int64_t p_offset_usec, int64_t p_epoch_usec) {
+	ERR_FAIL_COND_MSG(master, "The clock master doesn't follow a timeline.");
+	clear_samples();
+	holding = true;
+	held_offset_usec = p_offset_usec;
+	held_epoch_usec = p_epoch_usec;
+	pending_epoch_usec = p_epoch_usec;
+}
+
+void TickClock::set_master_epoch_usec(int64_t p_master_epoch_usec) {
+	if (holding) {
+		pending_epoch_usec = p_master_epoch_usec;
+		return;
+	}
+	master_epoch_usec = p_master_epoch_usec;
 }
 
 void TickClock::update_estimate() {
@@ -124,15 +156,16 @@ void TickClock::set_ticks_per_second(int p_ticks_per_second) {
 
 uint32_t TickClock::get_master_frame(uint64_t p_local_usec) const {
 	// Signed, so a local time before the master's clock started doesn't wrap around.
-	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_at(p_local_usec));
-	if (master_usec < master_epoch_usec) {
+	const int64_t master_usec = int64_t(p_local_usec) + get_timeline_offset_usec(p_local_usec);
+	const int64_t epoch = get_timeline_epoch_usec();
+	if (master_usec < epoch) {
 		return 0;
 	}
 	// Frame indices wrap around, like the ones of `TickFixedStepper`.
-	return uint32_t(uint64_t(master_usec - master_epoch_usec) * uint64_t(ticks_per_second) / 1000000);
+	return uint32_t(uint64_t(master_usec - epoch) * uint64_t(ticks_per_second) / 1000000);
 }
 
 double TickClock::get_master_frame_time(uint64_t p_local_usec) const {
-	const int64_t master_usec = int64_t(p_local_usec) + (master ? 0 : offset_at(p_local_usec));
-	return double(master_usec - master_epoch_usec) * double(ticks_per_second) / 1000000.0;
+	const int64_t master_usec = int64_t(p_local_usec) + get_timeline_offset_usec(p_local_usec);
+	return double(master_usec - get_timeline_epoch_usec()) * double(ticks_per_second) / 1000000.0;
 }

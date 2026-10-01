@@ -66,6 +66,7 @@ public:
 	virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) override;
 	virtual void on_host_migrated(int p_old_host, int p_new_host) override;
 	virtual void on_roles_changed(int p_registry, int p_clock_master) override;
+	virtual void on_role_quorum_changed(bool p_has_quorum) override;
 
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const;
@@ -102,6 +103,13 @@ public:
 	int get_registry_peer() const;
 	void set_clock_master(int p_peer);
 	int get_clock_master() const;
+	// Moves both roles at once (ADR-074).
+	Error set_roles(int p_registry_peer, int p_clock_master);
+	void set_role_candidates(const PackedInt32Array &p_candidates);
+	PackedInt32Array get_role_candidates() const;
+	void set_role_quorum(int p_nodes);
+	int get_role_quorum() const;
+	bool has_role_quorum() const;
 	void set_keyframe_interval(int p_ticks);
 	int get_keyframe_interval() const;
 	void set_root_path(const NodePath &p_path);

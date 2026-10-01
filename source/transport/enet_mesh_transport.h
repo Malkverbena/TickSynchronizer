@@ -59,6 +59,7 @@ private:
 	HashMap<int, MeshNode> nodes;
 	HashMap<ObjectID, int> ids_by_peer;
 	double retry_interval = 1.0;
+	double node_timeout = 5.0;
 
 	LocalVector<Event> events;
 	LocalVector<Packet> packets;
@@ -72,6 +73,7 @@ private:
 	void flush_simulated();
 	void connect_pending_nodes(uint64_t p_now_usec);
 	void on_connected(int p_id, const Ref<RefCounted> &p_peer);
+	void apply_node_timeout(const Ref<RefCounted> &p_peer);
 	void on_disconnected(const Ref<RefCounted> &p_peer);
 	void service_host(const Ref<RefCounted> &p_host, bool p_accepts_incoming);
 	void close_node(MeshNode &r_node);
@@ -94,6 +96,9 @@ public:
 
 	void set_retry_interval(double p_seconds);
 	double get_retry_interval() const { return retry_interval; }
+	// Seconds without an answer before a node is considered gone (ENet's own limits vary from 5 to 30 seconds).
+	void set_node_timeout(double p_seconds);
+	double get_node_timeout() const { return node_timeout; }
 	int get_local_port() const;
 
 	// TickTransport.

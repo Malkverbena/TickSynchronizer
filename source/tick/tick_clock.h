@@ -14,6 +14,9 @@
 // The estimate changes whenever a sample with a lower round trip arrives or the best one leaves the window. The frames
 // don't follow it at once: once synchronized, the applied offset moves toward the estimate at 5% of the elapsed time,
 // so the master frame never jumps nor goes back (ADR-071). A difference above 100 ms is applied at once.
+//
+// When another node becomes the master, `hold()` keeps the frames going on the timeline followed until then while the
+// samples of the new master arrive; the frames then move to its estimate from where they were (ADR-074).
 class TickClock {
 	struct Sample {
 		uint64_t rtt_usec = 0;
@@ -36,6 +39,13 @@ class TickClock {
 	int ticks_per_second = 60;
 	// Master time of frame 0; negative when the timeline started before the master's clock (another process).
 	int64_t master_epoch_usec = 0;
+
+	// The master changed: until the new one's samples are enough, the frames come from the previous timeline (its
+	// offset and epoch); the new master's epoch waits in `pending_epoch_usec`.
+	bool holding = false;
+	int64_t held_offset_usec = 0;
+	int64_t held_epoch_usec = 0;
+	int64_t pending_epoch_usec = 0;
 
 	void update_estimate();
 	// The offset applied at the given local time.
@@ -60,7 +70,19 @@ public:
 	void clear_samples();
 	int get_sample_count() const { return int(samples.size()); }
 
+	// The frames are known: this is the master, the samples are enough, or the previous timeline is held.
 	bool is_synchronized() const;
+	// More samples are needed soon: not synchronized yet, or holding the previous timeline.
+	bool needs_samples() const { return !master && int(samples.size()) < min_samples; }
+
+	// The master is another node now (its clock has another origin): drops the samples and keeps the frames on the
+	// timeline given by `p_offset_usec` and `p_epoch_usec` until the new master's samples are enough. Then the applied
+	// offset starts where the held timeline was and moves toward the new estimate.
+	void hold(int64_t p_offset_usec, int64_t p_epoch_usec);
+	bool is_holding() const { return holding; }
+	// The timeline the frames come from at the given local time: the held one, or the applied offset and the epoch.
+	int64_t get_timeline_offset_usec(uint64_t p_local_usec) const { return holding ? held_offset_usec : (master ? 0 : offset_at(p_local_usec)); }
+	int64_t get_timeline_epoch_usec() const { return holding ? held_epoch_usec : master_epoch_usec; }
 
 	// Estimated `master time - local time`, from the sample with the lowest round trip, which has the least
 	// queuing delay. The frames use the applied offset, which moves toward it.
@@ -78,7 +100,8 @@ public:
 	// Frame timing: frame 0 starts at `p_master_epoch_usec` (master time).
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const { return ticks_per_second; }
-	void set_master_epoch_usec(int64_t p_master_epoch_usec) { master_epoch_usec = p_master_epoch_usec; }
+	// While the previous timeline is held, the epoch is the new master's: it applies with its samples.
+	void set_master_epoch_usec(int64_t p_master_epoch_usec);
 	int64_t get_master_epoch_usec() const { return master_epoch_usec; }
 
 	// Frame the master is processing at the given local time.

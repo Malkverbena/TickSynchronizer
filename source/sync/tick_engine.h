@@ -47,6 +47,8 @@ public:
 		virtual void on_host_migrated(int p_old_host, int p_new_host) {}
 		// Mesh: the registry or the clock master moved to another node (ADR-073).
 		virtual void on_roles_changed(int p_registry, int p_clock_master) {}
+		// Mesh: this node got or lost the nodes it needs to take or keep the roles (`role_quorum`, ADR-074).
+		virtual void on_role_quorum_changed(bool p_has_quorum) {}
 	};
 
 	struct Settings {
@@ -58,6 +60,11 @@ public:
 		// (ADR-042).
 		int registry_peer = 1;
 		int clock_master = 1;
+		// Distributed authority (ADR-074): the nodes that take the registry and the clock when their node leaves, by
+		// order of preference (empty: any node, the lowest id first), and how many nodes, this one included, a node
+		// must be connected to in order to take or keep them (0: no check).
+		Vector<int> role_candidates;
+		int role_quorum = 0;
 		// When `false`, the remote objects get the latest state without interpolation (proxies on servers that
 		// relay them to their own clients, ADR-039).
 		bool interpolate_remote = true;
@@ -139,7 +146,7 @@ public:
 	virtual void despawn(uint32_t p_spawn_id) = 0;
 	virtual uint32_t get_next_spawn_id() const = 0;
 	// Whether removing the node of `p_spawn_id` despawns it on the others: this peer spawned it, or took it over with
-	// the authority after a host migration (ADR-062).
+	// the authority after a host migration (ADR-062) or, as the registry of a mesh, from a node that left (ADR-074).
 	virtual bool owns_spawn(uint32_t p_spawn_id) const = 0;
 
 	virtual Error send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) = 0;
@@ -152,6 +159,8 @@ public:
 	virtual Error assign_authority(TickSyncObject *p_object, int p_peer) { return ERR_UNAVAILABLE; }
 	// Mesh: moves the registry and the clock master to other connected nodes while it runs.
 	virtual Error change_roles(int p_registry, int p_clock_master) { return ERR_UNAVAILABLE; }
+	// Mesh: whether this node is connected to enough nodes to take or keep the roles (`role_quorum`).
+	virtual bool has_role_quorum() const { return true; }
 
 	// Interest (ADR-053). Server: `p_peer` 0 means every client.
 	virtual Error set_relevant(TickSyncObject *p_object, int p_peer, bool p_relevant) { return ERR_UNAVAILABLE; }

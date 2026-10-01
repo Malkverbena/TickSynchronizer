@@ -6,7 +6,9 @@
 
 // 2: interest (`RELEVANCE`) and snapshots split in parts (F8).
 // 3: the roles of a distributed mesh move (`ROLES`, `REGISTRY_REPORT`, the roles in the mesh hello; ADR-073).
-static constexpr uint16_t TICK_PROTOCOL_VERSION = 3;
+// 4: role candidates, confirmed losses and inherited spawns in a distributed mesh (`ROLE_STATUS`, the process and the
+//    candidates in the mesh hello, who spawned in `SPAWN`; ADR-074).
+static constexpr uint16_t TICK_PROTOCOL_VERSION = 4;
 
 // Frame index meaning "none".
 static constexpr uint32_t TICK_FRAME_NONE = UINT32_MAX;
@@ -48,6 +50,8 @@ enum TickMessageType {
 	// Roles of a distributed mesh (ADR-073).
 	TICK_MESSAGE_ROLES,
 	TICK_MESSAGE_REGISTRY_REPORT,
+	// What a node sees of the nodes with the roles (ADR-074).
+	TICK_MESSAGE_ROLE_STATUS,
 };
 
 enum TickChannel {

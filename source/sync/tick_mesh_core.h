@@ -17,8 +17,13 @@
 //   with another version than the current one is discarded (ADR-041).
 // - When an owner leaves, the registry marks its objects as orphaned; the project decides who adopts them.
 // - The nodes follow the timeline of the clock master (`clock_master`, ADR-042).
-// - Both roles move while the mesh runs (ADR-073): the project changes them, or the lowest node still in the mesh
-//   takes them when their node leaves. A registry that takes over merges every node's view of the objects first.
+// - Both roles move while the mesh runs (ADR-073): the project changes them, or another node takes them when their
+//   node leaves. A registry that takes over merges every node's view of the objects first.
+// - Who takes them (ADR-074): the first of `role_candidates` in the mesh (any node, the lowest id first, without
+//   candidates), once no node it's connected to still sees the role's node, and only while connected to
+//   `role_quorum` nodes. A role belongs to a process of a node, not just to its id: a node with a role that restarts
+//   lost what it knew, and takes the role again like any successor, from the other nodes' views and their timeline.
+// - The spawns of a node that left belong to the registry.
 //
 // Meant for trusted networks of servers: there's no prediction, and forwarded events carry their origin (ADR-044).
 class TickMeshCore : public TickEngine {
@@ -82,10 +87,41 @@ private:
 		uint64_t pending_timeout_usec = 0;
 	};
 
+	// What a node says about the process with a role (ADR-074).
+	enum RoleView {
+		// It doesn't know which process has the role yet (it never met the role's node).
+		ROLE_VIEW_UNKNOWN,
+		// Connected to it (or it's this process).
+		ROLE_VIEW_SEEN,
+		// Not connected to it: it left, or another process took the node's place.
+		ROLE_VIEW_LOST,
+	};
+
+	struct RoleStatus {
+		// The roles the views are about.
+		uint32_t term = 0;
+		int registry = 0;
+		int clock = 0;
+		// For each role: the process (`boot_id`) the sender knows as its holder, and whether it sees it.
+		int registry_view = ROLE_VIEW_UNKNOWN;
+		uint32_t registry_boot = 0;
+		int clock_view = ROLE_VIEW_UNKNOWN;
+		uint32_t clock_boot = 0;
+
+		bool operator==(const RoleStatus &p_other) const {
+			return term == p_other.term && registry == p_other.registry && clock == p_other.clock && registry_view == p_other.registry_view && registry_boot == p_other.registry_boot && clock_view == p_other.clock_view && clock_boot == p_other.clock_boot;
+		}
+	};
+
 	struct PeerState {
 		bool ready = false;
 		bool rejected = false;
 		uint64_t reject_usec = 0;
+		// The process of the node, from its hello.
+		uint32_t boot = 0;
+		// What it last said about the roles.
+		bool status_known = false;
+		RoleStatus status;
 	};
 
 	struct PendingEvent {
@@ -106,6 +142,10 @@ private:
 		String name;
 		int controller = 0;
 		Variant data;
+		// The node that spawned it.
+		int origin = 0;
+		// That node left: the spawn belongs to the registry (ADR-074).
+		bool adopted = false;
 	};
 
 	// Marks a call into the engine that may run game code (ticks, events, the listener). Game code may stop the
@@ -148,7 +188,8 @@ private:
 	uint16_t next_net_id = 1;
 	HashMap<uint16_t, uint32_t> quarantined_ids;
 
-	// Spawns made by this node.
+	// The spawns of every node, in the order they were known here. Each node sends its own to the nodes that join; the
+	// registry sends the ones of the nodes that left.
 	HashMap<uint32_t, SpawnRecord> spawns;
 	LocalVector<uint32_t> spawn_order;
 	uint32_t next_spawn_counter = 1;
@@ -159,9 +200,24 @@ private:
 	// Roles (ADR-073). An assignment wins over another with a higher term; with the same term, the one with the lower
 	// registry id, then the lower clock master id.
 	uint32_t roles_term = 0;
-	// The node with a role left: the lowest node still here takes it.
-	bool registry_vacant = false;
-	bool clock_vacant = false;
+	// This process, in the hellos: a node that restarts is another process with the same id.
+	uint32_t boot_id = 0;
+	// The process that holds each role (0 until this node learns it): the roles are lost while this node isn't
+	// connected to that process, and then it asks nothing of the role's node and takes nothing from it.
+	uint32_t registry_boot = 0;
+	uint32_t clock_boot = 0;
+	// The views last sent to the other nodes; sent again when they change, and to the nodes that join.
+	bool status_sent = false;
+	RoleStatus sent_status;
+	// The mesh's timeline as another node last told it, for a clock master that doesn't know it (it restarted).
+	bool reference_valid = false;
+	double reference_frame = 0.0;
+	uint64_t reference_usec = 0;
+	// Whether this node's frames come from the mesh's timeline (not from a process that restarted as the clock).
+	bool timeline_trusted = false;
+	bool had_quorum = true;
+	// Registry: nodes left while it couldn't act (no quorum); their objects are orphaned when it can again.
+	bool registry_orphan_check = false;
 	// A registry that took over merges the other nodes' views until they all reported or the settle time passed; the
 	// messages for the registry wait meanwhile.
 	bool registry_settling = false;
@@ -175,6 +231,12 @@ private:
 
 	bool is_registry() const { return local_id == settings.registry_peer; }
 	bool is_clock_master() const { return local_id == settings.clock_master; }
+	// The registry answers: it finished taking over, its role isn't in doubt and it has its quorum. Otherwise the
+	// messages for it wait.
+	bool registry_can_act() const { return is_registry() && !registry_settling && registry_boot == boot_id && has_role_quorum(); }
+	// The process with the registry is this one or connected.
+	bool is_registry_reachable() const { return get_role_view(settings.registry_peer, registry_boot) == ROLE_VIEW_SEEN; }
+	int get_ready_count() const;
 	double get_tick_delta() const { return 1.0 / double(settings.ticks_per_second); }
 	bool is_peer_ready(int p_peer) const;
 	// Running, and not asked to stop.
@@ -226,11 +288,31 @@ private:
 
 	// Roles.
 	static bool roles_beat(uint32_t p_term, int p_registry, int p_clock, uint32_t p_other_term, int p_other_registry, int p_other_clock);
-	// `p_resync`: this node joined a mesh whose registry isn't the one it knew, so its view of the objects starts over.
-	void adopt_roles(uint32_t p_term, int p_registry, int p_clock, bool p_resync);
-	void send_roles(int p_peer, uint32_t p_term, int p_registry, int p_clock);
+	// `p_resync`: this node joined a mesh that moved its roles meanwhile, so its view of the objects starts over.
+	void adopt_roles(uint32_t p_term, int p_registry, int p_clock, uint32_t p_registry_boot, uint32_t p_clock_boot, bool p_resync);
+	void send_roles(int p_peer, uint32_t p_term, int p_registry, int p_clock, uint32_t p_registry_boot, uint32_t p_clock_boot);
+	// The process of a node (this one, or a connected one); 0 if unknown.
+	uint32_t get_node_boot(int p_node) const;
+	// Forgets what this node knew about the objects: it learns them again from the registry.
+	void forget_objects();
 	void handle_roles(int p_peer, TickDataBuffer &p_message);
+	// Whether the process with a role is this one or connected to it.
+	bool is_role_process_present(int p_node, uint32_t p_boot) const;
+	int get_role_view(int p_node, uint32_t p_boot) const;
+	bool is_registry_lost() const { return get_role_view(settings.registry_peer, registry_boot) == ROLE_VIEW_LOST; }
+	bool is_clock_lost() const { return get_role_view(settings.clock_master, clock_boot) == ROLE_VIEW_LOST; }
+	// The node that should take a lost role, or 0 if none of the candidates is in the mesh.
+	int get_role_successor() const;
 	void fill_vacant_roles();
+	// Another node, with the same roles, knows other processes as their holders.
+	void learn_role_boots(uint32_t p_registry_boot, uint32_t p_clock_boot);
+	RoleStatus make_role_status() const;
+	void send_role_status(int p_peer, const RoleStatus &p_status);
+	void handle_role_status(int p_peer, TickDataBuffer &p_message);
+	// After the events and the packets of a step: tells the other nodes what changed, and acts on what they said.
+	void update_roles();
+	void registry_defer(const TickTransport::Packet &p_packet);
+	void registry_resume();
 	void send_registry_report();
 	void handle_registry_report(int p_peer, TickDataBuffer &p_message);
 	void registry_take_over();
@@ -278,8 +360,8 @@ public:
 	virtual uint32_t spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override;
 	virtual void despawn(uint32_t p_spawn_id) override;
 	virtual uint32_t get_next_spawn_id() const override;
-	// Only the spawns of this node are recorded here.
-	virtual bool owns_spawn(uint32_t p_spawn_id) const override { return running && spawns.has(p_spawn_id); }
+	// This node's spawns, and for the registry the ones of the nodes that left.
+	virtual bool owns_spawn(uint32_t p_spawn_id) const override;
 
 	// Object events go to the target's current owner (forwarded if it changed on the way); events without target
 	// go to `p_peer`, or every node with 0.
@@ -295,5 +377,6 @@ public:
 	uint32_t get_version(const TickSyncObject *p_object) const;
 	// Moves the registry and the clock master to connected nodes (this one included) while the mesh runs.
 	virtual Error change_roles(int p_registry, int p_clock_master) override;
+	virtual bool has_role_quorum() const override;
 	uint32_t get_roles_term() const { return roles_term; }
 };

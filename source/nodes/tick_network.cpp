@@ -128,6 +128,10 @@ void TickNetwork::on_roles_changed(int p_registry, int p_clock_master) {
 	emit_signal(SNAME("roles_changed"), p_registry, p_clock_master);
 }
 
+void TickNetwork::on_role_quorum_changed(bool p_has_quorum) {
+	emit_signal(SNAME("role_quorum_changed"), p_has_quorum);
+}
+
 void TickNetwork::on_host_migrated(int p_old_host, int p_new_host) {
 	emit_signal(SNAME("host_migrated"), p_old_host, p_new_host);
 }
@@ -241,6 +245,43 @@ void TickNetwork::set_clock_master(int p_peer) {
 
 int TickNetwork::get_clock_master() const {
 	return running ? engine->get_settings().clock_master : settings.clock_master;
+}
+
+Error TickNetwork::set_roles(int p_registry_peer, int p_clock_master) {
+	ERR_FAIL_COND_V_MSG(p_registry_peer <= 0 || p_clock_master <= 0, ERR_INVALID_PARAMETER, "The registry peer and the clock master must be positive.");
+	if (running) {
+		ERR_FAIL_COND_V_MSG(authority_mode != AUTHORITY_DISTRIBUTED, ERR_UNAVAILABLE, "Only a network with distributed authority moves its roles while it runs.");
+		return engine->change_roles(p_registry_peer, p_clock_master);
+	}
+	settings.registry_peer = p_registry_peer;
+	settings.clock_master = p_clock_master;
+	return OK;
+}
+
+void TickNetwork::set_role_candidates(const PackedInt32Array &p_candidates) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	for (const int candidate : p_candidates) {
+		ERR_FAIL_COND_MSG(candidate <= 0, "The role candidates must be positive.");
+	}
+	settings.role_candidates = p_candidates;
+}
+
+PackedInt32Array TickNetwork::get_role_candidates() const {
+	return settings.role_candidates;
+}
+
+void TickNetwork::set_role_quorum(int p_nodes) {
+	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
+	ERR_FAIL_COND_MSG(p_nodes < 0, "The role quorum can't be negative.");
+	settings.role_quorum = p_nodes;
+}
+
+int TickNetwork::get_role_quorum() const {
+	return settings.role_quorum;
+}
+
+bool TickNetwork::has_role_quorum() const {
+	return !running || engine->has_role_quorum();
 }
 
 void TickNetwork::set_keyframe_interval(int p_ticks) {
@@ -553,6 +594,12 @@ void TickNetwork::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_registry_peer"), &TickNetwork::get_registry_peer);
 	ClassDB::bind_method(D_METHOD("set_clock_master", "peer"), &TickNetwork::set_clock_master);
 	ClassDB::bind_method(D_METHOD("get_clock_master"), &TickNetwork::get_clock_master);
+	ClassDB::bind_method(D_METHOD("set_roles", "registry_peer", "clock_master"), &TickNetwork::set_roles);
+	ClassDB::bind_method(D_METHOD("set_role_candidates", "candidates"), &TickNetwork::set_role_candidates);
+	ClassDB::bind_method(D_METHOD("get_role_candidates"), &TickNetwork::get_role_candidates);
+	ClassDB::bind_method(D_METHOD("set_role_quorum", "nodes"), &TickNetwork::set_role_quorum);
+	ClassDB::bind_method(D_METHOD("get_role_quorum"), &TickNetwork::get_role_quorum);
+	ClassDB::bind_method(D_METHOD("has_role_quorum"), &TickNetwork::has_role_quorum);
 	ClassDB::bind_method(D_METHOD("set_default_relevance", "relevant"), &TickNetwork::set_default_relevance);
 	ClassDB::bind_method(D_METHOD("get_default_relevance"), &TickNetwork::get_default_relevance);
 	ClassDB::bind_method(D_METHOD("set_interest_interval", "ticks"), &TickNetwork::set_interest_interval);
@@ -608,6 +655,8 @@ void TickNetwork::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "authority_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_authority_peer", "get_authority_peer");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "registry_peer", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_registry_peer", "get_registry_peer");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "clock_master", PROPERTY_HINT_RANGE, "1,2147483647,1"), "set_clock_master", "get_clock_master");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "role_candidates"), "set_role_candidates", "get_role_candidates");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "role_quorum", PROPERTY_HINT_RANGE, "0,4096,1"), "set_role_quorum", "get_role_quorum");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "keyframe_interval", PROPERTY_HINT_RANGE, "1,600,1"), "set_keyframe_interval", "get_keyframe_interval");
 	ADD_GROUP("Interest", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "default_relevance"), "set_default_relevance", "get_default_relevance");
@@ -636,6 +685,7 @@ void TickNetwork::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("authority_request_denied", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject")));
 	ADD_SIGNAL(MethodInfo("host_migrated", PropertyInfo(Variant::INT, "old_host"), PropertyInfo(Variant::INT, "new_host")));
 	ADD_SIGNAL(MethodInfo("roles_changed", PropertyInfo(Variant::INT, "registry_peer"), PropertyInfo(Variant::INT, "clock_master")));
+	ADD_SIGNAL(MethodInfo("role_quorum_changed", PropertyInfo(Variant::BOOL, "has_quorum")));
 	ADD_SIGNAL(MethodInfo("relevance_changed", PropertyInfo(Variant::OBJECT, "object", PROPERTY_HINT_RESOURCE_TYPE, "TickObject"), PropertyInfo(Variant::BOOL, "relevant")));
 	ADD_SIGNAL(MethodInfo("event_received", PropertyInfo(Variant::INT, "sender"), PropertyInfo(Variant::STRING_NAME, "event"), PropertyInfo(Variant::NIL, "payload", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NIL_IS_VARIANT), PropertyInfo(Variant::INT, "frame")));
 }

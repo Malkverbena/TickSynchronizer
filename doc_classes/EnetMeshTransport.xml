@@ -72,6 +72,9 @@
 		</method>
 	</methods>
 	<members>
+		<member name="node_timeout" type="float" setter="set_node_timeout" getter="get_node_timeout" default="5.0">
+			Seconds without an answer before a node is considered gone; its connection is then closed, and tried again every [member retry_interval]. ENet checks it when it resends, so a node that crashes may take up to about twice this long to be noticed, while a node that closes its connections is noticed at once. A lower value makes a mesh with distributed authority give the roles of a lost node to its successor sooner (see [member TickNetwork.registry_peer]), but drops a node that hangs for that long.
+		</member>
 		<member name="retry_interval" type="float" setter="set_retry_interval" getter="get_retry_interval" default="1.0">
 			Seconds between connection attempts to a node that isn't connected.
 		</member>

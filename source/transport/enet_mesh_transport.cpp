@@ -102,6 +102,24 @@ void EnetMeshTransport::set_retry_interval(double p_seconds) {
 	retry_interval = p_seconds;
 }
 
+void EnetMeshTransport::apply_node_timeout(const Ref<RefCounted> &p_peer) {
+	ENetPacketPeer *peer = as_peer(p_peer);
+	if (peer) {
+		const int timeout_ms = int(node_timeout * 1000.0);
+		peer->set_timeout(32, timeout_ms, timeout_ms);
+	}
+}
+
+void EnetMeshTransport::set_node_timeout(double p_seconds) {
+	ERR_FAIL_COND_MSG(!(p_seconds > 0.0), "The node timeout must be positive.");
+	node_timeout = p_seconds;
+	for (const KeyValue<int, MeshNode> &E : nodes) {
+		if (E.value.connected) {
+			apply_node_timeout(E.value.peer);
+		}
+	}
+}
+
 int EnetMeshTransport::get_local_port() const {
 	ENetConnection *connection = as_host(host);
 	return connection ? connection->get_local_port() : 0;
@@ -261,6 +279,7 @@ void EnetMeshTransport::on_connected(int p_id, const Ref<RefCounted> &p_peer) {
 	MeshNode &node = nodes[p_id];
 	node.peer = p_peer;
 	node.connected = true;
+	apply_node_timeout(p_peer);
 	ids_by_peer.insert(p_peer->get_instance_id(), p_id);
 	Event event;
 	event.type = EVENT_PEER_CONNECTED;
@@ -411,9 +430,12 @@ void EnetMeshTransport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_node_simulated_latency", "id"), &EnetMeshTransport::get_node_simulated_latency);
 	ClassDB::bind_method(D_METHOD("set_retry_interval", "seconds"), &EnetMeshTransport::set_retry_interval);
 	ClassDB::bind_method(D_METHOD("get_retry_interval"), &EnetMeshTransport::get_retry_interval);
+	ClassDB::bind_method(D_METHOD("set_node_timeout", "seconds"), &EnetMeshTransport::set_node_timeout);
+	ClassDB::bind_method(D_METHOD("get_node_timeout"), &EnetMeshTransport::get_node_timeout);
 	ClassDB::bind_method(D_METHOD("get_local_port"), &EnetMeshTransport::get_local_port);
 
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "retry_interval", PROPERTY_HINT_RANGE, "0.05,30,0.01,suffix:s"), "set_retry_interval", "get_retry_interval");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "node_timeout", PROPERTY_HINT_RANGE, "0.1,60,0.1,suffix:s"), "set_node_timeout", "get_node_timeout");
 
 	BIND_ENUM_CONSTANT(COMPRESSION_NONE);
 	BIND_ENUM_CONSTANT(COMPRESSION_RANGE_CODER);

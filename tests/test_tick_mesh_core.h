@@ -40,6 +40,9 @@ public:
 	int last_orphan_owner = 0;
 	int denied = 0;
 	int roles_changes = 0;
+	int quorum_changes = 0;
+	bool has_quorum = true;
+	int despawned = 0;
 	LocalVector<AuthMover *> spawned;
 
 	virtual void on_authority_orphaned(TickSyncObject *p_object, int p_last_owner, uint32_t p_last_frame) override {
@@ -50,6 +53,13 @@ public:
 	virtual void on_authority_request_denied(TickSyncObject *p_object) override { denied++; }
 
 	virtual void on_roles_changed(int p_registry, int p_clock_master) override { roles_changes++; }
+
+	virtual void on_role_quorum_changed(bool p_has_quorum) override {
+		quorum_changes++;
+		has_quorum = p_has_quorum;
+	}
+
+	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override { despawned++; }
 
 	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override {
 		AuthMover *mover = memnew(AuthMover(p_spawner + "/" + p_name, p_controller));
@@ -69,19 +79,23 @@ public:
 // first by node 2.
 struct MeshWorld {
 	TickLocalNetwork network;
-	Ref<TickLocalTransport> transports[5];
-	TickMeshCore cores[5];
-	MeshListener listeners[5];
-	AuthMover *crates[5] = {};
+	Ref<TickLocalTransport> transports[6];
+	TickMeshCore cores[6];
+	MeshListener listeners[6];
+	AuthMover *crates[6] = {};
 	int count = 0;
+	TickEngine::Settings settings;
+	// Another engine stepped with the world's: a node's process that restarted (see `RestartedNode`).
+	TickMeshCore *extra = nullptr;
 
-	explicit MeshWorld(int p_nodes, bool p_connect_all = true) {
+	explicit MeshWorld(int p_nodes, bool p_connect_all = true, const Vector<int> &p_candidates = Vector<int>(), int p_quorum = 0) {
 		count = p_nodes;
 		network.set_seed(5);
 		network.set_latency_usec(20000);
-		TickEngine::Settings settings;
 		settings.trusted = true;
 		settings.interpolate_remote = false;
+		settings.role_candidates = p_candidates;
+		settings.role_quorum = p_quorum;
 		for (int i = 1; i <= count; i++) {
 			transports[i] = network.add_peer();
 			cores[i].set_settings(settings);
@@ -111,6 +125,26 @@ struct MeshWorld {
 					cores[i].process(1.0 / 60.0, network.get_time_usec());
 				}
 			}
+			if (extra && extra->is_running()) {
+				extra->process(1.0 / 60.0, network.get_time_usec());
+			}
+		}
+	}
+
+	// Cuts every link of a node (its machine is gone, or cut off from the others).
+	void isolate(int p_node) {
+		for (int i = 1; i <= count; i++) {
+			if (i != p_node) {
+				network.disconnect_peers(p_node, i);
+			}
+		}
+	}
+
+	void reconnect(int p_node) {
+		for (int i = 1; i <= count; i++) {
+			if (i != p_node) {
+				network.connect_peers(p_node, i);
+			}
 		}
 	}
 
@@ -118,6 +152,34 @@ struct MeshWorld {
 		p_message.dry();
 		const LocalVector<uint8_t> &bytes = p_message.get_buffer().get_bytes();
 		transports[p_from]->send(p_to, p_channel, p_mode, bytes.ptr(), int(bytes.size()));
+	}
+};
+
+// The process of a node after a restart: an empty engine on the node's id, configured like the others, with its own
+// "crate". The world steps it once it started.
+struct RestartedNode {
+	TickMeshCore core;
+	MeshListener listener;
+	AuthMover *crate = nullptr;
+	MeshWorld *world = nullptr;
+
+	RestartedNode(MeshWorld &r_world, int p_node) {
+		world = &r_world;
+		r_world.cores[p_node].stop();
+		listener.core = &core;
+		core.set_settings(r_world.settings);
+		core.set_listener(&listener);
+		crate = memnew(AuthMover("crate", 2));
+		core.register_object(crate);
+		REQUIRE(core.start(r_world.transports[p_node], r_world.network.get_time_usec()) == OK);
+		r_world.extra = &core;
+	}
+
+	~RestartedNode() {
+		world->extra = nullptr;
+		core.stop();
+		core.unregister_object(crate);
+		memdelete(crate);
 	}
 };
 
@@ -511,6 +573,346 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Any node spawns, and late nodes
 
 	world.cores[3].unregister_object(rock);
 	memdelete(rock);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] The first candidate in the mesh takes the roles, not the lowest node") {
+	// Node 1 has the roles and node 3 is its reserve; nodes 2 and 4 never take them.
+	Vector<int> candidates;
+	candidates.push_back(1);
+	candidates.push_back(3);
+	MeshWorld world(4, true, candidates);
+	world.run(2.0);
+	world.network.remove_peer(1);
+	world.run(1.5);
+	for (int i = 2; i <= 4; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 3);
+		CHECK(world.cores[i].get_settings().clock_master == 3);
+		CHECK(world.cores[i].get_roles_term() == 1);
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 2);
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+	}
+	// The reserve is lost too: no candidate is left, and the roles stay where they were.
+	world.network.remove_peer(3);
+	world.run(1.5);
+	for (int i = 2; i <= 4; i += 2) {
+		CHECK(world.cores[i].get_settings().registry_peer == 3);
+		CHECK(world.cores[i].get_roles_term() == 1);
+	}
+	ERR_PRINT_OFF;
+	CHECK(world.cores[4].request_authority(world.crates[4]) == ERR_UNAVAILABLE);
+	ERR_PRINT_ON;
+	// The objects go on with their owners meanwhile.
+	const float before = world.crates[2]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[2]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[4]->position.x - world.crates[2]->position.x) < 0.5);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node with the roles that restarts takes them again from the other nodes") {
+	// Only node 1 may have the roles.
+	Vector<int> candidates;
+	candidates.push_back(1);
+	MeshWorld world(3, true, candidates);
+	world.run(2.0);
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.run(0.5);
+	const uint16_t crate_id = world.cores[2].get_net_id(world.crates[2]);
+	REQUIRE(crate_id != 0);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 3);
+	const uint32_t version = world.cores[2].get_version(world.crates[2]);
+
+	// Node 1's machine is gone: nobody takes its roles, and the nodes go on with what they have.
+	world.isolate(1);
+	world.cores[1].stop();
+	world.run(1.5);
+	CHECK(world.cores[2].get_settings().registry_peer == 1);
+	CHECK(world.cores[2].get_roles_term() == 0);
+	const uint32_t frame_before = world.cores[2].get_frame();
+	CHECK(frame_before > 200);
+
+	// It restarts with nothing: it believes it's the registry and the clock, from frame 0.
+	RestartedNode fresh(world, 1);
+	world.reconnect(1);
+	world.run(2.0);
+	// The other nodes told it the roles belonged to another process: it took them again, from their views.
+	CHECK(fresh.core.get_roles_term() == 1);
+	CHECK(fresh.core.get_settings().registry_peer == 1);
+	CHECK(fresh.core.get_net_id(fresh.crate) == crate_id);
+	CHECK(fresh.core.get_owner(fresh.crate) == 3);
+	for (int i = 2; i <= 3; i++) {
+		CHECK(world.cores[i].get_roles_term() == 1);
+		CHECK(world.cores[i].get_settings().registry_peer == 1);
+		CHECK(world.cores[i].get_settings().clock_master == 1);
+		CHECK(world.cores[i].get_net_id(world.crates[i]) == crate_id);
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 3);
+		CHECK(world.cores[i].get_version(world.crates[i]) == version + 1);
+		CHECK(world.listeners[i].orphaned == 0);
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+	}
+	// The timeline went on: the restarted clock took the mesh's frame instead of starting it over.
+	CHECK(world.cores[2].get_frame() > frame_before + 100);
+	const int64_t apart = int64_t(fresh.core.get_frame()) - int64_t(world.cores[2].get_frame());
+	CHECK((apart >= -3 && apart <= 3));
+
+	// A new object gets an id that wasn't in use, and ownership changes through the restarted registry.
+	AuthMover *barrels[4] = {};
+	for (int i = 2; i <= 3; i++) {
+		barrels[i] = memnew(AuthMover("barrel", 2));
+		world.cores[i].register_object(barrels[i]);
+	}
+	barrels[1] = memnew(AuthMover("barrel", 2));
+	fresh.core.register_object(barrels[1]);
+	CHECK(world.cores[2].request_authority(world.crates[2]) == OK);
+	world.run(1.0);
+	const uint16_t barrel_id = world.cores[2].get_net_id(barrels[2]);
+	CHECK(barrel_id != 0);
+	CHECK(barrel_id != crate_id);
+	CHECK(world.cores[3].get_net_id(barrels[3]) == barrel_id);
+	CHECK(fresh.core.get_net_id(barrels[1]) == barrel_id);
+	CHECK(fresh.core.get_owner(fresh.crate) == 2);
+	CHECK(world.cores[3].get_owner(world.crates[3]) == 2);
+	CHECK(fresh.core.get_stats().malformed_packets == 0);
+	for (int i = 2; i <= 3; i++) {
+		world.cores[i].unregister_object(barrels[i]);
+		memdelete(barrels[i]);
+	}
+	fresh.core.unregister_object(barrels[1]);
+	memdelete(barrels[1]);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node that joins while a restarted node takes its roles again gets the mesh's view") {
+	Vector<int> candidates;
+	candidates.push_back(1);
+	MeshWorld world(4, false, candidates);
+	world.network.connect_peers(1, 2);
+	world.network.connect_peers(1, 3);
+	world.network.connect_peers(2, 3);
+	world.run(2.0);
+	const uint16_t crate_id = world.cores[2].get_net_id(world.crates[2]);
+	REQUIRE(crate_id != 0);
+	world.network.disconnect_peers(1, 2);
+	world.network.disconnect_peers(1, 3);
+	world.cores[1].stop();
+	world.run(1.0);
+
+	// Node 1 restarts, and node 4, which never met its previous process, joins at the same time: it first takes the
+	// new process for the registry and the clock, until nodes 2 and 3 tell it otherwise.
+	RestartedNode fresh(world, 1);
+	world.network.connect_peers(1, 2);
+	world.network.connect_peers(1, 3);
+	world.network.connect_peers(4, 1);
+	world.network.connect_peers(4, 2);
+	world.network.connect_peers(4, 3);
+	world.run(2.5);
+	CHECK(fresh.core.get_roles_term() == 1);
+	CHECK(fresh.core.get_net_id(fresh.crate) == crate_id);
+	CHECK(fresh.core.get_stats().malformed_packets == 0);
+	for (int i = 2; i <= 4; i++) {
+		CHECK(world.cores[i].get_roles_term() == 1);
+		CHECK(world.cores[i].get_settings().registry_peer == 1);
+		CHECK(world.cores[i].get_net_id(world.crates[i]) == crate_id);
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 2);
+		CHECK(world.cores[i].get_clock().is_synchronized());
+		const int64_t apart = int64_t(world.cores[i].get_frame()) - int64_t(fresh.core.get_frame());
+		CHECK((apart >= -3 && apart <= 3));
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+	}
+	CHECK(world.cores[4].get_frame() > 300);
+	// The crate moves on its owner, and node 4 follows it.
+	const float before = world.crates[2]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[2]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[4]->position.x - world.crates[2]->position.x) < 0.5);
+	CHECK(Math::abs(fresh.crate->position.x - world.crates[2]->position.x) < 0.5);
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node that only lost its link to the registry doesn't take its place") {
+	MeshWorld world(3);
+	world.run(2.0);
+	// Node 2 would be the successor, but node 3 still sees node 1.
+	world.network.disconnect_peers(1, 2);
+	world.run(1.5);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 1);
+		CHECK(world.cores[i].get_settings().clock_master == 1);
+		CHECK(world.cores[i].get_roles_term() == 0);
+		CHECK(world.listeners[i].roles_changes == 0);
+	}
+	// Node 2 can't reach the registry: it still has the crate, and can't give it away.
+	ERR_PRINT_OFF;
+	CHECK(world.cores[2].release_authority(world.crates[2], 3) == ERR_UNAVAILABLE);
+	ERR_PRINT_ON;
+	// The registry orphaned node 2's crate (it lost that node), and node 3 saw it.
+	CHECK(world.cores[3].get_owner(world.crates[3]) == 0);
+
+	// The link comes back: the same process has the roles, and node 2 goes on with it.
+	world.network.connect_peers(1, 2);
+	world.run(1.0);
+	CHECK(world.cores[2].get_roles_term() == 0);
+	CHECK(world.cores[2].get_owner(world.crates[2]) == 0);
+	CHECK(world.cores[2].request_authority(world.crates[2]) == OK);
+	world.run(1.0);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 2);
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+	}
+
+	// Once node 3 loses node 1 too, node 2 takes the roles.
+	world.network.remove_peer(1);
+	world.run(1.5);
+	for (int i = 2; i <= 3; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 2);
+		CHECK(world.cores[i].get_roles_term() == 1);
+	}
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node without its quorum neither takes nor uses the roles") {
+	// Two of the three nodes are needed.
+	MeshWorld world(3, true, Vector<int>(), 2);
+	world.run(2.0);
+	REQUIRE(world.cores[1].get_owner(world.crates[1]) == 2);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].has_role_quorum());
+	}
+
+	// Node 1, with the roles, is cut off: it's told, and it doesn't orphan the objects of the nodes it lost.
+	world.isolate(1);
+	world.run(1.5);
+	CHECK_FALSE(world.cores[1].has_role_quorum());
+	CHECK_FALSE(world.listeners[1].has_quorum);
+	CHECK(world.cores[1].get_settings().registry_peer == 1);
+	CHECK(world.cores[1].get_owner(world.crates[1]) == 2);
+	CHECK(world.listeners[1].orphaned == 0);
+	// The other two have their quorum: node 2 took the roles.
+	for (int i = 2; i <= 3; i++) {
+		CHECK(world.cores[i].has_role_quorum());
+		CHECK(world.cores[i].get_settings().registry_peer == 2);
+		CHECK(world.cores[i].get_roles_term() == 1);
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 2);
+	}
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.run(0.5);
+	CHECK(world.cores[2].get_owner(world.crates[2]) == 3);
+
+	// Back in the mesh, node 1 finds the roles moved and follows.
+	world.reconnect(1);
+	world.run(1.5);
+	CHECK(world.cores[1].has_role_quorum());
+	CHECK(world.listeners[1].has_quorum);
+	CHECK(world.listeners[1].quorum_changes >= 2);
+	CHECK(world.cores[1].get_settings().registry_peer == 2);
+	CHECK(world.cores[1].get_settings().clock_master == 2);
+	CHECK(world.cores[1].get_roles_term() == 1);
+	CHECK(world.listeners[1].roles_changes == 1);
+	CHECK(world.cores[1].get_owner(world.crates[1]) == 3);
+
+	// A node alone never takes the roles: nodes 2 and 3 cut off from each other and from node 1.
+	world.isolate(2);
+	world.isolate(3);
+	world.run(1.5);
+	CHECK_FALSE(world.cores[3].has_role_quorum());
+	CHECK(world.cores[3].get_settings().registry_peer == 2);
+	CHECK(world.cores[3].get_roles_term() == 1);
+	CHECK(world.cores[1].get_roles_term() == 1);
+}
+
+// Steps the world and returns the longest run of steps in which a node's frame didn't advance.
+static int longest_stall(MeshWorld &r_world, int p_node, int p_steps) {
+	int longest = 0;
+	int stalled = 0;
+	uint32_t last = r_world.cores[p_node].get_frame();
+	for (int i = 0; i < p_steps; i++) {
+		r_world.run(1.0 / 60.0);
+		const uint32_t frame = r_world.cores[p_node].get_frame();
+		stalled = frame == last ? stalled + 1 : 0;
+		longest = MAX(longest, stalled);
+		// The frames never go back.
+		CHECK(int32_t(frame - last) >= 0);
+		last = frame;
+	}
+	return longest;
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] The nodes go on simulating while the clock moves") {
+	MeshWorld world(3);
+	world.run(2.0);
+	const int usual = longest_stall(world, 3, 60);
+
+	// Moved by the project: node 3 goes on from the timeline it followed while it measures the new clock.
+	const uint32_t before = world.cores[3].get_frame();
+	CHECK(world.cores[1].change_roles(1, 2) == OK);
+	const int moving = longest_stall(world, 3, 60);
+	CHECK(moving <= usual + 1);
+	CHECK(int32_t(world.cores[3].get_frame() - before) >= 58);
+	CHECK(world.cores[3].get_settings().clock_master == 2);
+	// The node that was the clock goes on too.
+	CHECK(world.cores[1].get_clock().is_synchronized());
+	world.run(1.0);
+	for (int i = 1; i <= 3; i += 2) {
+		const int64_t apart = int64_t(world.cores[i].get_frame()) - int64_t(world.cores[2].get_frame());
+		CHECK((apart >= -3 && apart <= 3));
+		CHECK_FALSE(world.cores[i].get_clock().is_holding());
+	}
+
+	// Lost with its node: the same.
+	const uint32_t before_loss = world.cores[3].get_frame();
+	world.network.remove_peer(2);
+	const int failing = longest_stall(world, 3, 90);
+	CHECK(failing <= usual + 1);
+	CHECK(int32_t(world.cores[3].get_frame() - before_loss) >= 87);
+	CHECK(world.cores[3].get_settings().clock_master == 1);
+	world.run(1.0);
+	const int64_t apart = int64_t(world.cores[3].get_frame()) - int64_t(world.cores[1].get_frame());
+	CHECK((apart >= -3 && apart <= 3));
+}
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] The spawns of a node that left belong to the registry") {
+	MeshWorld world(4, false);
+	world.network.connect_peers(1, 2);
+	world.network.connect_peers(1, 3);
+	world.network.connect_peers(2, 3);
+	world.run(1.5);
+	AuthMover *rock = memnew(AuthMover("Spawner/Rock", 3));
+	const uint32_t spawn_id = world.cores[3].spawn("Spawner", 0, "Rock", 3, Variant());
+	world.cores[3].register_object(rock);
+	world.run(1.0);
+	REQUIRE(world.listeners[1].spawned.size() == 1);
+	CHECK(world.cores[3].owns_spawn(spawn_id));
+	CHECK_FALSE(world.cores[1].owns_spawn(spawn_id));
+
+	// Node 3 is lost: the registry has its spawn now.
+	world.cores[3].unregister_object(rock);
+	memdelete(rock);
+	world.network.remove_peer(3);
+	world.run(1.0);
+	CHECK(world.cores[1].owns_spawn(spawn_id));
+	CHECK_FALSE(world.cores[2].owns_spawn(spawn_id));
+
+	// A node that joins later gets it from the registry.
+	world.network.connect_peers(4, 1);
+	world.network.connect_peers(4, 2);
+	world.run(1.5);
+	REQUIRE(world.listeners[4].spawned.size() == 1);
+	CHECK(world.cores[4].get_owner(world.listeners[4].spawned[0]) == 0);
+	CHECK_FALSE(world.cores[4].owns_spawn(spawn_id));
+
+	// The registry moves: the spawn goes with it.
+	CHECK(world.cores[1].change_roles(2, 1) == OK);
+	world.run(1.5);
+	CHECK(world.cores[2].owns_spawn(spawn_id));
+	CHECK_FALSE(world.cores[1].owns_spawn(spawn_id));
+
+	// And the registry removes it for every node.
+	world.cores[2].despawn(spawn_id);
+	world.run(0.5);
+	CHECK(world.listeners[1].despawned == 1);
+	CHECK(world.listeners[4].despawned == 1);
+	CHECK_FALSE(world.cores[2].owns_spawn(spawn_id));
+	for (int i = 1; i <= 4; i++) {
+		if (i != 3) {
+			CHECK(world.cores[i].get_stats().malformed_packets == 0);
+		}
+	}
 }
 
 } // namespace TestTickMeshCore
