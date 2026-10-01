@@ -160,7 +160,7 @@
 		<member name="join_validator" type="Callable" setter="set_join_validator" getter="get_join_validator" default="Callable()">
 			Host: decides who joins. Called as [code]validator(peer: int, join_data: PackedByteArray, address: String)[/code] once the player's join data arrives: [code]true[/code] admits the player, [code]false[/code] refuses it, and anything else leaves it waiting for [method admit_player] or [method refuse_player] (until [member join_timeout]). Without a validator, every player is admitted.
 			[codeblock]
-			mesh.join_validator = func(peer: int, join_data: PackedByteArray, address: String) -> bool:
+			mesh.join_validator = func(peer: int, join_data: PackedByteArray, address: String) -&gt; bool:
 				return join_data.get_string_from_utf8() == password
 			[/codeblock]
 		</member>

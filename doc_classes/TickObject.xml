@@ -6,6 +6,7 @@
 	<description>
 		Add a [TickObject] as a child of the node to synchronize (see [member root_path]) and extend it with a script. Declare the synchronized properties in [method _setup_sync], write the controller's input in [method _collect_input] and advance the object by one tick in [method _process_tick].
 		The server simulates the object with the input of its [member controller_peer]. That client predicts it; every other client interpolates it, or simulates it as a doll (see [member remote_mode]).
+		With [constant TickNetwork.AUTHORITY_DISTRIBUTED], the node that owns the object simulates it with its own input, and the other nodes interpolate it. The owner changes with [method request_authority], [method release_authority] and [method assign_authority].
 		[codeblock]
 		extends TickObject
 
@@ -174,7 +175,7 @@
 		<method name="request_authority">
 			<return type="int" enum="Error" />
 			<description>
-				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry for this object. The owner may refuse ([method _approve_authority_request]); a request that arrives while another transfer of the object is in progress is refused ([signal TickNetwork.authority_request_denied]). Once transferred, [method _on_authority_changed] is called on every node.
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry for this object. The owner may refuse ([method _approve_authority_request]); a request that arrives while another transfer of the object is in progress is refused, and so is one the registry didn't answer before moving to another node ([signal TickNetwork.authority_request_denied]). Once transferred, [method _on_authority_changed] is called on every node.
 			</description>
 		</method>
 		<method name="send_event">
@@ -207,7 +208,7 @@
 			The object is interpolated between the authority's snapshots, [member TickNetwork.interpolation_delay] behind the authority. The default.
 		</constant>
 		<constant name="REMOTE_MODE_DOLL" value="1" enum="RemoteMode">
-			The object is simulated with its controller's inputs, as a doll: behind the controller by the latency to it plus a small input buffer, and corrected by the authority's snapshots. The controller sends its inputs to every peer it's connected to, so dolls need a mesh ([EnetMeshTransport]); in a star, only the server's objects can be dolls, and the others are interpolated. A doll whose controller stops sending inputs is interpolated again.
+			The object is simulated with its controller's inputs, as a doll: behind the controller by the latency to it plus a small input buffer, and corrected by the authority's snapshots. The controller sends its inputs to every peer it's connected to, so dolls need a mesh ([EnetMeshTransport] or [EnetHostedMeshTransport]); in a star, only the server's objects can be dolls, and the others are interpolated. A doll whose controller stops sending inputs is interpolated again.
 		</constant>
 	</constants>
 </class>

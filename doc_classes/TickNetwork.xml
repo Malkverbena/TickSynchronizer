@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <class name="TickNetwork" inherits="Node" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
 	<brief_description>
-		Tick based network: server authority, client prediction and interpolation.
+		Tick based network: an authority with client prediction and interpolation, or an owner for each object.
 	</brief_description>
 	<description>
-		Synchronizes the [TickObject] nodes over a [TickTransport], in fixed ticks. The peer with id 1 is the server: it simulates every object, moving each one with the input of its controller. A client predicts the objects it controls and rewinds them when the server disagrees; the other objects are interpolated [member interpolation_delay] seconds behind the server.
+		Synchronizes the [TickObject] nodes over a [TickTransport], in fixed ticks. With [constant AUTHORITY_SINGLE] (the default), one peer is the authority, called the server in this reference: peer 1 in a star ([EnetStarTransport]), or [member authority_peer] in a mesh ([EnetMeshTransport], [EnetHostedMeshTransport]). It simulates every object, moving each one with the input of its controller. The other peers are its clients: a client predicts the objects it controls and rewinds them when the server disagrees; the other objects are interpolated [member interpolation_delay] seconds behind the server, or simulated as dolls in a mesh (see [member TickObject.remote_mode]).
+		With [constant AUTHORITY_DISTRIBUTED], for meshes of trusted servers, every object has an owner node that simulates it; the other nodes interpolate it, and nobody predicts. Ownership moves through [member registry_peer], and the nodes follow the timeline of [member clock_master].
+		A process can run several networks, for example a mesh with other servers and a star with its own clients that follows the mesh's timeline (see [member clock_network]).
 		The network ticks during the physics process; set [member ticks_per_second] equal to [member ProjectSettings.physics/common/physics_ticks_per_second], so bodies moved with the physics delta (like [method CharacterBody3D.move_and_slide]) advance one tick at a time. The client uses the server's tick rate.
 		The client's clock is synchronized with the server's, and the client runs ahead of the server just enough for its inputs to arrive in time, adapting its speed to the network conditions.
 	</description>
@@ -33,7 +35,7 @@
 		<method name="get_rtt" qualifiers="const">
 			<return type="float" />
 			<description>
-				Returns the round trip time to the server, in seconds, as measured by the clock synchronization (client only).
+				Returns the round trip time to the node this peer takes its clock from, in seconds, as measured by the clock synchronization: the server for a client, or [member clock_master] with [constant AUTHORITY_DISTRIBUTED]. 0 on that node itself.
 			</description>
 		</method>
 		<method name="get_state_at" qualifiers="const">
@@ -91,7 +93,7 @@
 		<method name="is_server" qualifiers="const">
 			<return type="bool" />
 			<description>
-				Returns [code]true[/code] if this peer is the server.
+				Returns [code]true[/code] if this peer is the server (see [member authority_peer]). Always [code]false[/code] with [constant AUTHORITY_DISTRIBUTED]: see [method TickObject.is_owner].
 			</description>
 		</method>
 		<method name="send_event">
@@ -117,7 +119,7 @@
 			<return type="int" enum="Error" />
 			<param index="0" name="transport" type="TickTransport" />
 			<description>
-				Starts the network over [param transport]. The peer with id 1 becomes the server; the others are clients and join when connected to it.
+				Starts the network over [param transport]. With [constant AUTHORITY_SINGLE], the peer [member authority_peer] (1 by default) is the server; the others are clients and join when connected to it. With [constant AUTHORITY_DISTRIBUTED], every node joins the other nodes of the mesh as they connect.
 			</description>
 		</method>
 		<method name="stop">
@@ -215,7 +217,7 @@
 		<signal name="authority_request_denied">
 			<param index="0" name="object" type="TickObject" />
 			<description>
-				With [constant AUTHORITY_DISTRIBUTED]: emitted when a request for [param object] is refused: another transfer of it was in progress, or its owner refused it.
+				With [constant AUTHORITY_DISTRIBUTED]: emitted when a request for [param object] is refused: another transfer of it was in progress, its owner refused it, or the registry moved to another node before answering (see [member registry_peer]).
 			</description>
 		</signal>
 		<signal name="event_received">
@@ -237,13 +239,13 @@
 		<signal name="peer_left">
 			<param index="0" name="peer" type="int" />
 			<description>
-				Emitted when a client leaves (on the server) or when the connection with the server is lost (on a client).
+				Emitted when a client leaves (on the server) or when the connection with the server is lost (on a client). With [constant AUTHORITY_DISTRIBUTED]: emitted when a node of the mesh leaves.
 			</description>
 		</signal>
 		<signal name="peer_ready">
 			<param index="0" name="peer" type="int" />
 			<description>
-				Emitted on the server when a client passes the handshake, and on a client when the server accepts it ([param peer] is 1).
+				Emitted on the server when a client passes the handshake, and on a client when the server accepts it ([param peer] is the server). With [constant AUTHORITY_DISTRIBUTED]: emitted when another node of the mesh passes the handshake.
 			</description>
 		</signal>
 		<signal name="prediction_started">
@@ -255,7 +257,7 @@
 		<signal name="rejected">
 			<param index="0" name="reason" type="String" />
 			<description>
-				Emitted on a client when the server refuses it, for example because of a different protocol version or precision build.
+				Emitted on a client when the server refuses it, for example because of a different protocol version (another version of the module) or precision build. With [constant AUTHORITY_DISTRIBUTED]: emitted when another node of the mesh refuses this one, for the same reasons, or because both started with a different [member registry_peer] or [member clock_master].
 			</description>
 		</signal>
 		<signal name="relevance_changed">

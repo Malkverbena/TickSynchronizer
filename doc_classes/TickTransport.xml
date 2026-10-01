@@ -4,7 +4,7 @@
 		Base class of the transports used by [TickNetwork].
 	</brief_description>
 	<description>
-		A transport moves bytes between peers. It identifies the sender of every packet from the connection, never from the packet's content, so a peer can't impersonate another one. See [EnetStarTransport].
+		A transport moves bytes between peers. It identifies the sender of every packet from the connection, never from the packet's content, so a peer can't impersonate another one. See [EnetStarTransport] (a server and its clients), [EnetMeshTransport] (servers with fixed ids) and [EnetHostedMeshTransport] (players over the internet).
 	</description>
 	<tutorials>
 	</tutorials>
@@ -25,7 +25,7 @@
 		<method name="get_local_peer_id" qualifiers="const">
 			<return type="int" />
 			<description>
-				Returns the id of this peer; 1 is the server.
+				Returns the id of this peer. In a star, 1 is the server; in a mesh, every node has its own id.
 			</description>
 		</method>
 		<method name="get_max_payload_size" qualifiers="const">
@@ -62,7 +62,7 @@
 			Target peer that sends to every connected peer.
 		</constant>
 		<constant name="PEER_SERVER" value="1">
-			Id of the server.
+			Id of the server of a star, and of the first host of an [EnetHostedMeshTransport].
 		</constant>
 	</constants>
 </class>
