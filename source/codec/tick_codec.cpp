@@ -278,7 +278,7 @@ void TickCodec::encode(const Variant &p_value, TickDataBuffer &r_buffer) const {
 		} break;
 		case KIND_VARIANT: {
 			if (!is_sendable(value)) {
-				ERR_PRINT("TickCodec can't send objects, callables, signals or RIDs; nil is sent instead.");
+				ERR_PRINT("TickCodec can't send objects, callables, signals, RIDs or reals that aren't finite; nil is sent instead.");
 				value = Variant();
 			}
 			int length = 0;
@@ -483,6 +483,37 @@ Variant TickCodec::interpolate(const Variant &p_from, const Variant &p_to, doubl
 	return p_to;
 }
 
+// Whether every real of a packed array is finite.
+template <typename T>
+static bool are_reals_finite(const Vector<T> &p_values) {
+	for (const T &value : p_values) {
+		if (!Math::is_finite(value)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+
+// Whether every vector of a packed array is finite.
+template <typename T>
+static bool are_vectors_finite(const Vector<T> &p_values) {
+	for (const T &value : p_values) {
+		if (!value.is_finite()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+
+// Whether the four components of a color are finite.
+static bool is_color_finite(const Color &p_color) {
+	return Math::is_finite(p_color.r) && Math::is_finite(p_color.g) && Math::is_finite(p_color.b) && Math::is_finite(p_color.a);
+}
+
+
+// `TickCodec::is_sendable()` for a value `p_depth` containers deep.
 static bool is_sendable_recursive(const Variant &p_value, int p_depth) {
 	if (p_depth > Variant::MAX_RECURSION_DEPTH) {
 		return false;
@@ -494,6 +525,59 @@ static bool is_sendable_recursive(const Variant &p_value, int p_depth) {
 		case Variant::SIGNAL:
 		case Variant::RID:
 			return false;
+		// Reals that aren't finite: no codec carries them, and neither does a variant.
+		case Variant::FLOAT:
+			return Math::is_finite(double(p_value));
+		case Variant::VECTOR2:
+			return Vector2(p_value).is_finite();
+		case Variant::RECT2:
+			return Rect2(p_value).is_finite();
+		case Variant::VECTOR3:
+			return Vector3(p_value).is_finite();
+		case Variant::TRANSFORM2D:
+			return Transform2D(p_value).is_finite();
+		case Variant::VECTOR4:
+			return Vector4(p_value).is_finite();
+		case Variant::PLANE:
+			return Plane(p_value).is_finite();
+		case Variant::QUATERNION:
+			return Quaternion(p_value).is_finite();
+		case Variant::AABB:
+			return ::AABB(p_value).is_finite();
+		case Variant::BASIS:
+			return Basis(p_value).is_finite();
+		case Variant::TRANSFORM3D:
+			return Transform3D(p_value).is_finite();
+		case Variant::PROJECTION: {
+			const Projection projection = p_value;
+			for (int i = 0; i < 4; i++) {
+				if (!projection.columns[i].is_finite()) {
+					return false;
+				}
+			}
+			return true;
+		}
+		case Variant::COLOR:
+			return is_color_finite(Color(p_value));
+		case Variant::PACKED_FLOAT32_ARRAY:
+			return are_reals_finite(PackedFloat32Array(p_value));
+		case Variant::PACKED_FLOAT64_ARRAY:
+			return are_reals_finite(PackedFloat64Array(p_value));
+		case Variant::PACKED_VECTOR2_ARRAY:
+			return are_vectors_finite(PackedVector2Array(p_value));
+		case Variant::PACKED_VECTOR3_ARRAY:
+			return are_vectors_finite(PackedVector3Array(p_value));
+		case Variant::PACKED_VECTOR4_ARRAY:
+			return are_vectors_finite(PackedVector4Array(p_value));
+		case Variant::PACKED_COLOR_ARRAY: {
+			const PackedColorArray colors = p_value;
+			for (const Color &color : colors) {
+				if (!is_color_finite(color)) {
+					return false;
+				}
+			}
+			return true;
+		}
 		case Variant::ARRAY: {
 			const Array array = p_value;
 			for (int i = 0; i < array.size(); i++) {

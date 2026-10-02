@@ -51,6 +51,9 @@ public:
 		uint64_t doll_corrections = 0;
 		uint64_t doll_resyncs = 0;
 		uint64_t doll_ghost_inputs = 0;
+		// Dolls left to the snapshots for a while: their controller's inputs disagreed with the authority more than
+		// this peer pays to simulate again.
+		uint64_t doll_suspensions = 0;
 		// Delta snapshots sent in more than one part (bigger than a datagram), and partial ones the client dropped.
 		uint64_t split_snapshots = 0;
 		uint64_t incomplete_snapshots = 0;
@@ -151,6 +154,11 @@ private:
 		LocalVector<double> arrival_offsets;
 		uint32_t next_offset = 0;
 		RateLimiter input_limiter;
+		// The frames this peer still simulates again for the doll when the authority disagrees with it (refilled over
+		// time); without them the doll is interpolated from the snapshots until `suspended_until_usec` (ADR-078).
+		double rewind_budget = -1.0;
+		uint64_t rewind_budget_usec = 0;
+		uint64_t suspended_until_usec = 0;
 	};
 
 	struct PeerState {
@@ -161,6 +169,11 @@ private:
 		bool needs_full = true;
 		uint32_t last_full_frame = TICK_FRAME_NONE;
 		uint64_t last_full_usec = 0;
+		// How long until a full snapshot the client didn't acknowledge is sent again: doubled at each one, back to the
+		// shortest when an acknowledgment comes. `last_ack_usec`: when the client was accepted, or last acknowledged a
+		// newer snapshot; a client that acknowledges nothing for long is dropped (ADR-078).
+		uint64_t full_resend_usec = 0;
+		uint64_t last_ack_usec = 0;
 		LocalVector<InputRecord> inputs;
 		TickDataBuffer last_input;
 		bool has_last_input = false;
@@ -168,6 +181,7 @@ private:
 		HashMap<uint16_t, TickDataBuffer> tick_inputs;
 		RateLimiter input_limiter;
 		RateLimiter event_limiter;
+		RateLimiter ping_limiter;
 		// Interest (ADR-053): the objects whose state this client gets, and the frame each became relevant at, until
 		// the client acknowledges a snapshot that has it (the deltas need a base the client knows).
 		HashSet<uint16_t> relevant;
@@ -331,6 +345,8 @@ private:
 	// Simulates one frame of the doll; if the authority's state of that frame already arrived, the doll takes it.
 	void client_simulate_doll(DollPeer &r_doll, uint32_t p_frame);
 	bool client_doll_matches(const DollPeer &p_doll, const ObjectStates &p_doll_states, const SnapshotRecord &p_snapshot) const;
+	// Takes `p_frames` of the frames this peer simulates again for a doll; `false` when the doll doesn't have them.
+	bool client_take_doll_budget(DollPeer &r_doll, int p_frames);
 	void client_advance_dolls();
 	void client_reconcile_dolls(uint32_t p_frame);
 	void client_reset_dolls();

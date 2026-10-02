@@ -104,7 +104,9 @@ public:
 	uint32_t hash(uint32_t p_seed) const;
 
 	// Whether `p_value` can be sent to another peer: no objects (null ones are fine), callables, signals or RIDs,
-	// which only mean something in this process, also inside arrays and dictionaries.
+	// which only mean something in this process, and no real that isn't finite (NaN, an infinity), which no codec
+	// carries: it would spread through a simulation. Also inside arrays and dictionaries. A value received from
+	// another peer is checked the same way.
 	static bool is_sendable(const Variant &p_value);
 
 	// Expected `Variant` type, or `Variant::NIL` for `variant()`.

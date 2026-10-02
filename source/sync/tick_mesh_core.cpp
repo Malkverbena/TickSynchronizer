@@ -88,7 +88,7 @@ TickMeshCore::BusyScope::~BusyScope() {
 
 void TickMeshCore::set_settings(const Settings &p_settings) {
 	ERR_FAIL_COND_MSG(running, "The settings can't change while the network is running.");
-	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0, "The ticks per second must be positive.");
+	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0 || p_settings.ticks_per_second > TICK_MAX_TICKS_PER_SECOND, vformat("The ticks per second must be between 1 and %d.", TICK_MAX_TICKS_PER_SECOND));
 	ERR_FAIL_COND_MSG(p_settings.registry_peer <= 0 || p_settings.clock_master <= 0, "The registry and clock master peers must be positive.");
 	ERR_FAIL_COND_MSG(p_settings.keyframe_interval < 1, "The keyframe interval must be at least 1.");
 	ERR_FAIL_COND_MSG(p_settings.role_quorum < 0, "The role quorum can't be negative.");
@@ -2327,7 +2327,7 @@ uint32_t TickMeshCore::spawn(const String &p_spawner, int p_scene, const String 
 	ERR_FAIL_COND_V_MSG(!running, 0, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(local_id >= 4096, 0, "Only mesh nodes with an id below 4096 can spawn.");
 	ERR_FAIL_COND_V_MSG(p_name.is_empty(), 0, "A spawned node needs a name.");
-	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_data), 0, "The spawn data can't contain objects, callables, signals or RIDs.");
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_data), 0, "The spawn data can't contain objects, callables, signals, RIDs or reals that aren't finite.");
 	// Not an id this node's previous process used (the registry keeps its spawns).
 	for (int attempt = 0; attempt < 0x100000 && spawns.has(get_next_spawn_id()); attempt++) {
 		next_spawn_counter++;
@@ -2581,7 +2581,7 @@ Error TickMeshCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
 	ERR_FAIL_COND_V_MSG(String(p_name).utf8().length() > TICK_MAX_EVENT_NAME_BYTES, ERR_INVALID_PARAMETER, vformat("An event name can't be longer than %d bytes in UTF-8.", TICK_MAX_EVENT_NAME_BYTES));
-	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_payload), ERR_INVALID_DATA, "The event payload can't contain objects, callables, signals or RIDs.");
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_payload), ERR_INVALID_DATA, "The event payload can't contain objects, callables, signals, RIDs or reals that aren't finite.");
 	int payload_bytes = 0;
 	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded.");
 	ERR_FAIL_COND_V_MSG(payload_bytes > settings.max_event_bytes, ERR_INVALID_DATA, vformat("The event payload takes %d bytes; the limit is %d.", payload_bytes, settings.max_event_bytes));

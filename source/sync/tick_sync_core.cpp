@@ -10,6 +10,10 @@
 static constexpr uint64_t REJECT_DISCONNECT_DELAY_USEC = 1000000;
 // A full snapshot is sent again if it wasn't acknowledged within this delay.
 static constexpr uint64_t FULL_SNAPSHOT_RESEND_USEC = 500000;
+// The wait doubles at every full snapshot the client doesn't acknowledge, up to this.
+static constexpr uint64_t FULL_SNAPSHOT_RESEND_MAX_USEC = 8000000;
+// An untrusted client that acknowledges no snapshot for this long is dropped: every client acknowledges what it gets.
+static constexpr uint64_t SERVER_ACK_TIMEOUT_USEC = 30000000;
 // A client keeps an event for an object it doesn't know yet for this long (E5).
 static constexpr uint64_t PENDING_EVENT_TIMEOUT_USEC = 5000000;
 // A doll whose controller sent no input for this long is interpolated again.
@@ -21,6 +25,11 @@ static constexpr double DOLL_SPEED_GAIN = 0.05;
 static constexpr double DOLL_MAX_SPEED_DELTA = 0.2;
 // Most frames a doll simulates in one local tick.
 static constexpr int DOLL_MAX_STEPS = 3;
+// The frames a doll may be simulated again, when the authority disagrees with it, for each local tick; twice a second's
+// worth can be used at once. An honest controller's doll needs a small part of this.
+static constexpr double DOLL_REWIND_FRAMES_PER_TICK = 2.0;
+// A doll that used all of them is interpolated from the snapshots for this long.
+static constexpr uint64_t DOLL_SUSPENSION_USEC = 2000000;
 
 struct PendingEventOrder {
 	template <typename T>
@@ -78,7 +87,7 @@ bool TickSyncCore::RateLimiter::take(double p_rate, uint64_t p_now_usec) {
 
 void TickSyncCore::set_settings(const Settings &p_settings) {
 	ERR_FAIL_COND_MSG(role != ROLE_NONE, "The settings can't change while the network is running.");
-	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0, "The ticks per second must be positive.");
+	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0 || p_settings.ticks_per_second > TICK_MAX_TICKS_PER_SECOND, vformat("The ticks per second must be between 1 and %d.", TICK_MAX_TICKS_PER_SECOND));
 	ERR_FAIL_COND_MSG(p_settings.history_size < 8, "The history must keep at least 8 frames.");
 	ERR_FAIL_COND_MSG(p_settings.input_redundancy < 1 || p_settings.input_redundancy > TICK_MAX_INPUT_FRAMES, vformat("The input redundancy must be between 1 and %d.", TICK_MAX_INPUT_FRAMES));
 	ERR_FAIL_COND_MSG(p_settings.snapshot_interval < 1, "The snapshot interval must be at least 1.");
@@ -629,6 +638,8 @@ void TickSyncCore::server_accept_peer(int p_peer) {
 	PeerState &peer = peers[p_peer];
 	peer.accepted = true;
 	peer.needs_full = true;
+	peer.full_resend_usec = FULL_SNAPSHOT_RESEND_USEC;
+	peer.last_ack_usec = now_usec;
 
 	TickDataBuffer welcome;
 	welcome.begin_write();
@@ -699,6 +710,8 @@ void TickSyncCore::server_handle_inputs(int p_peer, TickDataBuffer &p_message) {
 
 	if (ack != TICK_FRAME_NONE && (peer->acked_snapshot == TICK_FRAME_NONE || tick_frame_after(ack, peer->acked_snapshot))) {
 		peer->acked_snapshot = ack;
+		peer->last_ack_usec = now_usec;
+		peer->full_resend_usec = FULL_SNAPSHOT_RESEND_USEC;
 	}
 	if (wants_full) {
 		peer->needs_full = true;
@@ -747,8 +760,15 @@ void TickSyncCore::server_handle_inputs(int p_peer, TickDataBuffer &p_message) {
 
 void TickSyncCore::server_handle_ping(int p_peer, TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
-	if (p_message.is_buffer_failed() || !peers.has(p_peer)) {
+	PeerState *peer = peers.getptr(p_peer);
+	if (p_message.is_buffer_failed() || peer == nullptr) {
 		stats.malformed_packets++;
+		return;
+	}
+	// A client pings once a tick while its clock settles, then a few times a second: twice the tick rate is plenty.
+	// Each ping costs an answer.
+	if (!settings.trusted && !peer->ping_limiter.take(double(MAX(20, settings.ticks_per_second * 2)), now_usec)) {
+		stats.rate_limited_packets++;
 		return;
 	}
 	TickDataBuffer pong;
@@ -880,10 +900,22 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 	}
 
 	if (p_frame % uint32_t(settings.snapshot_interval) == 0) {
+		LocalVector<int> silent;
 		for (KeyValue<int, PeerState> &E : peers) {
-			if (E.value.accepted) {
-				server_send_snapshot(E.key, E.value, p_frame);
+			if (!E.value.accepted) {
+				continue;
 			}
+			if (!settings.trusted && now_usec - E.value.last_ack_usec >= SERVER_ACK_TIMEOUT_USEC) {
+				silent.push_back(E.key);
+				continue;
+			}
+			server_send_snapshot(E.key, E.value, p_frame);
+		}
+		for (const int peer : silent) {
+			// It takes the snapshots and never says so: it isn't a client that plays. It gets nothing more, and it's
+			// disconnected once the reason reached it.
+			peers[peer].accepted = false;
+			server_reject_peer(peer, "The client acknowledged no snapshot for too long.");
 		}
 	}
 }
@@ -936,7 +968,7 @@ void TickSyncCore::server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t 
 
 	const bool acked_available = r_peer.acked_snapshot != TICK_FRAME_NONE && server_history[history_index(r_peer.acked_snapshot)].frame == r_peer.acked_snapshot;
 	const bool full_available = r_peer.last_full_frame != TICK_FRAME_NONE && server_history[history_index(r_peer.last_full_frame)].frame == r_peer.last_full_frame;
-	const bool full_recent = r_peer.last_full_frame != TICK_FRAME_NONE && now_usec - r_peer.last_full_usec < FULL_SNAPSHOT_RESEND_USEC;
+	const bool full_recent = r_peer.last_full_frame != TICK_FRAME_NONE && now_usec - r_peer.last_full_usec < r_peer.full_resend_usec;
 
 	uint32_t base = TICK_FRAME_NONE;
 	bool full = false;
@@ -949,6 +981,10 @@ void TickSyncCore::server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t 
 		base = r_peer.last_full_frame;
 	} else if (acked_available) {
 		base = r_peer.acked_snapshot;
+	} else if (full_recent) {
+		// The last full snapshot wasn't acknowledged, and it's too old to be the base of a delta. Nothing goes to a
+		// client that says nothing until it's time to send it one again (see `full_resend_usec`).
+		return;
 	} else {
 		full = true;
 	}
@@ -1034,6 +1070,10 @@ void TickSyncCore::server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t 
 	}
 
 	if (full) {
+		if (r_peer.last_full_frame != TICK_FRAME_NONE && (r_peer.acked_snapshot == TICK_FRAME_NONE || tick_frame_after(r_peer.last_full_frame, r_peer.acked_snapshot))) {
+			// The full snapshot before this one was never acknowledged: the next one waits twice as long.
+			r_peer.full_resend_usec = MIN(r_peer.full_resend_usec * 2, FULL_SNAPSHOT_RESEND_MAX_USEC);
+		}
 		r_peer.needs_full = false;
 		r_peer.last_full_frame = p_frame;
 		r_peer.last_full_usec = now_usec;
@@ -1175,7 +1215,7 @@ bool TickSyncCore::is_relevant(const TickSyncObject *p_object, int p_peer) const
 void TickSyncCore::client_handle_welcome(TickDataBuffer &p_message) {
 	const int ticks_per_second = int(p_message.read_uint_bits(16));
 	const int64_t epoch = p_message.read_int_bits(64);
-	if (p_message.is_buffer_failed() || ticks_per_second <= 0) {
+	if (p_message.is_buffer_failed() || ticks_per_second <= 0 || ticks_per_second > TICK_MAX_TICKS_PER_SECOND) {
 		stats.malformed_packets++;
 		return;
 	}
@@ -2026,8 +2066,10 @@ void TickSyncCore::client_handle_doll_inputs(int p_peer, TickDataBuffer &p_messa
 				stats.rejected_inputs++;
 				continue;
 			}
+			// An honest controller predicts about as far ahead as this peer: half a second more covers a controller
+			// much further from the authority. Further than that, the doll would run ahead of every snapshot.
 			const int32_t distance = int32_t(frame - reference);
-			if (distance >= int32_t(ring / 2)) {
+			if (distance >= MIN(int32_t(ring / 2), int32_t(settings.max_input_buffer + settings.ticks_per_second / 2))) {
 				stats.rejected_inputs++;
 				continue;
 			}
@@ -2243,6 +2285,11 @@ void TickSyncCore::client_advance_dolls() {
 			doll.started = false;
 			continue;
 		}
+		if (now_usec < doll.suspended_until_usec) {
+			// Its inputs disagreed with the authority too much (see `client_reconcile_dolls()`): interpolated too.
+			doll.started = false;
+			continue;
+		}
 		const int target = client_get_doll_target(doll);
 		if (!doll.started) {
 			// Starts `target` inputs behind the newest one, from the authority's latest state before that frame.
@@ -2292,10 +2339,42 @@ void TickSyncCore::client_reconcile_dolls(uint32_t p_frame) {
 		}
 		// Rewind: the authority's state at `p_frame`, then the doll's frames after it again.
 		const uint32_t next_frame = doll.next_frame;
+		if (!client_take_doll_budget(doll, int(next_frame - p_frame - 1))) {
+			// The controller's inputs disagree with what it sends the authority, more than this peer pays to simulate
+			// again (ADR-078): the doll follows the snapshots for a while, like the object of a peer that sends no inputs.
+			doll.started = false;
+			doll.suspended_until_usec = now_usec + DOLL_SUSPENSION_USEC;
+			stats.doll_suspensions++;
+			continue;
+		}
 		client_restore_doll(doll, p_frame, next_frame);
 		stats.doll_rewinds++;
 		stats.doll_rewound_frames += uint64_t(next_frame - p_frame - 1);
 	}
+}
+
+
+// Takes `p_frames` of the frames this peer simulates again for a doll when the authority disagrees with it. They come
+// back at `DOLL_REWIND_FRAMES_PER_TICK` per local tick, up to two seconds' worth. Without a limit, a controller that
+// sends the other peers inputs that aren't the ones it sends the authority makes them simulate its doll many times
+// over. `false` when the doll doesn't have them; a trusted network has no limit.
+bool TickSyncCore::client_take_doll_budget(DollPeer &r_doll, int p_frames) {
+	if (settings.trusted) {
+		return true;
+	}
+	const double rate = double(settings.ticks_per_second) * DOLL_REWIND_FRAMES_PER_TICK;
+	const double most = rate * 2.0;
+	if (r_doll.rewind_budget < 0.0) {
+		r_doll.rewind_budget = most;
+		r_doll.rewind_budget_usec = now_usec;
+	}
+	r_doll.rewind_budget = MIN(most, r_doll.rewind_budget + double(now_usec - r_doll.rewind_budget_usec) * rate / 1000000.0);
+	r_doll.rewind_budget_usec = now_usec;
+	if (r_doll.rewind_budget < double(p_frames)) {
+		return false;
+	}
+	r_doll.rewind_budget -= double(p_frames);
+	return true;
 }
 
 // ------------------------------------------------------------------------------------------------------ Migration
@@ -2446,7 +2525,7 @@ void TickSyncCore::client_become_server(int p_old_authority) {
 uint32_t TickSyncCore::spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	ERR_FAIL_COND_V_MSG(role != ROLE_SERVER, 0, "Only the server can spawn.");
 	ERR_FAIL_COND_V_MSG(p_name.is_empty(), 0, "A spawned node needs a name.");
-	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_data), 0, "The spawn data can't contain objects, callables, signals or RIDs.");
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_data), 0, "The spawn data can't contain objects, callables, signals, RIDs or reals that aren't finite.");
 	const uint32_t spawn_id = next_spawn_id++;
 	SpawnRecord record;
 	record.spawner = p_spawner;
@@ -2720,7 +2799,7 @@ Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 	ERR_FAIL_COND_V_MSG(role == ROLE_NONE, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
 	ERR_FAIL_COND_V_MSG(String(p_name).utf8().length() > TICK_MAX_EVENT_NAME_BYTES, ERR_INVALID_PARAMETER, vformat("An event name can't be longer than %d bytes in UTF-8.", TICK_MAX_EVENT_NAME_BYTES));
-	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_payload), ERR_INVALID_DATA, "The event payload can't contain objects, callables, signals or RIDs.");
+	ERR_FAIL_COND_V_MSG(!TickCodec::is_sendable(p_payload), ERR_INVALID_DATA, "The event payload can't contain objects, callables, signals, RIDs or reals that aren't finite.");
 	int payload_bytes = 0;
 	ERR_FAIL_COND_V_MSG(encode_variant(p_payload, nullptr, payload_bytes, false) != OK, ERR_INVALID_DATA, "The event payload can't be encoded.");
 	ERR_FAIL_COND_V_MSG(payload_bytes > settings.max_event_bytes, ERR_INVALID_DATA, vformat("The event payload takes %d bytes; the limit is %d.", payload_bytes, settings.max_event_bytes));
@@ -2782,6 +2861,7 @@ Dictionary TickSyncCore::get_stats_dictionary() const {
 	result["doll_corrections"] = stats.doll_corrections;
 	result["doll_resyncs"] = stats.doll_resyncs;
 	result["doll_ghost_inputs"] = stats.doll_ghost_inputs;
+	result["doll_suspensions"] = stats.doll_suspensions;
 	result["split_snapshots"] = stats.split_snapshots;
 	result["incomplete_snapshots"] = stats.incomplete_snapshots;
 	result["relevance_changes"] = stats.relevance_changes;

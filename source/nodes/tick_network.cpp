@@ -396,7 +396,7 @@ void TickNetwork::despawn(uint32_t p_spawn_id) {
 
 void TickNetwork::set_ticks_per_second(int p_ticks_per_second) {
 	ERR_FAIL_COND_MSG(running, "Can't change the settings while the network is running.");
-	ERR_FAIL_COND_MSG(p_ticks_per_second <= 0, "The ticks per second must be positive.");
+	ERR_FAIL_COND_MSG(p_ticks_per_second <= 0 || p_ticks_per_second > TICK_MAX_TICKS_PER_SECOND, vformat("The ticks per second must be between 1 and %d.", TICK_MAX_TICKS_PER_SECOND));
 	settings.ticks_per_second = p_ticks_per_second;
 }
 
