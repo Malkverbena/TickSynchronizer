@@ -20,9 +20,9 @@
 // Environment: `TICK_FUZZ_SEEDS` (how many seeds, 3 by default), `TICK_FUZZ_SEED` (the first one, 1), `TICK_FUZZ_STEPS`
 // (steps of 1/60 s per seed, 600).
 //
-// The two campaigns where a node of a distributed mesh misbehaves fail on some seeds: the mesh trusts its nodes, and
-// nothing bounds the terms, the versions and the timeline one of them announces (`notes/audit-2026-10-01.md`). They
-// stay as they are, to tell when that changes.
+// The two campaigns where a node of a distributed mesh misbehaves still fail on a few seeds (3 in 200): the mesh trusts
+// its registry, and a registry may announce an object with a schema that isn't the object's, which the other nodes
+// then can't bind (`notes/audit-2026-10-01.md`). They stay as they are, to tell when that changes.
 
 namespace TestTickFuzz {
 
@@ -869,6 +869,8 @@ struct ChaosMesh {
 };
 
 // The nodes (but `p_skip`) agree on the roles and on every object, the registry answers, and the owners simulate.
+// `p_skip` is a node that misbehaved: an object it dropped while it owned it is registered nowhere, which is any
+// owner's right, so then an object may have no id as long as no node has one for it.
 static void check_mesh(ChaosMesh &r_mesh, const String &p_what, int p_skip = 0) {
 	String state;
 	for (int i = 1; i <= r_mesh.count; i++) {
@@ -896,7 +898,7 @@ static void check_mesh(ChaosMesh &r_mesh, const String &p_what, int p_skip = 0) 
 		same_frames = same_frames && apart >= -4 && apart <= 4;
 		for (int k = 0; k < ChaosMesh::OBJECTS; k++) {
 			const uint16_t id = core.get_net_id(r_mesh.bodies[i][k]);
-			registered = registered && id != 0;
+			registered = registered && (id != 0 || (p_skip != 0 && first.get_net_id(r_mesh.bodies[reference][k]) == 0));
 			same_objects = same_objects && id == first.get_net_id(r_mesh.bodies[reference][k]) && core.get_owner(r_mesh.bodies[i][k]) == first.get_owner(r_mesh.bodies[reference][k]) && core.get_version(r_mesh.bodies[i][k]) == first.get_version(r_mesh.bodies[reference][k]);
 			for (int other = k + 1; other < ChaosMesh::OBJECTS; other++) {
 				unique_ids = unique_ids && (id == 0 || id != core.get_net_id(r_mesh.bodies[i][other]));
@@ -930,9 +932,15 @@ static void check_mesh(ChaosMesh &r_mesh, const String &p_what, int p_skip = 0) 
 			asker = i;
 		}
 	}
-	int index = 0;
-	if (r_mesh.cores[asker]->get_owner(r_mesh.bodies[asker][0]) == asker) {
-		index = 1;
+	int index = -1;
+	for (int k = 0; k < ChaosMesh::OBJECTS && index < 0; k++) {
+		if (r_mesh.cores[asker]->get_net_id(r_mesh.bodies[asker][k]) != 0 && r_mesh.cores[asker]->get_owner(r_mesh.bodies[asker][k]) != asker) {
+			index = k;
+		}
+	}
+	if (index < 0) {
+		// The node that asks owns every object that is left.
+		return;
 	}
 	ERR_PRINT_OFF;
 	const Error asked = r_mesh.cores[asker]->request_authority(r_mesh.bodies[asker][index]);
@@ -1065,6 +1073,33 @@ TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh under chaos: candidates and 
 	candidates.push_back(1);
 	run_chaos_seeds(5, candidates, 3);
 }
+
+// The seeds of the chaos campaigns that found defects (objects left frozen for good, a timeline started over,
+// registries that counted their versions apart, a node that never told the registry what it knew), kept in the regular
+// suite: every node must end with the same view.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] The chaos seeds that found defects end with every node agreeing") {
+	Vector<int> two;
+	two.push_back(1);
+	two.push_back(2);
+	Vector<int> three;
+	three.push_back(2);
+	three.push_back(4);
+	three.push_back(1);
+	static const int quorum_seeds[6] = { 7, 23, 24, 29, 33, 34 };
+	for (const int seed : quorum_seeds) {
+		run_chaos(5, Vector<int>(), 3, uint64_t(seed), 1500);
+	}
+	static const int plain_seeds[4] = { 9, 19, 29, 33 };
+	for (const int seed : plain_seeds) {
+		run_chaos(4, Vector<int>(), 0, uint64_t(seed), 1500);
+		run_chaos(4, two, 0, uint64_t(seed), 1500);
+	}
+	static const int candidate_seeds[3] = { 7, 29, 34 };
+	for (const int seed : candidate_seeds) {
+		run_chaos(5, three, 3, uint64_t(seed), 1500);
+	}
+}
+
 
 TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh: a hostile node, then the others agree again") {
 	const int seeds = fuzz_env("TICK_FUZZ_SEEDS", 3);

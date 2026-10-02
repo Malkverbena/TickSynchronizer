@@ -18,6 +18,39 @@ static constexpr uint32_t MESH_MAX_SAMPLES = 32;
 static constexpr uint64_t MESH_REGISTRY_SETTLE_USEC = 1000000;
 // Most messages kept for a registry that can't answer yet (taking over, or without its quorum); more are dropped.
 static constexpr uint32_t MESH_MAX_DEFERRED = 4096;
+// A term of the roles, or a version of an object, further ahead than this isn't believed: no mesh changes its roles or
+// the owner of an object this many times before a node hears of it.
+static constexpr uint32_t MESH_MAX_SERIAL_JUMP = 1 << 20;
+// A state stamped further ahead of this node's timeline than this many seconds isn't taken.
+static constexpr int MESH_MAX_STATE_LEAD_SECONDS = 5;
+
+
+// The term or the version after `p_value`. They wrap around, and 0 means "none": it's skipped.
+static uint32_t mesh_next_serial(uint32_t p_value) {
+	const uint32_t next = p_value + 1;
+	return next == 0 ? 1 : next;
+}
+
+
+// Whether the term or version `p_value` replaces `p_known`: it comes after it, near enough to be believed (see
+// `MESH_MAX_SERIAL_JUMP`). Anything replaces "none" (0), and "none" replaces nothing.
+static bool mesh_serial_newer(uint32_t p_value, uint32_t p_known) {
+	if (p_value == 0) {
+		return false;
+	}
+	if (p_known == 0) {
+		return true;
+	}
+	const uint32_t ahead = p_value - p_known;
+	return ahead != 0 && ahead <= MESH_MAX_SERIAL_JUMP;
+}
+
+
+// Whether two terms or versions are so far apart that neither replaces the other: one of them isn't this mesh's.
+static bool mesh_serial_apart(uint32_t p_value, uint32_t p_known) {
+	return p_value != p_known && !mesh_serial_newer(p_value, p_known) && !mesh_serial_newer(p_known, p_value);
+}
+
 
 // Every node must have the same candidates, in the same order: checked in the handshake.
 static uint32_t mesh_candidates_hash(const Vector<int> &p_candidates) {
@@ -86,6 +119,8 @@ Error TickMeshCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 	// The node a role starts on has it with this process; the other nodes learn the process when they meet it.
 	registry_boot = is_registry() ? boot_id : 0;
 	clock_boot = is_clock_master() ? boot_id : 0;
+	registry_epoch = 1;
+	reported_epoch = 0;
 	status_sent = false;
 	sent_status = RoleStatus();
 	reference_valid = false;
@@ -432,6 +467,8 @@ void TickMeshCore::handle_hello(int p_peer, TickDataBuffer &p_message) {
 		reason = "The nodes of a mesh must start with the same registry and clock master.";
 	} else if (candidates != mesh_candidates_hash(settings.role_candidates)) {
 		reason = "The nodes of a mesh must have the same role candidates.";
+	} else if (mesh_serial_apart(term, roles_term)) {
+		reason = "The roles of the two nodes are too far apart to be of the same mesh.";
 	}
 	if (!reason.is_empty()) {
 		peer->rejected = true;
@@ -471,8 +508,8 @@ void TickMeshCore::on_peer_ready(int p_peer) {
 			send_spawn(p_peer, spawn_id);
 		}
 	}
-	if (p_peer == settings.registry_peer && is_registry_reachable()) {
-		claim_unbound_objects();
+	if (p_peer == settings.registry_peer) {
+		sync_with_registry();
 	}
 	send_role_status(p_peer, make_role_status());
 	if (listener) {
@@ -549,7 +586,7 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 	}
 	if (type == TICK_MESSAGE_REJECT) {
 		if (!peers.has(from)) {
-			stats.malformed_packets++;
+			stats.unexpected_packets++;
 			return;
 		}
 		const String reason = message.read_string();
@@ -561,7 +598,7 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 	}
 	// Everything else only from ready nodes (or this node).
 	if (!is_peer_ready(from)) {
-		stats.malformed_packets++;
+		stats.unexpected_packets++;
 		return;
 	}
 	// The registry's messages only from the registry (H2).
@@ -593,7 +630,8 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 			break;
 		case TICK_MESSAGE_REGISTRY_REPORT:
 			if (!is_registry()) {
-				stats.malformed_packets++;
+				// The registry moved while the report was on its way.
+				stats.unexpected_packets++;
 			} else {
 				handle_registry_report(from, message);
 			}
@@ -603,7 +641,8 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 		case TICK_MESSAGE_AUTH_TRANSFER:
 		case TICK_MESSAGE_AUTH_DENIED:
 			if (!from_registry) {
-				stats.malformed_packets++;
+				// From a node that had the registry, or that this node doesn't know as the registry yet.
+				stats.unexpected_packets++;
 			} else if (!is_registry_reachable()) {
 				// The node of the registry, but not the process that has it (it restarted): it doesn't know the mesh's
 				// objects until it takes the role again (ADR-074).
@@ -623,10 +662,17 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 		case TICK_MESSAGE_AUTH_ASSIGN:
 		case TICK_MESSAGE_AUTH_RELEASE: {
 			if (!is_registry()) {
-				stats.malformed_packets++;
+				// For the registry this node was.
+				stats.unexpected_packets++;
 				break;
 			}
 			if (!registry_can_act()) {
+				if (type == TICK_MESSAGE_AUTH_RELEASE && !registry_settling) {
+					// Without its quorum, or with its role in doubt, this registry may not answer for long, and the owner
+					// doesn't simulate an object it's releasing: it takes it back.
+					registry_refuse_release(p_packet);
+					break;
+				}
 				// Answered once this registry has every node's view (ADR-073), its role and its quorum (ADR-074).
 				registry_defer(p_packet);
 				break;
@@ -674,8 +720,13 @@ int64_t TickMeshCore::compute_epoch() const {
 
 void TickMeshCore::handle_ping(int p_peer, TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
-	if (p_message.is_buffer_failed() || !is_clock_master()) {
+	if (p_message.is_buffer_failed()) {
 		stats.malformed_packets++;
+		return;
+	}
+	if (!is_clock_master()) {
+		// For the clock this node was.
+		stats.unexpected_packets++;
 		return;
 	}
 	if (clock_boot != boot_id) {
@@ -695,8 +746,14 @@ void TickMeshCore::handle_pong(int p_peer, TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
 	const uint64_t master_time = p_message.read_uint_bits(64);
 	const int64_t epoch = p_message.read_int_bits(64);
-	if (p_message.is_buffer_failed() || p_peer != settings.clock_master || is_clock_master()) {
+	// A time or an epoch no running node has makes the pong malformed: nothing of it is taken.
+	if (p_message.is_buffer_failed() || !TickClock::is_plausible_time(epoch) || !TickClock::is_plausible_sample(client_time, master_time, now_usec)) {
 		stats.malformed_packets++;
+		return;
+	}
+	if (p_peer != settings.clock_master || is_clock_master()) {
+		// From the clock a node was.
+		stats.unexpected_packets++;
 		return;
 	}
 	if (is_clock_lost()) {
@@ -726,12 +783,14 @@ void TickMeshCore::follow_timeline(double p_target_frame) {
 		// The timeline isn't known yet: nothing is simulated.
 		return;
 	}
-	const uint32_t target = uint32_t(Math::floor(p_target_frame));
+	const uint32_t target = tick_frame_at(p_target_frame);
 	const int32_t behind = int32_t(target - stepper.get_next_frame_index()) + 1;
 	const int32_t limit = stepper.get_max_ticks_per_advance();
 	if (behind > limit * 4 || behind < -limit * 4) {
-		// Too far off (start, or a long hitch): jump to the timeline's frame.
+		// Too far off (start, a long hitch, or another clock): jump to the timeline's frame. The states received before
+		// have frames of where the timeline was.
 		stepper.set_next_frame_index(target);
+		reset_received_states();
 		tick(stepper.step_frame());
 		return;
 	}
@@ -921,6 +980,9 @@ void TickMeshCore::send_states(uint32_t p_frame) {
 void TickMeshCore::handle_state(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t frame = uint32_t(p_message.read_uint_bits(32));
 	const int count = int(p_message.read_uint_bits(16));
+	// A frame far ahead of this node's own is of a node whose clock is off (or of a timeline this node doesn't follow
+	// yet): taking it would leave every state that comes after it looking old.
+	const bool too_far_ahead = int32_t(frame - stepper.get_next_frame_index()) > settings.ticks_per_second * MESH_MAX_STATE_LEAD_SECONDS;
 	for (int i = 0; i < count && !p_message.is_buffer_failed(); i++) {
 		const uint16_t id = uint16_t(p_message.read_uint_bits(16));
 		const uint32_t version = uint32_t(p_message.read_uint_bits(32));
@@ -938,7 +1000,8 @@ void TickMeshCore::handle_state(int p_peer, TickDataBuffer &p_message) {
 		if (entry->object == nullptr) {
 			continue;
 		}
-		if (entry->last_state_frame != TICK_FRAME_NONE && !tick_frame_after(frame, entry->last_state_frame)) {
+		if (too_far_ahead || (entry->last_state_frame != TICK_FRAME_NONE && !tick_frame_after(frame, entry->last_state_frame))) {
+			stats.late_states++;
 			continue;
 		}
 		Sample sample;
@@ -1110,10 +1173,38 @@ void TickMeshCore::registry_deny(int p_peer, uint16_t p_id) {
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Answers a release this registry can't take now (it has no quorum, its role is in doubt, or too many messages wait
+// for it) with a denial: the owner stopped simulating the object to release it, and takes it back.
+void TickMeshCore::registry_refuse_release(const TickTransport::Packet &p_packet) {
+	TickDataBuffer message(TickBitArray(p_packet.data.ptr(), int(p_packet.data.size())));
+	message.begin_read();
+	message.read_uint_bits(8);
+	const uint16_t id = uint16_t(message.read_uint_bits(16));
+	message.read_uint_bits(32);
+	const int to = int(message.read_int_bits(32));
+	if (message.is_buffer_failed()) {
+		stats.malformed_packets++;
+		return;
+	}
+	// The owner's refusal of a transfer (`to` below 0) froze nothing.
+	if (to >= 0) {
+		registry_deny(p_packet.from_peer, id);
+	}
+}
+
+
 void TickMeshCore::registry_change_owner(uint16_t p_id, int p_new_owner, uint32_t p_frame, const TickDataBuffer *p_state) {
 	RegistryRecord &record = registry[p_id];
+	if (record.pending_to >= 0 && record.pending_to != p_new_owner) {
+		// The transfer in progress doesn't happen: whoever asked for it is told.
+		registry_deny(record.pending_requester, p_id);
+	}
+	// Announced again with the owner it had (by a registry that took over, or after a late report): the release its
+	// owner may have sent for the version it knew is still good.
+	record.previous_version = record.owner == p_new_owner ? record.version : 0;
 	record.owner = p_new_owner;
-	record.version++;
+	record.version = mesh_next_serial(record.version);
 	record.frame = p_frame;
 	record.pending_to = -1;
 	record.pending_requester = 0;
@@ -1196,8 +1287,14 @@ void TickMeshCore::registry_handle_release(int p_peer, TickDataBuffer &p_message
 		return;
 	}
 	RegistryRecord *record = registry.getptr(id);
-	// Only the current owner, for the current version.
-	if (record == nullptr || record->owner != p_peer || record->version != version) {
+	// Only the current owner, for the current version, or for the one it had before this registry announced the object
+	// again without changing its owner.
+	const bool current = record && record->owner == p_peer && (record->version == version || (record->previous_version != 0 && record->previous_version == version));
+	if (!current) {
+		if (to >= 0) {
+			// The node froze the object to release it: it's told the release didn't happen, and takes it back.
+			registry_deny(p_peer, id);
+		}
 		return;
 	}
 	if (to < 0) {
@@ -1208,10 +1305,12 @@ void TickMeshCore::registry_handle_release(int p_peer, TickDataBuffer &p_message
 		registry_deny(requester, id);
 		return;
 	}
-	if (record->pending_to >= 0 && record->pending_to != to) {
-		// Released somewhere else than the pending transfer asked.
-		registry_deny(record->pending_requester, id);
+	if (to == record->owner) {
+		// Released to its own owner: no announcement would say the owner changed, so the release is answered here.
+		registry_deny(p_peer, id);
+		return;
 	}
+	// Released somewhere else than a pending transfer asked: `registry_change_owner()` tells who asked for it.
 	if (to > 0 && to != local_id && !is_peer_ready(to)) {
 		// The new owner is gone: the object is orphaned instead.
 		registry_change_owner(id, 0, frame, has_state ? &state : nullptr);
@@ -1229,17 +1328,13 @@ void TickMeshCore::registry_on_peer_left(int p_peer) {
 	for (const uint16_t id : ids) {
 		RegistryRecord &record = registry[id];
 		if (record.owner == p_peer) {
-			// Orphaned (ADR-010): the last state known here goes with the announcement.
-			const int requester = record.pending_requester;
-			const bool had_pending = record.pending_to >= 0;
+			// Orphaned (ADR-010): the last state known here goes with the announcement. Whoever asked for a transfer of
+			// it is told it won't happen (`registry_change_owner()`).
 			const Entry *entry = entries.getptr(id);
 			const uint32_t frame = entry && entry->last_state_frame != TICK_FRAME_NONE ? entry->last_state_frame : stepper.get_next_frame_index();
 			TickDataBuffer state;
 			const bool has_state = registry_local_state(id, state);
 			registry_change_owner(id, 0, frame, has_state ? &state : nullptr);
-			if (had_pending && requester != p_peer) {
-				registry_deny(requester, id);
-			}
 		} else if (record.pending_to >= 0 && (record.pending_to == p_peer || record.pending_requester == p_peer)) {
 			const int requester = record.pending_requester;
 			record.pending_to = -1;
@@ -1277,14 +1372,26 @@ void TickMeshCore::handle_announce(int p_peer, TickDataBuffer &p_message) {
 	if (has_state) {
 		p_message.read_data_buffer(state);
 	}
-	if (p_message.is_buffer_failed() || id == 0 || path.is_empty()) {
+	if (p_message.is_buffer_failed() || id == 0 || path.is_empty() || owner < 0 || version == 0) {
 		stats.malformed_packets++;
 		return;
 	}
 
+	// Announcements come from the current registry (see `handle_packet()`), and what it says wins over what another
+	// registry did, whatever the versions: two registries of a mesh that split count their versions apart. Its own
+	// versions only go up.
 	Entry *existing = entries.getptr(id);
-	if (existing && version < existing->version) {
+	if (existing && existing->registry_epoch == registry_epoch && existing->version != version && !mesh_serial_newer(version, existing->version)) {
 		return;
+	}
+	// A path has one entry: if it had another id here (given by another registry), that entry is gone.
+	const uint16_t *named_before = ids_by_path.getptr(path);
+	if (named_before && *named_before != id) {
+		const uint16_t other_id = *named_before;
+		pending_requests.erase(other_id);
+		ids_by_path.erase(path);
+		entries.erase(other_id);
+		existing = entries.getptr(id);
 	}
 	if (existing == nullptr) {
 		Entry fresh;
@@ -1294,14 +1401,20 @@ void TickMeshCore::handle_announce(int p_peer, TickDataBuffer &p_message) {
 	}
 	Entry &entry = entries[id];
 	if (entry.path != path) {
-		// The id names another object here (learned from a process that wasn't the registry): it starts over.
-		const uint16_t *named = ids_by_path.getptr(entry.path);
+		// The id names another object here (learned from a process that wasn't the registry): it starts over, and the
+		// object that had the id here is claimed again.
+		const String previous_path = entry.path;
+		const uint16_t *named = ids_by_path.getptr(previous_path);
 		if (named && *named == id) {
-			ids_by_path.erase(entry.path);
+			ids_by_path.erase(previous_path);
 		}
 		entry = Entry();
 		entry.path = path;
 		ids_by_path.insert(path, id);
+		TickSyncObject **unbound = local_objects.getptr(previous_path);
+		if (unbound && !ids_by_path.has(previous_path)) {
+			claim(*unbound);
+		}
 	}
 	const bool first = entry.version == 0;
 	const int old_owner = entry.owner;
@@ -1313,12 +1426,14 @@ void TickMeshCore::handle_announce(int p_peer, TickDataBuffer &p_message) {
 	entry.path = path;
 	entry.owner = owner;
 	entry.version = version;
+	entry.registry_epoch = registry_epoch;
 	entry.frame = frame;
 	entry.schema_hash = schema_hash;
 	bind_entry(id, entry);
 
 	if (old_owner != owner || first) {
 		entry.frozen = false;
+		entry.release_own = false;
 		entry.samples.clear();
 		entry.last_state_frame = TICK_FRAME_NONE;
 		entry.last_sent.clear();
@@ -1333,11 +1448,14 @@ void TickMeshCore::handle_announce(int p_peer, TickDataBuffer &p_message) {
 					entry.object->set_sync_var(int(i), values[i]);
 				}
 			} else {
+				// The state is of the frame the owner changed at. On a timeline that started over since then, that frame is
+				// ahead of this node's: the state counts as of now, or the owner's next states would look older than it.
+				const uint32_t current = stepper.get_next_frame_index();
 				Sample sample;
-				sample.frame = frame;
+				sample.frame = tick_frame_after(frame, current) ? current : frame;
 				sample.values = values;
 				entry.samples.push_back(sample);
-				entry.last_state_frame = frame;
+				entry.last_state_frame = sample.frame;
 			}
 		}
 	}
@@ -1428,9 +1546,21 @@ void TickMeshCore::handle_denied(int p_peer, TickDataBuffer &p_message) {
 		stats.malformed_packets++;
 		return;
 	}
-	stats.denied_requests++;
-	pending_requests.erase(id);
 	Entry *entry = entries.getptr(id);
+	// The game is told about what it asked for: a request, an assignment, or a release of its own. A release a
+	// transfer asked for isn't its doing.
+	bool tell = true;
+	if (entry && entry->owner == local_id && entry->frozen) {
+		// The registry didn't take the release: the object stays here, simulated again.
+		tell = entry->release_own || pending_requests.has(id);
+		entry->frozen = false;
+		entry->release_own = false;
+	}
+	pending_requests.erase(id);
+	if (!tell) {
+		return;
+	}
+	stats.denied_requests++;
 	if (listener && entry && entry->object) {
 		listener->on_authority_request_denied(entry->object);
 	}
@@ -1462,8 +1592,13 @@ Error TickMeshCore::release_authority(TickSyncObject *p_object, int p_to_peer) {
 	ERR_FAIL_NULL_V_MSG(entry, ERR_UNAVAILABLE, "The object isn't registered in the mesh yet.");
 	ERR_FAIL_COND_V_MSG(entry->owner != local_id, ERR_UNAUTHORIZED, "Only the owner can release an object.");
 	ERR_FAIL_COND_V_MSG(entry->frozen, ERR_BUSY, "The object is already being released.");
+	if (p_to_peer == local_id) {
+		// Released to its own owner: there's nothing to change, and no announcement would ever end the release.
+		return OK;
+	}
 	ERR_FAIL_COND_V_MSG(!is_registry_reachable(), ERR_UNAVAILABLE, "The registry node isn't connected.");
 	release_frozen(id, *entry, p_to_peer);
+	entry->release_own = true;
 	return OK;
 }
 
@@ -1493,7 +1628,7 @@ Error TickMeshCore::change_roles(int p_registry, int p_clock_master) {
 		return OK;
 	}
 	BusyScope busy(this);
-	const uint32_t term = roles_term + 1;
+	const uint32_t term = mesh_next_serial(roles_term);
 	// A role that moves goes to the node's current process; one that stays keeps the process it had.
 	const uint32_t new_registry_boot = p_registry == settings.registry_peer ? registry_boot : get_node_boot(p_registry);
 	const uint32_t new_clock_boot = p_clock_master == settings.clock_master ? clock_boot : get_node_boot(p_clock_master);
@@ -1506,7 +1641,8 @@ Error TickMeshCore::change_roles(int p_registry, int p_clock_master) {
 
 bool TickMeshCore::roles_beat(uint32_t p_term, int p_registry, int p_clock, uint32_t p_other_term, int p_other_registry, int p_other_clock) {
 	if (p_term != p_other_term) {
-		return p_term > p_other_term;
+		// Terms wrap around; one too far ahead to be this mesh's beats nothing.
+		return mesh_serial_newer(p_term, p_other_term);
 	}
 	if (p_registry != p_other_registry) {
 		return p_registry < p_other_registry;
@@ -1536,7 +1672,8 @@ void TickMeshCore::handle_roles(int p_peer, TickDataBuffer &p_message) {
 	const int new_clock = int(p_message.read_int_bits(32));
 	const uint32_t new_registry_boot = uint32_t(p_message.read_uint_bits(32));
 	const uint32_t new_clock_boot = uint32_t(p_message.read_uint_bits(32));
-	if (p_message.is_buffer_failed() || new_registry <= 0 || new_clock <= 0) {
+	// A term no node of this mesh gets to by changing its roles makes the message malformed.
+	if (p_message.is_buffer_failed() || new_registry <= 0 || new_clock <= 0 || mesh_serial_apart(term, roles_term)) {
 		stats.malformed_packets++;
 		return;
 	}
@@ -1607,7 +1744,7 @@ void TickMeshCore::fill_vacant_roles() {
 			return;
 		}
 	}
-	const uint32_t term = roles_term + 1;
+	const uint32_t term = mesh_next_serial(roles_term);
 	const int new_registry = registry_lost ? local_id : settings.registry_peer;
 	const int new_clock = clock_lost ? local_id : settings.clock_master;
 	const uint32_t new_registry_boot = registry_lost ? boot_id : registry_boot;
@@ -1624,6 +1761,7 @@ void TickMeshCore::learn_role_boots(uint32_t p_registry_boot, uint32_t p_clock_b
 	if (p_registry_boot != 0 && p_registry_boot != registry_boot && (registry_boot == 0 || is_role_process_present(settings.registry_peer, registry_boot))) {
 		const bool knew_another = registry_boot != 0;
 		registry_boot = p_registry_boot;
+		registry_epoch++;
 		if (knew_another) {
 			if (is_registry()) {
 				registry.clear();
@@ -1636,6 +1774,8 @@ void TickMeshCore::learn_role_boots(uint32_t p_registry_boot, uint32_t p_clock_b
 			}
 			forget_objects();
 		}
+		// The registry's process is known now: if it's in reach, it gets this node's view and claims.
+		sync_with_registry();
 	}
 	if (p_clock_boot != 0 && p_clock_boot != clock_boot && (clock_boot == 0 || is_role_process_present(settings.clock_master, clock_boot))) {
 		const bool knew_another = clock_boot != 0;
@@ -1676,9 +1816,8 @@ void TickMeshCore::send_role_status(int p_peer, const RoleStatus &p_status) {
 	const double frame = timeline_trusted ? get_timeline_frame(now_usec) : -1.0;
 	message.add_bool(frame >= 0.0);
 	if (frame >= 0.0) {
-		const double whole = Math::floor(frame);
-		message.add_uint_bits(uint64_t(whole) & 0xFFFFFFFF, 32);
-		message.add_uint_bits(uint64_t((frame - whole) * 256.0) & 0xFF, 8);
+		message.add_uint_bits(tick_frame_at(frame), 32);
+		message.add_uint_bits(uint64_t((frame - Math::floor(frame)) * 256.0) & 0xFF, 8);
 	}
 	if (p_peer == 0) {
 		send_to_ready_peers(TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message, false);
@@ -1700,7 +1839,7 @@ void TickMeshCore::handle_role_status(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t frame = has_frame ? uint32_t(p_message.read_uint_bits(32)) : 0;
 	const int fraction = has_frame ? int(p_message.read_uint_bits(8)) : 0;
 	PeerState *peer = peers.getptr(p_peer);
-	if (p_message.is_buffer_failed() || peer == nullptr || status.registry <= 0 || status.clock <= 0 || status.registry_view > ROLE_VIEW_LOST || status.clock_view > ROLE_VIEW_LOST) {
+	if (p_message.is_buffer_failed() || peer == nullptr || status.registry <= 0 || status.clock <= 0 || status.registry_view > ROLE_VIEW_LOST || status.clock_view > ROLE_VIEW_LOST || mesh_serial_apart(status.term, roles_term)) {
 		stats.malformed_packets++;
 		return;
 	}
@@ -1741,10 +1880,28 @@ void TickMeshCore::update_roles() {
 		sent_status = status;
 		send_role_status(0, status);
 	}
+	if (is_registry_lost()) {
+		// Nobody answers the releases in progress while the registry is gone: the objects go on with this node.
+		LocalVector<String> denied_paths;
+		cancel_releases(denied_paths);
+		notify_denied(denied_paths);
+		if (!is_active()) {
+			return;
+		}
+	}
 	fill_vacant_roles();
 }
 
 void TickMeshCore::adopt_roles(uint32_t p_term, int p_registry, int p_clock, uint32_t p_registry_boot, uint32_t p_clock_boot, bool p_resync) {
+	// A node that never met the process with a role announces the role without it (0). The role's node takes it as its
+	// own process; the others keep the one they knew for that node, or learn it later from the nodes that know it.
+	// Without this, nobody would know the process, and the role could never be told lost.
+	if (p_registry_boot == 0) {
+		p_registry_boot = p_registry == local_id ? boot_id : (p_registry == settings.registry_peer ? registry_boot : 0);
+	}
+	if (p_clock_boot == 0) {
+		p_clock_boot = p_clock == local_id ? boot_id : (p_clock == settings.clock_master ? clock_boot : 0);
+	}
 	const int old_registry = settings.registry_peer;
 	// A role moved if another node has it, or another process of the same node: it restarted, and took the role again
 	// knowing nothing of what its previous process knew.
@@ -1758,14 +1915,30 @@ void TickMeshCore::adopt_roles(uint32_t p_term, int p_registry, int p_clock, uin
 	registry_boot = p_registry_boot;
 	clock_boot = p_clock_boot;
 	stats.role_changes++;
+	if (registry_moved) {
+		registry_epoch++;
+	}
+	if (p_resync && clock.is_master()) {
+		// This node joins a mesh that moved on while it ran its own clock (it restarted as the clock master, or it was
+		// cut off): its frames aren't the mesh's timeline.
+		timeline_trusted = false;
+	}
 
 	if (clock_moved) {
-		if (p_clock == local_id) {
+		if (p_clock == local_id && p_clock_boot != boot_id) {
+			// The mesh knows another process of this node as its clock: this one restarted, and nobody took the role. A
+			// process that started as the clock has frames of its own, which aren't the mesh's timeline until it takes the
+			// role again (then it takes the frame the other nodes tell it). One that followed the mesh goes on as it was.
+			if (clock.is_master()) {
+				timeline_trusted = false;
+			}
+		} else if (p_clock == local_id) {
 			// A node that followed the mesh's timeline goes on from its current frame, which becomes the reference. One
 			// that didn't (it restarted as the clock, or it just joined) takes the frame the other nodes told it.
 			if (!(timeline_trusted && clock.is_synchronized()) && reference_valid) {
 				const double frame = reference_frame + double(now_usec - reference_usec) * double(settings.ticks_per_second) / 1000000.0;
-				stepper.set_next_frame_index(uint32_t(uint64_t(frame) & 0xFFFFFFFF));
+				stepper.set_next_frame_index(tick_frame_at(frame));
+				reset_received_states();
 			}
 			clock.set_master(true);
 			stepped_usec = 0;
@@ -1803,9 +1976,7 @@ void TickMeshCore::adopt_roles(uint32_t p_term, int p_registry, int p_clock, uin
 		}
 		pending_requests.clear();
 		// The objects this node was releasing stay its own.
-		for (KeyValue<uint16_t, Entry> &E : entries) {
-			E.value.frozen = false;
-		}
+		cancel_releases(denied_paths);
 		if (old_registry == local_id) {
 			registry.clear();
 			registry_ids_by_path.clear();
@@ -1828,21 +1999,57 @@ void TickMeshCore::adopt_roles(uint32_t p_term, int p_registry, int p_clock, uin
 	}
 
 	// Game code, last.
-	for (const String &path : denied_paths) {
+	notify_denied(denied_paths);
+	if (listener) {
+		listener->on_roles_changed(p_registry, p_clock);
+	}
+}
+
+
+// Gives up the releases in progress: nobody will answer them (the registry moved, or it's gone), so the objects stay
+// with this node, simulated again. Adds the paths of the ones the game asked to release to `r_denied_paths`.
+void TickMeshCore::cancel_releases(LocalVector<String> &r_denied_paths) {
+	for (KeyValue<uint16_t, Entry> &E : entries) {
+		Entry &entry = E.value;
+		if (!entry.frozen) {
+			continue;
+		}
+		if (entry.release_own) {
+			r_denied_paths.push_back(entry.path);
+		}
+		entry.frozen = false;
+		entry.release_own = false;
+	}
+}
+
+
+// Tells the game that what it asked for these objects (a request, an assignment or a release) won't happen.
+void TickMeshCore::notify_denied(const LocalVector<String> &p_paths) {
+	for (const String &path : p_paths) {
 		stats.denied_requests++;
 		TickSyncObject **object = local_objects.getptr(path);
 		if (listener && object) {
 			listener->on_authority_request_denied(*object);
 		}
 	}
-	if (listener) {
-		listener->on_roles_changed(p_registry, p_clock);
+}
+
+
+// Forgets the states received from the other nodes: the timeline's frames jumped, so their frames are of another
+// stretch of it, and the next states would look older than them.
+void TickMeshCore::reset_received_states() {
+	for (KeyValue<uint16_t, Entry> &E : entries) {
+		E.value.samples.clear();
+		E.value.last_state_frame = TICK_FRAME_NONE;
 	}
 }
 
 void TickMeshCore::registry_defer(const TickTransport::Packet &p_packet) {
 	if (registry_deferred.size() >= MESH_MAX_DEFERRED) {
 		WARN_PRINT_ONCE("The registry of the mesh can't answer (it's taking over, or it lost its quorum) and too many messages wait for it: the new ones are dropped.");
+		if (!p_packet.data.is_empty() && p_packet.data[0] == TICK_MESSAGE_AUTH_RELEASE) {
+			registry_refuse_release(p_packet);
+		}
 		return;
 	}
 	registry_deferred.push_back(p_packet);
@@ -1881,6 +2088,7 @@ void TickMeshCore::send_registry_report() {
 	if (registry_node == local_id || !is_registry_reachable()) {
 		return;
 	}
+	reported_epoch = registry_epoch;
 	// Split in messages the transport takes; the last one says so (an empty view is one empty message).
 	const int max_bytes = MAX(64, transport->get_max_payload_size());
 	LocalVector<uint16_t> ids;
@@ -1929,6 +2137,24 @@ void TickMeshCore::send_registry_report() {
 	}
 }
 
+// Sends this node's view of the objects to a registry it reaches and didn't report to yet, so the registry learns
+// what only this node knows (the registry answers a late report with its own view), then claims the objects of this
+// node that have no id. A node that knows no object has nothing to report.
+void TickMeshCore::sync_with_registry() {
+	if (is_registry() || !is_registry_reachable()) {
+		return;
+	}
+	if (reported_epoch != registry_epoch) {
+		if (entries.is_empty()) {
+			reported_epoch = registry_epoch;
+		} else {
+			send_registry_report();
+		}
+	}
+	claim_unbound_objects();
+}
+
+
 void TickMeshCore::handle_registry_report(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t term = uint32_t(p_message.read_uint_bits(32));
 	const bool last = p_message.read_bool();
@@ -1956,24 +2182,32 @@ void TickMeshCore::handle_registry_report(int p_peer, TickDataBuffer &p_message)
 		const uint32_t version = uint32_t(p_message.read_uint_bits(32));
 		const uint32_t frame = uint32_t(p_message.read_uint_bits(32));
 		const uint32_t schema_hash = uint32_t(p_message.read_uint_bits(32));
-		if (p_message.is_buffer_failed() || id == 0 || path.is_empty() || owner < 0) {
+		if (p_message.is_buffer_failed() || id == 0 || path.is_empty() || owner < 0 || version == 0) {
 			stats.malformed_packets++;
 			return;
 		}
 		// The newest version any node saw is the truth: the previous registry's last announcements may have reached
-		// only some nodes.
+		// only some nodes. Versions wrap around, and one too far ahead of what this registry knows isn't believed.
 		RegistryRecord *record = registry.getptr(id);
-		if (record && record->version >= version) {
+		if (record && !mesh_serial_newer(version, record->version)) {
 			continue;
 		}
 		const uint16_t *other = registry_ids_by_path.getptr(path);
 		if (other && *other != id) {
-			if (registry[*other].version >= version) {
+			RegistryRecord &named = registry[*other];
+			if (!mesh_serial_newer(version, named.version)) {
 				continue;
+			}
+			if (named.pending_to >= 0) {
+				registry_deny(named.pending_requester, *other);
 			}
 			registry.erase(*other);
 		}
 		if (record) {
+			if (record->pending_to >= 0) {
+				// The record starts over: the transfer in progress doesn't happen.
+				registry_deny(record->pending_requester, id);
+			}
 			registry_ids_by_path.erase(record->path);
 		}
 		RegistryRecord merged;
@@ -2170,8 +2404,13 @@ void TickMeshCore::handle_spawn(int p_peer, TickDataBuffer &p_message) {
 	const bool adopted = p_message.read_bool();
 	// A node spawns with its own id; the registry sends the spawns of the nodes that left (ADR-074).
 	const bool from_origin = int(spawn_id >> 20) == (p_peer & 0xFFF);
-	if (p_message.is_buffer_failed() || name.is_empty() || (!from_origin && !(adopted && p_peer == settings.registry_peer))) {
+	if (p_message.is_buffer_failed() || name.is_empty()) {
 		stats.malformed_packets++;
+		return;
+	}
+	if (!from_origin && !(adopted && p_peer == settings.registry_peer)) {
+		// From a node that had the registry.
+		stats.unexpected_packets++;
 		return;
 	}
 	if (!from_origin && !is_registry_reachable()) {
@@ -2204,8 +2443,12 @@ void TickMeshCore::handle_despawn(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
 	const String spawner = p_message.read_string();
 	// From the node that spawned it, or from the registry (the spawns of the nodes that left are its own).
-	if (p_message.is_buffer_failed() || (int(spawn_id >> 20) != (p_peer & 0xFFF) && p_peer != settings.registry_peer)) {
+	if (p_message.is_buffer_failed()) {
 		stats.malformed_packets++;
+		return;
+	}
+	if (int(spawn_id >> 20) != (p_peer & 0xFFF) && p_peer != settings.registry_peer) {
+		stats.unexpected_packets++;
 		return;
 	}
 	spawns.erase(spawn_id);
@@ -2378,7 +2621,9 @@ Dictionary TickMeshCore::get_stats_dictionary() const {
 	result["states_sent"] = stats.states_sent;
 	result["states_received"] = stats.states_received;
 	result["stale_states"] = stats.stale_states;
+	result["late_states"] = stats.late_states;
 	result["malformed_packets"] = stats.malformed_packets;
+	result["unexpected_packets"] = stats.unexpected_packets;
 	result["transfers"] = stats.transfers;
 	result["orphans"] = stats.orphans;
 	result["denied_requests"] = stats.denied_requests;

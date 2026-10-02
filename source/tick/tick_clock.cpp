@@ -15,10 +15,22 @@ void TickClock::set_sample_window(int p_max_samples, int p_min_samples) {
 	clear_samples();
 }
 
-void TickClock::add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, uint64_t p_local_receive_usec) {
-	ERR_FAIL_COND_MSG(master, "The clock master doesn't take samples: its clock is the reference.");
+bool TickClock::is_plausible_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, uint64_t p_local_receive_usec) {
+	if (p_local_send_usec >= uint64_t(MAX_TIME_USEC) || p_local_receive_usec >= uint64_t(MAX_TIME_USEC)) {
+		return false;
+	}
+	// The master's clock may be behind the local one: what counts is how far apart they are.
+	return is_plausible_time(int64_t(p_master_usec - p_local_send_usec));
+}
+
+
+bool TickClock::add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, uint64_t p_local_receive_usec) {
+	ERR_FAIL_COND_V_MSG(master, false, "The clock master doesn't take samples: its clock is the reference.");
+	if (!is_plausible_sample(p_local_send_usec, p_master_usec, p_local_receive_usec)) {
+		return false;
+	}
 	if (p_local_receive_usec < p_local_send_usec) {
-		return;
+		return true;
 	}
 
 	// Until the clock is synchronized nothing uses it: the estimate applies right away.
@@ -41,7 +53,7 @@ void TickClock::add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, u
 
 	if (holding) {
 		if (int(samples.size()) < min_samples) {
-			return;
+			return true;
 		}
 		// The new master's samples are enough: the frames go on from where the held timeline is, on its clock.
 		holding = false;
@@ -50,12 +62,13 @@ void TickClock::add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, u
 		const int64_t apart = offset_usec - continued;
 		slew_from_usec = (apart > STEP_USEC || apart < -STEP_USEC) ? offset_usec : continued;
 		slew_start_usec = p_local_receive_usec;
-		return;
+		return true;
 	}
 
 	const int64_t difference = offset_usec - applied;
 	slew_from_usec = (!was_synchronized || difference > STEP_USEC || difference < -STEP_USEC) ? offset_usec : applied;
 	slew_start_usec = p_local_receive_usec;
+	return true;
 }
 
 void TickClock::clear_samples() {
@@ -81,12 +94,16 @@ void TickClock::hold(int64_t p_offset_usec, int64_t p_epoch_usec) {
 	pending_epoch_usec = p_epoch_usec;
 }
 
-void TickClock::set_master_epoch_usec(int64_t p_master_epoch_usec) {
+bool TickClock::set_master_epoch_usec(int64_t p_master_epoch_usec) {
+	if (!is_plausible_time(p_master_epoch_usec)) {
+		return false;
+	}
 	if (holding) {
 		pending_epoch_usec = p_master_epoch_usec;
-		return;
+		return true;
 	}
 	master_epoch_usec = p_master_epoch_usec;
+	return true;
 }
 
 void TickClock::update_estimate() {
@@ -154,18 +171,23 @@ void TickClock::set_ticks_per_second(int p_ticks_per_second) {
 	ticks_per_second = p_ticks_per_second;
 }
 
+// Microseconds of the master's clock since frame 0 at the given local time; negative before the epoch. The offsets and
+// the epochs are plausible times (see `MAX_TIME_USEC`), so the result fits; the arithmetic is unsigned, so a local
+// time that isn't plausible wraps around instead of overflowing.
+int64_t TickClock::get_timeline_usec(uint64_t p_local_usec) const {
+	return int64_t(p_local_usec + uint64_t(get_timeline_offset_usec(p_local_usec)) - uint64_t(get_timeline_epoch_usec()));
+}
+
 uint32_t TickClock::get_master_frame(uint64_t p_local_usec) const {
 	// Signed, so a local time before the master's clock started doesn't wrap around.
-	const int64_t master_usec = int64_t(p_local_usec) + get_timeline_offset_usec(p_local_usec);
-	const int64_t epoch = get_timeline_epoch_usec();
-	if (master_usec < epoch) {
+	const int64_t elapsed = get_timeline_usec(p_local_usec);
+	if (elapsed < 0) {
 		return 0;
 	}
 	// Frame indices wrap around, like the ones of `TickFixedStepper`.
-	return uint32_t(uint64_t(master_usec - epoch) * uint64_t(ticks_per_second) / 1000000);
+	return uint32_t(uint64_t(elapsed) * uint64_t(ticks_per_second) / 1000000);
 }
 
 double TickClock::get_master_frame_time(uint64_t p_local_usec) const {
-	const int64_t master_usec = int64_t(p_local_usec) + get_timeline_offset_usec(p_local_usec);
-	return double(master_usec - get_timeline_epoch_usec()) * double(ticks_per_second) / 1000000.0;
+	return double(get_timeline_usec(p_local_usec)) * double(ticks_per_second) / 1000000.0;
 }

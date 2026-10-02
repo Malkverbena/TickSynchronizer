@@ -971,4 +971,346 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] The spawns of a node that left 
 	}
 }
 
+
+// A release sent to a registry that is still taking over carries the version the object had before the takeover, and
+// the registry announces every object again, with another version, once it finishes: the release is still taken,
+// instead of leaving the object frozen with nobody simulating it.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] An object released while the registry moves changes owner") {
+	MeshWorld world(3);
+	world.run(2.0);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 2);
+
+	CHECK(world.cores[1].change_roles(3, 1) == OK);
+	// As soon as node 2 knows the new registry, which is still gathering every node's view of the objects.
+	for (int i = 0; i < 30 && world.cores[2].get_settings().registry_peer != 3; i++) {
+		world.run(1.0 / 60.0);
+	}
+	REQUIRE(world.cores[2].get_settings().registry_peer == 3);
+	CHECK(world.cores[2].release_authority(world.crates[2], 1) == OK);
+	world.run(2.0);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 1);
+	}
+	CHECK(world.listeners[2].denied == 0);
+	// The new owner simulates it, and the others follow.
+	const float before = world.crates[1]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[1]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[2]->position.x - world.crates[1]->position.x) < 0.5);
+	CHECK(Math::abs(world.crates[3]->position.x - world.crates[1]->position.x) < 0.5);
+}
+
+
+// A registry without its quorum changes no owner. The owner of an object it's asked to release stopped simulating
+// it: the registry tells it at once that the release didn't happen, and the object goes on with its owner.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A release the registry can't take is denied, and the object stays with its owner") {
+	// The three nodes are needed.
+	MeshWorld world(3, true, Vector<int>(), 3);
+	world.run(2.0);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 2);
+
+	// The registry loses node 3; node 2 still reaches both.
+	world.network.disconnect_peers(1, 3);
+	world.run(1.0);
+	CHECK_FALSE(world.cores[1].has_role_quorum());
+	CHECK(world.cores[2].release_authority(world.crates[2], 3) == OK);
+	world.run(1.0);
+	CHECK(world.listeners[2].denied == 1);
+	CHECK(world.cores[2].get_owner(world.crates[2]) == 2);
+	float before = world.crates[2]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[2]->position.x > before + 3.0);
+
+	// With its quorum again, the registry takes the same release.
+	world.network.connect_peers(1, 3);
+	world.run(1.0);
+	CHECK(world.cores[1].has_role_quorum());
+	CHECK(world.cores[2].release_authority(world.crates[2], 3) == OK);
+	world.run(1.0);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 3);
+	}
+	CHECK(world.listeners[2].denied == 1);
+	before = world.crates[3]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[3]->position.x > before + 3.0);
+}
+
+
+// The owner stops simulating an object while it releases it. When the registry is lost before answering, and no node
+// may take its place, nobody will ever answer: the object goes on with its owner, and the game is told.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A release the lost registry didn't answer leaves the object with its owner") {
+	// Only node 1 may have the roles.
+	Vector<int> candidates;
+	candidates.push_back(1);
+	MeshWorld world(3, true, candidates);
+	world.run(2.0);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 2);
+
+	// The registry's machine goes away with the release on its way.
+	world.isolate(1);
+	world.cores[1].stop();
+	CHECK(world.cores[2].release_authority(world.crates[2], 3) == OK);
+	world.run(1.5);
+	CHECK(world.cores[2].get_settings().registry_peer == 1);
+	CHECK(world.listeners[2].denied == 1);
+	CHECK(world.cores[2].get_owner(world.crates[2]) == 2);
+	const float before = world.crates[2]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[2]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[3]->position.x - world.crates[2]->position.x) < 0.5);
+}
+
+
+// Releasing an object to the node that owns it changes nothing: no announcement would ever end that release.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] An object released to its own owner goes on being simulated") {
+	MeshWorld world(3);
+	world.run(2.0);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 2);
+	const uint32_t version = world.cores[2].get_version(world.crates[2]);
+	CHECK(world.cores[2].release_authority(world.crates[2], 2) == OK);
+	world.run(1.0);
+	const float before = world.crates[2]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[2]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[3]->position.x - world.crates[2]->position.x) < 0.5);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 2);
+		CHECK(world.cores[i].get_version(world.crates[i]) == version);
+	}
+	CHECK(world.listeners[2].denied == 0);
+	// It can still give the object away.
+	CHECK(world.cores[2].release_authority(world.crates[2], 3) == OK);
+	world.run(1.0);
+	CHECK(world.cores[1].get_owner(world.crates[1]) == 3);
+}
+
+
+// The roles moved before (the term isn't the first one), the other candidate is down, and the process of the node
+// with the roles restarts. It starts as the clock, from frame 0, and learns from the hello of the node that stayed
+// that the mesh moved on: it takes the roles again from that node's frame, instead of starting the timeline over.
+// With the timeline started over, the frames of the states go back, and the nodes would stop following each other.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A clock that restarts after the roles moved goes on from the mesh's frame") {
+	Vector<int> candidates;
+	candidates.push_back(1);
+	candidates.push_back(2);
+	MeshWorld world(3, true, candidates);
+	// Node 3 has an object of its own, and node 1 another.
+	AuthMover *barrel_3 = memnew(AuthMover("barrel", 1));
+	AuthMover *barrel_1 = memnew(AuthMover("barrel", 1));
+	world.cores[3].register_object(barrel_3);
+	world.cores[1].register_object(barrel_1);
+	world.run(2.0);
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.run(0.5);
+	REQUIRE(world.cores[3].get_owner(world.crates[3]) == 3);
+	REQUIRE(world.cores[3].get_owner(barrel_3) == 1);
+	CHECK(world.cores[1].change_roles(2, 2) == OK);
+	world.run(1.0);
+	CHECK(world.cores[2].change_roles(1, 1) == OK);
+	world.run(3.0);
+	REQUIRE(world.cores[3].get_roles_term() == 2);
+	REQUIRE(world.cores[3].get_settings().clock_master == 1);
+
+	// Node 2 goes down; then node 1's process restarts. Node 3 isn't a candidate: nobody takes the roles meanwhile.
+	world.isolate(2);
+	world.cores[2].stop();
+	world.run(1.0);
+	const uint32_t frame_before = world.cores[3].get_frame();
+	world.cores[1].unregister_object(barrel_1);
+	world.isolate(1);
+	RestartedNode fresh(world, 1);
+	fresh.core.register_object(barrel_1);
+	world.run(1.0);
+	world.network.connect_peers(1, 3);
+	world.run(4.0);
+
+	CHECK(fresh.core.get_roles_term() == 3);
+	CHECK(world.cores[3].get_roles_term() == 3);
+	CHECK(fresh.core.get_settings().registry_peer == 1);
+	CHECK(fresh.core.get_settings().clock_master == 1);
+	// Five seconds later, on the same timeline.
+	CHECK(int32_t(world.cores[3].get_frame() - frame_before) >= 290);
+	CHECK(int32_t(world.cores[3].get_frame() - frame_before) <= 310);
+	const int64_t apart = int64_t(fresh.core.get_frame()) - int64_t(world.cores[3].get_frame());
+	CHECK((apart >= -3 && apart <= 3));
+	// Each node follows the object of the other.
+	REQUIRE(world.cores[3].get_owner(world.crates[3]) == 3);
+	REQUIRE(fresh.core.get_owner(barrel_1) == 1);
+	const float crate_before = world.crates[3]->position.x;
+	const float barrel_before = barrel_1->position.x;
+	world.run(1.0);
+	CHECK(world.crates[3]->position.x > crate_before + 3.0);
+	CHECK(Math::abs(fresh.crate->position.x - world.crates[3]->position.x) < 0.5);
+	CHECK(barrel_1->position.x > barrel_before + 3.0);
+	CHECK(Math::abs(barrel_3->position.x - barrel_1->position.x) < 0.5);
+
+	fresh.core.unregister_object(barrel_1);
+	memdelete(barrel_1);
+	world.cores[3].unregister_object(barrel_3);
+	memdelete(barrel_3);
+}
+
+
+// The terms of the roles wrap around, and one too far ahead isn't believed. Before, a single message with the highest
+// term made the next term 0, which every node took for older: the roles could never move again.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] The terms of the roles wrap around, and one too far ahead is refused") {
+	MeshWorld world(4);
+	world.run(2.0);
+	// A mesh on its first term takes any term (a node that joins takes the mesh's): here, the highest there is.
+	for (int to = 1; to <= 3; to++) {
+		TickDataBuffer roles;
+		roles.begin_write();
+		roles.add_uint_bits(TICK_MESSAGE_ROLES, 8);
+		roles.add_uint_bits(0xFFFFFFFF, 32);
+		roles.add_int_bits(1, 32);
+		roles.add_int_bits(1, 32);
+		roles.add_uint_bits(0, 32);
+		roles.add_uint_bits(0, 32);
+		world.send_raw(4, to, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, roles);
+	}
+	world.run(1.0);
+	for (int i = 1; i <= 4; i++) {
+		CHECK(world.cores[i].get_roles_term() == 0xFFFFFFFF);
+		CHECK(world.cores[i].get_settings().registry_peer == 1);
+	}
+	// The node with the roles is lost: node 2 takes them with the term after the highest, and the others follow.
+	world.network.remove_peer(1);
+	world.run(2.0);
+	for (int i = 2; i <= 4; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 2);
+		CHECK(world.cores[i].get_settings().clock_master == 2);
+		CHECK(world.cores[i].get_roles_term() == 1);
+		CHECK(world.cores[i].get_stats().role_changes <= 3);
+	}
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.run(1.0);
+	CHECK(world.cores[2].get_owner(world.crates[2]) == 3);
+
+	// From then on, a term that far ahead isn't of this mesh: the message is counted as malformed and changes nothing.
+	const uint64_t malformed = world.cores[3].get_stats().malformed_packets;
+	TickDataBuffer roles;
+	roles.begin_write();
+	roles.add_uint_bits(TICK_MESSAGE_ROLES, 8);
+	roles.add_uint_bits(0x7FFFFFF0, 32);
+	roles.add_int_bits(4, 32);
+	roles.add_int_bits(4, 32);
+	roles.add_uint_bits(0, 32);
+	roles.add_uint_bits(0, 32);
+	world.send_raw(4, 3, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, roles);
+	world.run(1.0);
+	CHECK(world.cores[3].get_stats().malformed_packets == malformed + 1);
+	for (int i = 2; i <= 4; i++) {
+		CHECK(world.cores[i].get_roles_term() == 1);
+		CHECK(world.cores[i].get_settings().registry_peer == 2);
+	}
+}
+
+
+// A version too far ahead of what the registry knows isn't believed, and an announcement must name an owner and a
+// version. Before, a report with the highest version made the next change of owner wrap to a version every node took
+// for older, and the object stayed frozen.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] Versions and owners that can't be true are refused") {
+	MeshWorld world(3);
+	world.run(2.0);
+	const uint16_t id = world.cores[2].get_net_id(world.crates[2]);
+	REQUIRE(id != 0);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 2);
+	const uint32_t version = world.cores[2].get_version(world.crates[2]);
+	const uint32_t schema_hash = world.crates[2]->get_sync_schema().hash();
+
+	// Node 3 reports the object to the registry with a version nearly at the highest.
+	TickDataBuffer report;
+	report.begin_write();
+	report.add_uint_bits(TICK_MESSAGE_REGISTRY_REPORT, 8);
+	report.add_uint_bits(world.cores[1].get_roles_term(), 32);
+	report.add_bool(true);
+	report.add_uint_bits(id, 16);
+	report.add_uint_bits(1, 16);
+	report.add_uint_bits(id, 16);
+	report.add_string("crate");
+	report.add_int_bits(3, 32);
+	report.add_uint_bits(0xFFFFFFFE, 32);
+	report.add_uint_bits(world.cores[1].get_frame(), 32);
+	report.add_uint_bits(schema_hash, 32);
+	world.send_raw(3, 1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, report);
+	world.run(1.0);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 2);
+		CHECK(world.cores[i].get_version(world.crates[i]) == version);
+	}
+
+	// An announcement without a version, or with an owner below zero, is malformed.
+	for (int bad = 0; bad < 2; bad++) {
+		TickDataBuffer announce;
+		announce.begin_write();
+		announce.add_uint_bits(TICK_MESSAGE_ANNOUNCE, 8);
+		announce.add_uint_bits(id, 16);
+		announce.add_string("crate");
+		announce.add_int_bits(bad == 0 ? -7 : 3, 32);
+		announce.add_uint_bits(bad == 0 ? version + 1 : 0, 32);
+		announce.add_uint_bits(world.cores[1].get_frame(), 32);
+		announce.add_uint_bits(schema_hash, 32);
+		announce.add_bool(false);
+		world.send_raw(1, 3, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, announce);
+	}
+	world.run(0.5);
+	CHECK(world.cores[3].get_stats().malformed_packets == 2);
+	CHECK(world.cores[3].get_owner(world.crates[3]) == 2);
+	CHECK(world.cores[3].get_version(world.crates[3]) == version);
+
+	// Ownership still changes through the registry.
+	CHECK(world.cores[1].request_authority(world.crates[1]) == OK);
+	world.run(1.0);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 1);
+	}
+	const float before = world.crates[1]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[1]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[3]->position.x - world.crates[1]->position.x) < 0.5);
+}
+
+
+// A state with a frame far ahead of the node's own (from a node whose clock is off) isn't taken: it would leave every
+// state that comes after it looking older. Messages for a role a node doesn't have aren't malformed: they have their
+// own counter.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] States far ahead of the timeline and messages for another role are set aside") {
+	MeshWorld world(3);
+	world.run(2.0);
+	const uint16_t id = world.cores[2].get_net_id(world.crates[2]);
+	REQUIRE(id != 0);
+	// A few states are late in any mesh: while the clocks settle, a node may send two states of the same frame.
+	const uint64_t late_before = world.cores[3].get_stats().late_states;
+
+	// As node 2, the owner, would send it: the crate far to the left, ten minutes ahead.
+	TickDataBuffer payload;
+	payload.begin_write();
+	world.crates[2]->get_sync_schema().codecs[0]->encode(Vector2(-500.0, 0.0), payload);
+	world.crates[2]->get_sync_schema().codecs[1]->encode(Vector2(), payload);
+	TickDataBuffer state;
+	state.begin_write();
+	state.add_uint_bits(TICK_MESSAGE_STATE, 8);
+	state.add_uint_bits(world.cores[3].get_frame() + 36000, 32);
+	state.add_uint_bits(1, 16);
+	state.add_uint_bits(id, 16);
+	state.add_uint_bits(world.cores[2].get_version(world.crates[2]), 32);
+	state.add_data_buffer(payload);
+	world.send_raw(2, 3, TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_UNRELIABLE, state);
+	world.run(1.0);
+	CHECK(world.cores[3].get_stats().late_states == late_before + 1);
+	CHECK(world.crates[3]->position.x > 0.0);
+	CHECK(Math::abs(world.crates[3]->position.x - world.crates[2]->position.x) < 0.5);
+
+	// A ping for the clock, sent to a node that isn't it.
+	TickDataBuffer ping;
+	ping.begin_write();
+	ping.add_uint_bits(TICK_MESSAGE_PING, 8);
+	ping.add_uint_bits(world.network.get_time_usec(), 64);
+	world.send_raw(2, 3, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, ping);
+	world.run(0.5);
+	CHECK(world.cores[3].get_stats().unexpected_packets == 1);
+	CHECK(world.cores[3].get_stats().malformed_packets == 0);
+}
+
 } // namespace TestTickMeshCore

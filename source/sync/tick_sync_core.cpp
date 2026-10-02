@@ -396,7 +396,7 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 			// Follows the source's timeline: simulates every frame up to the source's current one.
 			const double source_frame = clock_source->get_timeline_frame(now_usec);
 			if (source_frame >= 0.0) {
-				const uint32_t target = uint32_t(Math::floor(source_frame));
+				const uint32_t target = tick_frame_at(source_frame);
 				const uint32_t next = stepper.get_next_frame_index();
 				const int32_t behind = int32_t(target - next) + 1;
 				if (behind > stepper.get_max_ticks_per_advance() * 4 || behind < -stepper.get_max_ticks_per_advance() * 4) {
@@ -1179,10 +1179,13 @@ void TickSyncCore::client_handle_welcome(TickDataBuffer &p_message) {
 		stats.malformed_packets++;
 		return;
 	}
+	if (!clock.set_master_epoch_usec(epoch)) {
+		stats.malformed_packets++;
+		return;
+	}
 	settings.ticks_per_second = ticks_per_second;
 	stepper.set_ticks_per_second(ticks_per_second);
 	clock.set_ticks_per_second(ticks_per_second);
-	clock.set_master_epoch_usec(epoch);
 	welcomed = true;
 	if (listener) {
 		listener->on_peer_ready(settings.authority_peer);
@@ -1343,7 +1346,7 @@ bool TickSyncCore::get_state_at(const TickSyncObject *p_object, double p_frame, 
 	}
 	// The nearest known states around the frame (a client only has the snapshots it received).
 	static constexpr uint32_t MAX_GAP = 16;
-	const uint32_t frame = uint32_t(Math::floor(p_frame));
+	const uint32_t frame = tick_frame_at(p_frame);
 	const LocalVector<Variant> *past = nullptr;
 	const LocalVector<Variant> *future = nullptr;
 	uint32_t past_frame = frame;
@@ -1590,6 +1593,11 @@ void TickSyncCore::client_handle_pong(TickDataBuffer &p_message) {
 	const uint64_t server_time = p_message.read_uint_bits(64);
 	const int64_t epoch = p_message.read_int_bits(64);
 	if (p_message.is_buffer_failed()) {
+		stats.malformed_packets++;
+		return;
+	}
+	// Nothing of a pong with a time or an epoch no running server has is taken.
+	if (!TickClock::is_plausible_time(epoch) || !TickClock::is_plausible_sample(client_time, server_time, now_usec)) {
 		stats.malformed_packets++;
 		return;
 	}

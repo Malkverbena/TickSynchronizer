@@ -50,12 +50,20 @@ class TickClock {
 	void update_estimate();
 	// The offset applied at the given local time.
 	int64_t offset_at(uint64_t p_local_usec) const;
+	int64_t get_timeline_usec(uint64_t p_local_usec) const;
 
 public:
 	// The applied offset moves toward the estimate by this much per thousand of the elapsed time; a difference above
 	// `STEP_USEC` is applied at once.
 	static constexpr int64_t SLEW_PER_MILLE = 50;
 	static constexpr int64_t STEP_USEC = 100000;
+	// A time or an epoch beyond this (about 35 years, in microseconds) can't come from a running network. A sample or an
+	// epoch with one is refused, so nothing a faulty master sends overflows the arithmetic of the frames.
+	static constexpr int64_t MAX_TIME_USEC = int64_t(1) << 50;
+	static bool is_plausible_time(int64_t p_usec) { return p_usec > -MAX_TIME_USEC && p_usec < MAX_TIME_USEC; }
+	// Whether `add_sample()` takes these times: the local ones are plausible, and so is how far the master's clock is
+	// from the local one.
+	static bool is_plausible_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, uint64_t p_local_receive_usec);
 
 	void set_master(bool p_master);
 	bool is_master() const { return master; }
@@ -65,8 +73,9 @@ public:
 	void set_sample_window(int p_max_samples, int p_min_samples);
 
 	// Adds a ping round trip: the local time when the ping was sent, the master time written in the pong, and the
-	// local time when the pong arrived. Samples with the receive time before the send time are ignored.
-	void add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, uint64_t p_local_receive_usec);
+	// local time when the pong arrived. Samples with the receive time before the send time are ignored. Returns
+	// `false`, taking nothing, when a time isn't plausible (see `MAX_TIME_USEC`).
+	bool add_sample(uint64_t p_local_send_usec, uint64_t p_master_usec, uint64_t p_local_receive_usec);
 	void clear_samples();
 	int get_sample_count() const { return int(samples.size()); }
 
@@ -100,8 +109,9 @@ public:
 	// Frame timing: frame 0 starts at `p_master_epoch_usec` (master time).
 	void set_ticks_per_second(int p_ticks_per_second);
 	int get_ticks_per_second() const { return ticks_per_second; }
-	// While the previous timeline is held, the epoch is the new master's: it applies with its samples.
-	void set_master_epoch_usec(int64_t p_master_epoch_usec);
+	// While the previous timeline is held, the epoch is the new master's: it applies with its samples. Returns `false`,
+	// keeping the epoch it had, when the new one isn't plausible (see `MAX_TIME_USEC`).
+	bool set_master_epoch_usec(int64_t p_master_epoch_usec);
 	int64_t get_master_epoch_usec() const { return master_epoch_usec; }
 
 	// Frame the master is processing at the given local time.

@@ -32,7 +32,13 @@ public:
 		uint64_t states_sent = 0;
 		uint64_t states_received = 0;
 		uint64_t stale_states = 0;
+		// States dropped by their frame: a newer one of the object had arrived (datagrams change places on the way), or
+		// the frame is far ahead of this node's timeline. Many of them in a row mean the nodes' timelines are apart.
+		uint64_t late_states = 0;
 		uint64_t malformed_packets = 0;
+		// Messages that are well formed but came for a role or a state this node doesn't have: from a node that isn't
+		// ready, or for a registry or a clock that moved meanwhile. A few are expected whenever the roles change.
+		uint64_t unexpected_packets = 0;
 		uint64_t transfers = 0;
 		uint64_t orphans = 0;
 		uint64_t denied_requests = 0;
@@ -59,12 +65,17 @@ private:
 		String path;
 		int owner = 0;
 		uint32_t version = 0;
+		// The registry that last announced it (see `registry_epoch`): what the current one announces wins over what
+		// another one did, whatever the versions.
+		uint32_t registry_epoch = 0;
 		// Frame of the last change of owner.
 		uint32_t frame = 0;
 		uint32_t schema_hash = 0;
 		TickSyncObject *object = nullptr;
-		// Owner: released to the registry, waiting for its announcement; not simulated nor sent.
+		// Owner: released to the registry, waiting for its answer (an announcement with the new owner, or a denial);
+		// not simulated nor sent. `release_own`: the game asked for it, so it's told when the release doesn't happen.
 		bool frozen = false;
+		bool release_own = false;
 		// Owner: the state last sent, to send only changes between keyframes.
 		LocalVector<Variant> last_sent;
 		// Receiver: newest state received, and the recent ones for interpolation (oldest first).
@@ -77,6 +88,9 @@ private:
 		String path;
 		int owner = 0;
 		uint32_t version = 0;
+		// The version before the registry announced the object again without changing its owner (0: none): a release
+		// its owner sent for that version is still good.
+		uint32_t previous_version = 0;
 		uint32_t frame = 0;
 		uint32_t schema_hash = 0;
 		// A transfer in progress: the new owner, who asked for it, whether the owner may refuse it, and when it
@@ -206,6 +220,11 @@ private:
 	// connected to that process, and then it asks nothing of the role's node and takes nothing from it.
 	uint32_t registry_boot = 0;
 	uint32_t clock_boot = 0;
+	// Counts the registries this node knew, one after the other: another node, or another process of the same node.
+	// Their versions of an object can't be compared.
+	uint32_t registry_epoch = 0;
+	// The registry (see `registry_epoch`) this node last sent its view of the objects to.
+	uint32_t reported_epoch = 0;
 	// The views last sent to the other nodes; sent again when they change, and to the nodes that join.
 	bool status_sent = false;
 	RoleStatus sent_status;
@@ -282,6 +301,8 @@ private:
 	void registry_change_owner(uint16_t p_id, int p_new_owner, uint32_t p_frame, const TickDataBuffer *p_state);
 	void registry_send_announce(int p_peer, uint16_t p_id, const TickDataBuffer *p_state);
 	void registry_deny(int p_peer, uint16_t p_id);
+	// A release this registry can't take now: its owner is told, so the object doesn't stay frozen.
+	void registry_refuse_release(const TickTransport::Packet &p_packet);
 	void registry_on_peer_left(int p_peer);
 	void registry_check_timeouts();
 	bool registry_local_state(uint16_t p_id, TickDataBuffer &r_state) const;
@@ -314,6 +335,9 @@ private:
 	void registry_defer(const TickTransport::Packet &p_packet);
 	void registry_resume();
 	void send_registry_report();
+	// What this node owes a registry it reaches: its view of the objects, once for each registry, and the claims of its
+	// objects that have no id.
+	void sync_with_registry();
 	void handle_registry_report(int p_peer, TickDataBuffer &p_message);
 	void registry_take_over();
 	void registry_finish_take_over();
@@ -323,6 +347,13 @@ private:
 	void send_states(uint32_t p_frame);
 	void send_state_message(TickDataBuffer &r_message, int p_count);
 	void release_frozen(uint16_t p_id, Entry &r_entry, int p_to);
+	// The releases in progress won't be answered (the registry moved, or it's gone): the objects stay with this node.
+	// The paths of the ones the game asked to release are added to `r_denied_paths`, to tell it.
+	void cancel_releases(LocalVector<String> &r_denied_paths);
+	// Tells the game about the requests and the releases that won't happen. Game code: it may stop the engine.
+	void notify_denied(const LocalVector<String> &p_paths);
+	// The frames of the timeline jumped: the states received until now are of another stretch of it.
+	void reset_received_states();
 
 	// Events.
 	void queue_event(const PendingEvent &p_event);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../source/sync/tick_protocol.h"
 #include "../source/tick/tick_clock.h"
 #include "../source/tick/tick_fixed_stepper.h"
 
@@ -229,6 +230,47 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] The frames go on from the held
 	}
 	CHECK_FALSE(clock.is_holding());
 	CHECK(clock.get_master_frame_time(t) == doctest::Approx(double(int64_t(t) + new_offset - (new_epoch - 5000000)) / 10000.0));
+}
+
+
+// A faulty master could send any time or epoch. The ones no running network has are refused, so the arithmetic of the
+// frames never overflows; a master whose clock is behind the local one is an ordinary case.
+TEST_CASE("[Modules][TickSynchronizer][TickClock] Times and epochs that aren't plausible are refused") {
+	TickClock clock;
+	clock.set_ticks_per_second(60);
+	clock.set_sample_window(4, 1);
+	CHECK(clock.set_master_epoch_usec(1000000));
+	CHECK(clock.add_sample(2000000, 5000000, 2020000));
+	REQUIRE(clock.is_synchronized());
+	const double frame = clock.get_master_frame_time(3000000);
+
+	CHECK_FALSE(clock.set_master_epoch_usec(INT64_MIN + 93));
+	CHECK_FALSE(clock.set_master_epoch_usec(INT64_MAX));
+	CHECK_FALSE(clock.set_master_epoch_usec(TickClock::MAX_TIME_USEC));
+	CHECK_FALSE(clock.add_sample(3000000, uint64_t(1) << 62, 3020000));
+	CHECK_FALSE(clock.add_sample(uint64_t(TickClock::MAX_TIME_USEC), 5000000, uint64_t(TickClock::MAX_TIME_USEC) + 20000));
+	CHECK(clock.get_master_epoch_usec() == 1000000);
+	CHECK(clock.get_sample_count() == 1);
+	CHECK(clock.get_master_frame_time(3000000) == doctest::Approx(frame));
+
+	// Three seconds behind the local clock.
+	CHECK(clock.add_sample(4000000, 1010000, 4020000));
+	CHECK(clock.get_sample_count() == 2);
+	CHECK(clock.set_master_epoch_usec(-5000000));
+}
+
+
+// The frame indices wrap around: a point of a timeline past the last index, or one that isn't a number, still has a
+// frame, the same on every platform.
+TEST_CASE("[Modules][TickSynchronizer][TickClock] The frame of a point of a timeline wraps around") {
+	CHECK(tick_frame_at(0.0) == 0);
+	CHECK(tick_frame_at(12.9) == 12);
+	CHECK(tick_frame_at(4294967295.5) == 4294967295u);
+	CHECK(tick_frame_at(4294967296.0 + 5.5) == 5);
+	CHECK(tick_frame_at(4.12339e14) == uint32_t(uint64_t(4.12339e14) & 0xFFFFFFFF));
+	CHECK(tick_frame_at(-3.0) == 0);
+	CHECK(tick_frame_at(double(NAN)) == 0);
+	CHECK(tick_frame_at(double(INFINITY)) == 0);
 }
 
 } // namespace TestTickClock

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/math/math_funcs.h"
 #include "core/typedefs.h"
 
 // Wire protocol of `TickSyncCore`. Every message starts with its type, in 8 bits.
@@ -71,4 +72,14 @@ enum TickChannel {
 // `true` when frame `p_a` comes after frame `p_b`, handling the wrap around.
 static inline bool tick_frame_after(uint32_t p_a, uint32_t p_b) {
 	return int32_t(p_a - p_b) > 0;
+}
+
+
+// The index of the frame a point of a timeline is in. Frame indices wrap around; a point that isn't a number, or
+// before the timeline's start, gives frame 0.
+static inline uint32_t tick_frame_at(double p_timeline_frame) {
+	if (!(p_timeline_frame > 0.0) || !Math::is_finite(p_timeline_frame)) {
+		return 0;
+	}
+	return uint32_t(uint64_t(Math::fmod(Math::floor(p_timeline_frame), 4294967296.0)));
 }
