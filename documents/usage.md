@@ -50,7 +50,8 @@ A game server can take part in a mesh with other servers and in a star with its 
 
 ```gdscript
 # Mesh between servers: node 1 is the authority and clock master.
-var mesh := EnetMeshTransport.create(my_id, 9000 + my_id)
+var mesh := EnetMeshTransport.create(my_id, 9000 + my_id, addresses[my_id])   # listens on the internal interface
+mesh.set_secret(cluster_key)                                                  # the same bytes on every node
 for id in other_ids:
 	mesh.add_node(id, addresses[id], 9000 + id)
 $Cluster.trust = TickNetwork.TRUST_TRUSTED
@@ -64,6 +65,11 @@ $Edge.start(EnetStarTransport.create_server(7000))
 
 A body relayed from the cluster to the clients has a `TickObject` in each network (`network_path`). See
 [`demos/cluster_headless`](../demos/cluster_headless).
+
+The engines trust every node of a servers' mesh, so the transport keeps strangers out of it: a connection must come
+from the address its node was added with (`check_addresses`), and with a secret (`set_secret()`) the two sides of
+every link prove they know it before the link is reported. The links aren't encrypted: keep the mesh on a network
+you trust.
 
 ## Distributed authority
 
@@ -134,7 +140,13 @@ $Game.host_migrated.connect(func(old_host: int, new_host: int): print("new host:
 ```
 
 The host's port must be reachable from the internet. `TLSOptions` passed to `create_host` and `create_player` encrypt
-every link with DTLS. A player with a `takeover_port` takes new players if it becomes the host. See
+every link with DTLS. A player with a `takeover_port` takes new players if it becomes the host.
+
+What players can cost each other is bounded: a connection holds a place of the mesh only once its join data arrived;
+the relay takes `relay_rate_limit` bytes per second from a player and holds `relay_queue_limit` bytes for one; a
+player leaves a mesh bigger than its `pair_limit`; a doll whose controller's inputs disagree with the host's state is
+simulated again only so many times, then interpolated for a while; and a player that loses the host migrates only
+when most of the players it asks lost it too. See
 [`demos/hosted_mesh_headless`](../demos/hosted_mesh_headless), [`demos/p2p_headless`](../demos/p2p_headless) and
 [`demos/nat_test`](../demos/nat_test).
 

@@ -35,7 +35,7 @@
 			<param index="2" name="controller_peer" type="int" default="0" />
 			<param index="3" name="data" type="Variant" default="null" />
 			<description>
-				The server of a single authority network, or any node of a distributed one. Instantiates [param scene] (one of [member spawnable_scenes]) under [member spawn_path], named [param name] (generated when empty), with [param controller_peer] as the controller of its [TickObject]s (0: this peer), and replicates it. [param data] is sent to the clients too. Returns the new node, or [code]null[/code] on failure.
+				The server of a single authority network, or any node of a distributed one. Instantiates [param scene] (one of [member spawnable_scenes]) under [member spawn_path], named [param name] (generated when empty), with [param controller_peer] as the controller of its [TickObject]s (0: this peer), and replicates it. [param data] is sent to the clients too: like an event payload, it can't contain objects nor reals that aren't finite. Returns the new node, or [code]null[/code] on failure.
 			</description>
 		</method>
 		<method name="spawn_custom">

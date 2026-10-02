@@ -169,7 +169,7 @@
 			<return type="int" enum="Error" />
 			<param index="0" name="to_peer" type="int" default="0" />
 			<description>
-				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: the owner gives this object to [param to_peer], or leaves it orphaned with 0. The object stops being simulated here right away; the new owner continues from its state.
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: the owner gives this object to [param to_peer], or leaves it orphaned with 0. The object stops being simulated here right away; the new owner continues from its state. If the registry can't take the release (it has no quorum, or it's lost or moved before answering), the object stays with this node, simulated again, and [signal TickNetwork.authority_request_denied] is emitted. Releasing the object to its own owner does nothing.
 			</description>
 		</method>
 		<method name="request_authority">
@@ -185,7 +185,7 @@
 			<param index="2" name="frame" type="int" default="-1" />
 			<param index="3" name="peer" type="int" default="0" />
 			<description>
-				Sends an event to this object on the other side. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts), and the server calls [method _validate_event] then [method _on_event]. From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The name of the event takes at most 255 bytes in UTF-8. Events aren't repeated during rewinds.
+				Sends an event to this object on the other side. From a client, it goes to the server, for [param frame] (by default, the frame the client predicts), and the server calls [method _validate_event] then [method _on_event]. From the server, it goes to [param peer], or every client with 0, and runs on arrival or, with [param frame], when the client's simulation reaches that frame. The name of the event takes at most 255 bytes in UTF-8, and the [param payload] follows the rules of [method TickNetwork.send_event] (no objects, no reals that aren't finite, a size limit). Events aren't repeated during rewinds.
 			</description>
 		</method>
 	</methods>
@@ -208,7 +208,7 @@
 			The object is interpolated between the authority's snapshots, [member TickNetwork.interpolation_delay] behind the authority. The default.
 		</constant>
 		<constant name="REMOTE_MODE_DOLL" value="1" enum="RemoteMode">
-			The object is simulated with its controller's inputs, as a doll: behind the controller by the latency to it plus a small input buffer, and corrected by the authority's snapshots. The controller sends its inputs to every peer it's connected to, so dolls need a mesh ([EnetMeshTransport] or [EnetHostedMeshTransport]); in a star, only the server's objects can be dolls, and the others are interpolated. A doll whose controller stops sending inputs is interpolated again.
+			The object is simulated with its controller's inputs, as a doll: behind the controller by the latency to it plus a small input buffer, and corrected by the authority's snapshots. The controller sends its inputs to every peer it's connected to, so dolls need a mesh ([EnetMeshTransport] or [EnetHostedMeshTransport]); in a star, only the server's objects can be dolls, and the others are interpolated. A doll whose controller stops sending inputs is interpolated again, and so is, for two seconds, one whose controller's inputs disagree with the authority more than this peer simulates again (twice per tick, with [constant TickNetwork.TRUST_UNTRUSTED]): a controller can't make the other players pay for inputs that aren't the ones it sends the authority.
 		</constant>
 	</constants>
 </class>

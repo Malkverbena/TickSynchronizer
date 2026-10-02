@@ -5,7 +5,7 @@
 	</brief_description>
 	<description>
 		Connects the nodes of a mesh directly, without [SceneMultiplayer], which stays free for the star with the clients. Every node has a fixed id and the list of the other nodes; the node with the higher id connects to the lower one and retries while the connection is down.
-		A connection is accepted only from a node in the list, identified by the id it declares when connecting, and only once per id: use it in trusted networks (for example, servers in a LAN), with [member TickNetwork.trust] set to [constant TickNetwork.TRUST_TRUSTED]. It has no DTLS. Between players over the internet, use [EnetHostedMeshTransport].
+		A connection is accepted only from a node in the list, identified by the id it declares when connecting, only once per id, and only from the address the node was added with ([member check_addresses]). With a secret ([method set_secret]), the two sides of every link also prove they know it before the link is reported. The links have no DTLS: this keeps strangers out, it doesn't hide the traffic, so use it in trusted networks (for example, servers in a LAN, listening on the internal interface: see the bind address of [method create]), with [member TickNetwork.trust] set to [constant TickNetwork.TRUST_TRUSTED]. Between players over the internet, use [EnetHostedMeshTransport].
 		[codeblock]
 		var mesh := EnetMeshTransport.create(2, 9002)
 		mesh.add_node(1, "10.0.0.1", 9001)
@@ -33,7 +33,7 @@
 			<param index="3" name="compression" type="int" enum="EnetMeshTransport.Compression" default="1" />
 			<param index="4" name="max_nodes" type="int" default="32" />
 			<description>
-				Creates the node [param local_id] (positive), listening on [param port]. The [param compression] mode must be the same on every node. Returns [code]null[/code] on failure.
+				Creates the node [param local_id] (positive), listening on [param port] of [param bind_address] (every interface by default; give the address of the interface the other servers reach, so the port isn't open to anybody else). The [param compression] mode must be the same on every node. Returns [code]null[/code] on failure.
 			</description>
 		</method>
 		<method name="get_local_port" qualifiers="const">
@@ -55,6 +55,12 @@
 				Returns the ids of the other nodes of the mesh.
 			</description>
 		</method>
+		<method name="has_secret" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if a secret was set with [method set_secret].
+			</description>
+		</method>
 		<method name="remove_node">
 			<return type="void" />
 			<param index="0" name="id" type="int" />
@@ -70,8 +76,22 @@
 				For debugging: delays what this node sends to the node [param id] by [param seconds] (one way). 0 disables it.
 			</description>
 		</method>
+		<method name="set_secret">
+			<return type="void" />
+			<param index="0" name="secret" type="PackedByteArray" />
+			<description>
+				Sets the secret every node of the mesh must know: the same bytes on all of them, at least 16 random ones. With a secret, each side of a link sends the other a random challenge and answers the other's with an HMAC-SHA256 of the challenge and the two ids, keyed with the secret; the link is reported, and its packets reach the [TickNetwork], only once the other side's answer is right. A node without the secret, or with another one, never joins. An empty [param secret] asks for no proof. Set it before the transport is polled; it isn't sent, and it can't be read back.
+				[codeblock]
+				var mesh := EnetMeshTransport.create(2, 9002, "10.0.0.2")
+				mesh.set_secret(FileAccess.get_file_as_bytes("res://cluster.key"))
+				[/codeblock]
+			</description>
+		</method>
 	</methods>
 	<members>
+		<member name="check_addresses" type="bool" setter="set_check_addresses" getter="is_checking_addresses" default="true">
+			If [code]true[/code], a connection that declares a node's id must come from the address the node was added with ([method add_node]; a name is resolved when the node is added). Whoever reaches this node's port then can't take the place of a node that isn't connected. Disable it only when the nodes reach each other through addresses that aren't the ones they connect from (several interfaces, a NAT), and set a secret ([method set_secret]) in that case.
+		</member>
 		<member name="node_timeout" type="float" setter="set_node_timeout" getter="get_node_timeout" default="5.0">
 			Seconds without an answer before a node is considered gone; its connection is then closed, and tried again every [member retry_interval]. ENet checks it when it resends, so a node that crashes may take up to about twice this long to be noticed, while a node that closes its connections is noticed at once. A lower value makes a mesh with distributed authority give the roles of a lost node to its successor sooner (see [member TickNetwork.registry_peer]), but drops a node that hangs for that long.
 		</member>
