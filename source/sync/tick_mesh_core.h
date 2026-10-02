@@ -321,6 +321,7 @@ private:
 	void tick(uint32_t p_frame);
 	void follow_timeline(double p_target_frame);
 	void send_states(uint32_t p_frame);
+	void send_state_message(TickDataBuffer &r_message, int p_count);
 	void release_frozen(uint16_t p_id, Entry &r_entry, int p_to);
 
 	// Events.

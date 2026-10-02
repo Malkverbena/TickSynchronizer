@@ -218,6 +218,62 @@ static int churn_objects(MeshWorld &r_world, const LocalVector<AuthMover *> &p_m
 	return registered;
 }
 
+// A body whose state doesn't take a whole number of bytes.
+class OddMover : public AuthMover {
+public:
+	bool moving = false;
+
+	OddMover(const String &p_path, int p_controller) :
+			AuthMover(p_path, p_controller) {
+		schema.add("moving", TickCodec::boolean());
+	}
+
+	virtual Variant get_sync_var(int p_index) const override {
+		return p_index == 2 ? Variant(moving) : AuthMover::get_sync_var(p_index);
+	}
+
+	virtual void set_sync_var(int p_index, const Variant &p_value) override {
+		if (p_index == 2) {
+			moving = p_value;
+		} else {
+			AuthMover::set_sync_var(p_index, p_value);
+		}
+	}
+
+	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override {
+		AuthMover::process_tick(p_delta, p_input);
+		moving = true;
+	}
+};
+
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] Every object of an owner replicates, whatever the size of its state") {
+	MeshWorld world(3);
+	// Node 2 owns three more bodies, whose states take 129 bits each: they go in the same message, one after another.
+	OddMover *movers[4][3] = {};
+	for (int i = 1; i <= 3; i++) {
+		for (int k = 0; k < 3; k++) {
+			movers[i][k] = memnew(OddMover(vformat("odd_%d", k), 2));
+			world.cores[i].register_object(movers[i][k]);
+		}
+	}
+	world.run(3.0);
+	for (int k = 0; k < 3; k++) {
+		CHECK(world.cores[1].get_owner(movers[1][k]) == 2);
+		CHECK(movers[2][k]->position.x > 5.0);
+		for (int i = 1; i <= 3; i += 2) {
+			CHECK_MESSAGE(Math::abs(movers[i][k]->position.x - movers[2][k]->position.x) < 0.5, vformat("odd_%d on node %d is at %f; on its owner, at %f.", k, i, movers[i][k]->position.x, movers[2][k]->position.x));
+			CHECK(movers[i][k]->moving);
+		}
+	}
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+		for (int k = 0; k < 3; k++) {
+			world.cores[i].unregister_object(movers[i][k]);
+			memdelete(movers[i][k]);
+		}
+	}
+}
+
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Registry ids past their quarantine are reused, however many came before") {
 	MeshWorld world(1);
 	world.run(0.2);

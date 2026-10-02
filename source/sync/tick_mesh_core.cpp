@@ -849,13 +849,22 @@ void TickMeshCore::tick(uint32_t p_frame) {
 	}
 }
 
+// The count's place in a state message, written once known.
+static constexpr int MESH_STATE_COUNT_OFFSET = 8 + 32;
+
+void TickMeshCore::send_state_message(TickDataBuffer &r_message, int p_count) {
+	const int end = r_message.total_size();
+	r_message.seek(MESH_STATE_COUNT_OFFSET);
+	r_message.add_uint_bits(uint64_t(p_count), 16);
+	r_message.seek(end);
+	send_to_ready_peers(TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_UNRELIABLE, r_message, false);
+	stats.states_sent += uint64_t(p_count);
+}
+
 void TickMeshCore::send_states(uint32_t p_frame) {
 	const bool keyframe = p_frame % uint32_t(settings.keyframe_interval) == 0;
-	const int max_bytes = MAX(64, transport->get_max_payload_size());
+	const int limit_bits = MAX(64, transport->get_max_payload_size()) * 8;
 
-	TickDataBuffer body;
-	body.begin_write();
-	int count = 0;
 	LocalVector<uint16_t> ids;
 	for (KeyValue<uint16_t, Entry> &E : entries) {
 		if (E.value.owner == local_id && E.value.object && !E.value.frozen) {
@@ -864,48 +873,48 @@ void TickMeshCore::send_states(uint32_t p_frame) {
 	}
 	ids.sort();
 
-	for (uint32_t i = 0; i <= ids.size(); i++) {
-		const bool last = i == ids.size();
-		TickDataBuffer object_part;
-		if (!last) {
-			Entry &entry = entries[ids[i]];
-			LocalVector<Variant> values;
-			read_values(entry.object, values);
-			bool changed = entry.last_sent.size() != values.size();
-			for (uint32_t v = 0; !changed && v < values.size(); v++) {
-				changed = !(values[v] == entry.last_sent[v]);
-			}
-			if (!changed && !keyframe) {
-				continue;
-			}
-			entry.last_sent = values;
-			TickDataBuffer payload;
-			write_values(payload, entry.object, values);
-			object_part.begin_write();
-			object_part.add_uint_bits(ids[i], 16);
-			object_part.add_uint_bits(entry.version, 32);
-			object_part.add_data_buffer(payload);
+	TickDataBuffer message;
+	int count = 0;
+	for (const uint16_t id : ids) {
+		Entry &entry = entries[id];
+		LocalVector<Variant> values;
+		read_values(entry.object, values);
+		bool changed = entry.last_sent.size() != values.size();
+		for (uint32_t v = 0; !changed && v < values.size(); v++) {
+			changed = !(values[v] == entry.last_sent[v]);
 		}
-		// Flushes when the packet would get too big, and at the end.
-		const bool too_big = !last && count > 0 && (body.total_size() + object_part.total_size() + 64) / 8 > max_bytes;
-		if ((last || too_big) && count > 0) {
-			TickDataBuffer message;
-			message.begin_write();
-			message.add_uint_bits(TICK_MESSAGE_STATE, 8);
-			message.add_uint_bits(p_frame, 32);
-			message.add_uint_bits(uint64_t(count), 16);
-			body.begin_read();
-			body.slice(message, 0, body.total_size());
-			send_to_ready_peers(TICK_CHANNEL_STATE, TickTransport::TRANSFER_MODE_UNRELIABLE, message, false);
-			stats.states_sent += uint64_t(count);
-			body.begin_write();
+		if (!changed && !keyframe) {
+			continue;
+		}
+		entry.last_sent = values;
+		TickDataBuffer payload;
+		write_values(payload, entry.object, values);
+		// Every entry is written straight into the message: a nested buffer is aligned to the bytes of the buffer it's
+		// written in, so an entry built apart and moved to another bit offset would be read shifted.
+		for (int attempt = 0; attempt < 2; attempt++) {
+			if (count == 0) {
+				message.begin_write();
+				message.add_uint_bits(TICK_MESSAGE_STATE, 8);
+				message.add_uint_bits(p_frame, 32);
+				message.add_uint_bits(0, 16);
+			}
+			const int before = message.total_size();
+			message.add_uint_bits(id, 16);
+			message.add_uint_bits(entry.version, 32);
+			message.add_data_buffer(payload);
+			if (count == 0 || message.total_size() <= limit_bits) {
+				count++;
+				break;
+			}
+			// Too big with this entry: the message goes without it, and the entry starts the next one.
+			message.shrink_to(0, before);
+			message.seek(before);
+			send_state_message(message, count);
 			count = 0;
 		}
-		if (!last) {
-			object_part.begin_read();
-			object_part.slice(body, 0, object_part.total_size());
-			count++;
-		}
+	}
+	if (count > 0) {
+		send_state_message(message, count);
 	}
 }
 
