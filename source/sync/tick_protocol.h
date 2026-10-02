@@ -1,9 +1,11 @@
+// The wire protocol of the engines (`TickSyncCore` and `TickMeshCore`): its version, the types of message, the
+// channels, the limits a message has to respect and the arithmetic of frame indices, which wrap around. Every message
+// starts with its type, in 8 bits. No class is declared here.
+
 #pragma once
 
 #include "core/math/math_funcs.h"
 #include "core/typedefs.h"
-
-// Wire protocol of `TickSyncCore`. Every message starts with its type, in 8 bits.
 
 // 2: interest (`RELEVANCE`) and snapshots split in parts (F8).
 // 3: the roles of a distributed mesh move (`ROLES`, `REGISTRY_REPORT`, the roles in the mesh hello; ADR-073).
@@ -72,7 +74,8 @@ enum TickChannel {
 	TICK_CHANNEL_COUNT = 5,
 };
 
-// `true` when frame `p_a` comes after frame `p_b`, handling the wrap around.
+// Whether frame `p_a` comes after frame `p_b`. Frame indices wrap around, so this holds for frames less than 2^31
+// apart.
 static inline bool tick_frame_after(uint32_t p_a, uint32_t p_b) {
 	return int32_t(p_a - p_b) > 0;
 }

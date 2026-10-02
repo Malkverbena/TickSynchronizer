@@ -1,3 +1,6 @@
+// Tests of `EnetStarTransport` over real sockets on the loopback interface: a server and a client connect and exchange
+// packets on every channel, with compression and with DTLS.
+
 #pragma once
 
 #include "../source/sync/tick_protocol.h"
@@ -8,10 +11,13 @@
 
 namespace TestEnetStarTransport {
 
+// A port that changes from run to run, so a socket of a previous run that is still closing doesn't get in the way.
 inline int pick_port() {
 	return 40000 + int(OS::get_singleton()->get_ticks_usec() % 20000);
 }
 
+
+// Polls both transports `p_times` times, a millisecond apart.
 inline void poll_both(const Ref<EnetStarTransport> &p_a, const Ref<EnetStarTransport> &p_b, int p_times) {
 	for (int i = 0; i < p_times; i++) {
 		p_a->poll();
@@ -20,6 +26,9 @@ inline void poll_both(const Ref<EnetStarTransport> &p_a, const Ref<EnetStarTrans
 	}
 }
 
+
+// Waits for the client to connect, checks who each side says it is, then sends packets both ways: reliable ones on
+// every channel to the server, an unreliable one to the client.
 inline void exchange_packets(const Ref<EnetStarTransport> &p_server, const Ref<EnetStarTransport> &p_client) {
 	// Connects (up to two seconds).
 	for (int i = 0; i < 2000 && !p_client->is_peer_connected(TickTransport::PEER_SERVER); i++) {
@@ -65,6 +74,8 @@ inline void exchange_packets(const Ref<EnetStarTransport> &p_server, const Ref<E
 	CHECK(client_received == 1);
 }
 
+
+// A server and a client with range coder compression exchange packets.
 TEST_CASE("[Modules][TickSynchronizer][EnetStarTransport] Loopback with compression") {
 	const int port = pick_port();
 	Ref<EnetStarTransport> server = EnetStarTransport::create_server(port, 4, EnetStarTransport::COMPRESSION_RANGE_CODER);
@@ -75,6 +86,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetStarTransport] Loopback with compress
 	exchange_packets(server, client);
 }
 
+
+// A server and a client exchange packets over DTLS, with a self-signed certificate; the payload shrinks by the DTLS
+// overhead.
 TEST_CASE("[Modules][TickSynchronizer][EnetStarTransport] Loopback with DTLS") {
 	Ref<Crypto> crypto = Crypto::create();
 	REQUIRE(crypto.is_valid());

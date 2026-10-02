@@ -1,5 +1,9 @@
+// Implementation of `TickTransport`: only what the interface exposes to scripts. The interface has no code of its own;
+// each transport implements it.
+
 #include "tick_transport.h"
 
+// Exposes the interface to scripts.
 void TickTransport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_local_peer_id"), &TickTransport::get_local_peer_id);
 	ClassDB::bind_method(D_METHOD("is_peer_connected", "peer"), &TickTransport::is_peer_connected);

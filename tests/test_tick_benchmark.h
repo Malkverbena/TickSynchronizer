@@ -1,3 +1,11 @@
+// Benchmarks of `TickSyncCore`: a server with hundreds of objects and many clients over the simulated network, with and
+// without interest. They measure the time per tick and the bytes each client gets, and print them.
+//
+// Not matched by `--test-case="*TickSynchronizer*"`; run them with `--test-case="*TickSyncBenchmark*"`.
+//
+// `BenchmarkWorld` builds the server, the clients and their objects; `QuarterInterest` is an interest filter that
+// leaves each client a quarter of the NPCs.
+
 #pragma once
 
 #include "test_tick_sync_core.h"
@@ -5,7 +13,6 @@
 #include "core/os/os.h"
 #include "tests/test_macros.h"
 
-// Benchmarks: not matched by `--test-case="*TickSynchronizer*"`; run them with `--test-case="*TickSyncBenchmark*"`.
 namespace TestTickBenchmark {
 
 using TestTickSyncCore::TestMover;
@@ -22,6 +29,8 @@ struct BenchmarkWorld {
 	uint64_t server_usec = 0;
 	uint64_t client_usec = 0;
 
+	// Builds the world: every peer gets its own copy of the NPCs and of the players, then the server and the clients
+	// start and connect.
 	BenchmarkWorld(int p_clients, int p_npcs) :
 			client_count(p_clients), npc_count(p_npcs) {
 		network.set_seed(99);
@@ -56,6 +65,8 @@ struct BenchmarkWorld {
 		}
 	}
 
+
+	// Stops the engines and frees the objects.
 	~BenchmarkWorld() {
 		server.stop();
 		for (int client = 0; client < client_count; client++) {
@@ -69,6 +80,9 @@ struct BenchmarkWorld {
 		}
 	}
 
+
+	// Runs the world for `p_seconds` at 60 frames per second; with `p_measure`, adds up the time the server and the
+	// clients take.
 	void run(double p_seconds, bool p_measure) {
 		const int frames = int(p_seconds * 60.0);
 		for (int i = 0; i < frames; i++) {
@@ -89,6 +103,8 @@ struct BenchmarkWorld {
 	}
 };
 
+// 16 clients and 400 NPCs, all relevant: the clients decode every snapshot and their NPCs follow the server's. Prints
+// the cost per tick and per client.
 TEST_CASE("[Modules][TickSyncBenchmark] Server with many objects and clients") {
 	const int clients = 16;
 	const int npcs = 400;
@@ -113,6 +129,7 @@ TEST_CASE("[Modules][TickSyncBenchmark] Server with many objects and clients") {
 // Each client sees a quarter of the NPCs (a stand-in for the game's distance or room checks).
 class QuarterInterest : public TickSyncCore::Listener {
 public:
+	// Players are always relevant; an NPC is relevant to the peers whose id has the same remainder by 4 as its number.
 	virtual int filter_relevance(int p_peer, TickSyncObject *p_object) override {
 		const String path = p_object->get_sync_path();
 		if (!path.begins_with("npc_")) {
@@ -122,6 +139,8 @@ public:
 	}
 };
 
+// The same world with a quarter of the NPCs relevant to each client: the relevant ones follow the server, the others
+// never move.
 TEST_CASE("[Modules][TickSyncBenchmark] Server with many objects and clients, with interest") {
 	const int clients = 16;
 	const int npcs = 400;

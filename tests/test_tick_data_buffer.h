@@ -1,3 +1,8 @@
+// Tests of `TickBitArray` and `TickDataBuffer`: bits stored across byte boundaries, every type the buffer writes (and
+// what the writer gets back), strings, nested buffers and slices, and what malformed or truncated data does: the buffer
+// fails, and nothing is read out of bounds. Several cases are regressions of defects of the NetworkSynchronizer
+// `DataBuffer` this one was ported from.
+
 #pragma once
 
 #include "../source/common/tick_bit_array.h"
@@ -9,6 +14,7 @@
 
 namespace TestTickDataBuffer {
 
+// Bits of any length are stored and read back at any offset, across byte boundaries, up to 64 at once.
 TEST_CASE("[Modules][TickSynchronizer][TickBitArray] Store and read bits across byte boundaries") {
 	TickBitArray array(128);
 	CHECK(array.size_in_bits() == 128);
@@ -31,6 +37,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickBitArray] Store and read bits across 
 	CHECK(value == UINT64_MAX);
 }
 
+
+// The bits of a value above the count asked for aren't written over the neighboring bits.
 TEST_CASE("[Modules][TickSynchronizer][TickBitArray] Extra high bits don't corrupt neighbors") {
 	TickBitArray array(16);
 	array.zero();
@@ -41,6 +49,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickBitArray] Extra high bits don't corru
 	CHECK(value == 0b111);
 }
 
+
+// Storing or reading outside the array, or more than 64 bits, fails.
 TEST_CASE("[Modules][TickSynchronizer][TickBitArray] Out of bounds access fails") {
 	TickBitArray array(8);
 	uint64_t value = 0;
@@ -51,6 +61,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickBitArray] Out of bounds access fails"
 	ERR_PRINT_ON;
 }
 
+
+// Booleans and integers of every compression level come back as written, clamped to the range of their size.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Bools and integers round trip") {
 	TickDataBuffer db;
 	db.begin_write();
@@ -81,6 +93,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Bools and integers round 
 	CHECK_FALSE(db.is_buffer_failed());
 }
 
+
+// Reals come back within the epsilon of their compression level, and the writer gets exactly what the readers get.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Reals round trip within the epsilon") {
 	const double values[] = { 0.0, 1.0, -1.0, 3.14159265358979, -512.25, 1234.5678, 1e-3 };
 	for (int level = 0; level < 4; level++) {
@@ -105,6 +119,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Reals round trip within t
 	}
 }
 
+
+// A real at level 0 always takes 64 bits, also in a single precision build.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Level 0 reals always take 64 bits") {
 	// The NetworkSynchronizer version wrote 32 bits for a float with level 0, while declaring 64.
 	TickDataBuffer db;
@@ -115,6 +131,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Level 0 reals always take
 	CHECK(TickDataBuffer::get_bit_taken(TickDataBuffer::DATA_TYPE_REAL, TickDataBuffer::COMPRESSION_LEVEL_0) == 64);
 }
 
+
+// Unit reals are clamped to their range, quantized within their epsilon, and a value too small for the precision is a
+// zero without sign.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Unit reals") {
 	for (int level = 0; level < 4; level++) {
 		const TickDataBuffer::CompressionLevel compression = TickDataBuffer::CompressionLevel(level);
@@ -144,6 +163,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Unit reals") {
 	}
 }
 
+
+// Vectors and directions come back as the writer got them, at every compression level; a zero direction stays zero.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Vectors") {
 	for (int level = 0; level < 4; level++) {
 		const TickDataBuffer::CompressionLevel compression = TickDataBuffer::CompressionLevel(level);
@@ -181,6 +202,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Vectors") {
 	}
 }
 
+
+// Strings, raw bits and nested buffers come back in order, and skipping them moves the offset as reading them does.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Strings, bits and nested buffers") {
 	TickDataBuffer nested;
 	nested.begin_write();
@@ -225,6 +248,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Strings, bits and nested 
 	CHECK_FALSE(db.is_buffer_failed());
 }
 
+
+// NaN and infinities are written as 0, values beyond the encoding as its largest one; a NaN or an infinity found by a
+// reader fails the buffer.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Reals that aren't finite are never sent, nor accepted") {
 	TickDataBuffer db;
 	db.begin_write();
@@ -258,6 +284,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Reals that aren't finite 
 	CHECK(db.is_buffer_failed());
 }
 
+
+// `is_valid_utf8()` takes the well-formed sequences at the edges of each length, and refuses overlong ones, surrogates,
+// truncated ones and NUL.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] UTF-8 validation") {
 	CHECK(TickDataBuffer::is_valid_utf8(nullptr, 0));
 	// Well-formed: ASCII, and the edges of each sequence length (U+0080, U+07FF, U+0800, U+D7FF, U+E000, U+FFFF,
@@ -277,6 +306,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] UTF-8 validation") {
 	CHECK_FALSE(TickDataBuffer::is_valid_utf8(with_nul, 3));
 }
 
+
+// A string longer than the reader accepts, or whose bytes aren't UTF-8, fails the buffer instead of being decoded.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] A string that isn't UTF-8, or is too long, fails the buffer") {
 	TickDataBuffer db;
 	db.begin_write();
@@ -304,6 +335,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] A string that isn't UTF-8
 	CHECK(db.is_buffer_failed());
 }
 
+
+// Two buffers are equal when every payload bit is; the metadata doesn't take part.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Equality compares every payload byte") {
 	// The NetworkSynchronizer version compared only `sizeof(int)` bytes.
 	TickDataBuffer a;
@@ -331,6 +364,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Equality compares every p
 	CHECK(a == d);
 }
 
+
+// The metadata is written first and doesn't count as payload; it can be rewritten with `seek()`; a slice copies bits at
+// any offset.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Metadata and slices") {
 	TickDataBuffer db;
 	// The first 8 bits written are the metadata.
@@ -361,6 +397,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Metadata and slices") {
 	CHECK(db.is_end_of_buffer());
 }
 
+
+// A nested buffer or a string that claims more than the packet has fails the buffer; once failed, every read returns a
+// default.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Malformed data fails without reading out of bounds") {
 	// A nested buffer that claims more bits than the packet has; the NetworkSynchronizer version read past the end.
 	TickDataBuffer db;
@@ -393,6 +432,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Malformed data fails with
 	CHECK(small.is_buffer_failed());
 }
 
+
+// Writing to a buffer that is being read fails it.
 TEST_CASE("[Modules][TickSynchronizer][TickDataBuffer] Writing while reading is an error") {
 	TickDataBuffer db;
 	db.begin_write();

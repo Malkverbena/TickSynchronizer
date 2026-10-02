@@ -1,3 +1,9 @@
+// Tests of the interest (ADR-053), of the split snapshots and of the history (ADR-054) of `TickSyncCore`: objects that
+// stop and start being relevant to a client, a world hidden by default, deltas bigger than a datagram, and the state of
+// an object at a past frame.
+//
+// `InterestListener` records the relevance changes a client hears of, and answers the server's filter.
+
 #pragma once
 
 #include "test_tick_sync_core.h"
@@ -18,9 +24,13 @@ public:
 	// Server: objects whose path is in this list are hidden from peer 3.
 	LocalVector<String> hidden_from_3;
 
+	// Counts the objects shown and hidden.
 	virtual void on_relevance_changed(TickSyncObject *p_object, bool p_relevant) override {
 		(p_relevant ? shown : hidden)++;
 	}
+
+
+	// Server: hides from peer 3 the objects whose path is in `hidden_from_3`; says nothing about the other peers.
 	virtual int filter_relevance(int p_peer, TickSyncObject *p_object) override {
 		if (p_peer != 3) {
 			return -1;
@@ -29,6 +39,8 @@ public:
 	}
 };
 
+// An object the filter hides from a client stops arriving there, and only there; shown again, it comes back from a full
+// state. An object stays relevant to its controller.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Irrelevant objects aren't sent, and come back from a full state") {
 	TestWorld world(30000, 0, 0.0, 100000);
 	InterestListener server_listener;
@@ -63,6 +75,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Irrelevant objects aren't s
 	CHECK(world.client_b.get_stats().malformed_packets == 0);
 }
 
+
+// With objects hidden by default, a client only gets its own player until the server shows it the NPC; a client can't
+// change what is relevant.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Hidden by default, shown on demand") {
 	// The settings must be set before the engines start: a world built by hand.
 	TickLocalNetwork network;
@@ -113,6 +128,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Hidden by default, shown on
 	ERR_PRINT_ON;
 }
 
+
+// 250 moving objects make every delta bigger than a datagram: the deltas are split, a lost part drops only its frame,
+// and the client's copies follow the server.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Deltas bigger than a datagram are split and reassembled") {
 	TickLocalNetwork network;
 	network.set_latency_usec(20000);
@@ -162,6 +180,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Deltas bigger than a datagr
 	}
 }
 
+
+// The server answers the state of an object at any frame of its history, interpolated between frames; a client answers
+// it at the frame its interpolated objects show.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] The state of an object at a past frame") {
 	TestWorld world(30000, 0, 0.0, 100000);
 	world.server_npc.constant_direction = true;

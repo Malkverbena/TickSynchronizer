@@ -1,3 +1,11 @@
+// Tests of `EnetHostedMeshTransport` and `TickMultiplayerPeer` over real sockets on the loopback interface: joining
+// through the host, direct and relayed pairs, DTLS, the admission of players, the host migration (handed over, or after
+// a host that stops answering), the engines on top of the mesh, and what a host and a player don't let each other do
+// (ADR-077).
+//
+// `HostedMesh` is a host and its players; `TestCertificate` is a self-signed certificate for the DTLS cases. Some cases
+// play one side with a bare ENet socket, to say what this module never would.
+
 #pragma once
 
 #include "../source/common/tick_engine_compat.h"
@@ -22,7 +30,9 @@ struct HostedMesh {
 	int count = 0;
 	Ref<Mesh> nodes[6];
 
-	// With TLS options, the mesh uses DTLS (the host also opens `port + 1` for the rendezvous).
+	// Hosts a mesh on a random port and joins `p_players` players one at a time, so their ids follow the order.
+	// `p_relay_only_player` never tries direct links. With TLS options, the mesh uses DTLS (the host also opens `port +
+	// 1` for the rendezvous).
 	HostedMesh(int p_players, int p_relay_only_player = 0, const Ref<TLSOptions> &p_host_tls = Ref<TLSOptions>(), const Ref<TLSOptions> &p_player_tls = Ref<TLSOptions>()) {
 		// A random port pair, tried again if another program uses it (the caller's error printing is kept).
 		const bool printing = CoreGlobals::print_error_enabled;
@@ -45,6 +55,8 @@ struct HostedMesh {
 		}
 	}
 
+
+	// Closes the players, then the host: each one after the others saw the previous one leave.
 	~HostedMesh() {
 		// Players first, each after the others saw the previous one leave: a DTLS link to a closed port reports errors.
 		for (int i = count; i >= 1; i--) {
@@ -55,6 +67,8 @@ struct HostedMesh {
 		}
 	}
 
+
+	// Polls every node `p_rounds` times, a millisecond apart.
 	void poll(int p_rounds) {
 		for (int round = 0; round < p_rounds; round++) {
 			for (int i = 1; i <= count; i++) {
@@ -66,6 +80,8 @@ struct HostedMesh {
 		}
 	}
 
+
+	// Whether every node sees all the others as connected.
 	bool everyone_connected() const {
 		for (int i = 1; i <= count; i++) {
 			LocalVector<int> connected;
@@ -77,11 +93,14 @@ struct HostedMesh {
 		return true;
 	}
 
+
+	// Polls until every node sees all the others, for eight seconds at most.
 	void wait_everyone_connected() {
 		for (int t = 0; t < 8000 && !everyone_connected(); t++) {
 			poll(1);
 		}
 	}
+
 
 	// Waits for a packet from `p_from` on `p_channel` at node `p_node`, dropping the others.
 	bool receive(int p_node, int p_from, int p_channel) {
@@ -98,6 +117,8 @@ struct HostedMesh {
 	}
 };
 
+// The host gives the ids, the players reach it through the host link and each other through a punched direct link, and
+// every packet carries the sender of its connection.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Players join through the host and punch direct links") {
 	HostedMesh mesh(2);
 	mesh.wait_everyone_connected();
@@ -127,6 +148,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Players join thr
 	CHECK(int(mesh.nodes[2]->get_stats()["direct_pairs"]) == 1);
 }
 
+
+// A player that never tries direct links has its pairs relayed by the host: relayed packets keep their origin, channel,
+// mode and order, and the host counts them.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A pair without a direct link is relayed by the host") {
 	// Player 3 never tries direct links: the pairs 2-3 and 3-4 are relayed, 2-4 is direct.
 	HostedMesh mesh(3, 3);
@@ -162,6 +186,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A pair without a
 	CHECK(int(mesh.nodes[1]->get_stats()["relayed_pairs"]) == 2);
 }
 
+
+// A connection with an unknown token is refused; a player that leaves is reported once to the host and to the other
+// players, which stay connected.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Strangers are refused and leaving players are reported") {
 	HostedMesh mesh(2);
 	mesh.wait_everyone_connected();
@@ -202,6 +229,8 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Strangers are re
 	CHECK(mesh.nodes[2]->get_disconnect_reason() == Mesh::DISCONNECT_REASON_NONE);
 }
 
+
+// Packets that no engine consumes are kept up to the limit of the queue; the ones beyond it are dropped and counted.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Packets nothing consumes are dropped past a limit") {
 	HostedMesh mesh(1);
 	mesh.wait_everyone_connected();
@@ -225,6 +254,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Packets nothing 
 	CHECK(queued == TickTransport::MAX_QUEUED_PACKETS);
 }
 
+
+// The multiplayer peer of each node sends to a player, to everyone or to everyone but one, over direct and relayed
+// pairs; its packets and the engines' packets don't mix.
 TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer reaches direct and relayed players") {
 	HostedMesh mesh(3, 4);
 	Ref<TickMultiplayerPeer> peers[5];
@@ -276,6 +308,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer
 	CHECK(peers[3]->put_packet(payload, 4) == OK);
 }
 
+
+// Three engines run over a mesh with a relayed pair: the inputs of a player reach the other through the host, and its
+// body is a doll there.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Dolls work across a relayed pair") {
 	HostedMesh mesh(2, 3);
 	mesh.wait_everyone_connected();
@@ -320,10 +355,12 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Dolls work acros
 	}
 }
 
+// A key and a self-signed certificate for localhost.
 struct TestCertificate {
 	Ref<CryptoKey> key;
 	Ref<X509Certificate> certificate;
 
+	// Generates the key and the certificate.
 	TestCertificate() {
 		Ref<Crypto> crypto = Ref<Crypto>(Crypto::create());
 		key = crypto->generate_rsa(2048);
@@ -331,6 +368,8 @@ struct TestCertificate {
 	}
 };
 
+// With DTLS, the host links, a punched direct link (each side pinning the other's certificate) and the relay all carry
+// packets, and the payload shrinks by the DTLS overhead.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] DTLS on the host links, the direct links and the relay") {
 	TestCertificate host;
 	REQUIRE(host.certificate.is_valid());
@@ -358,6 +397,8 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] DTLS on the host
 	CHECK(int(mesh.nodes[1]->get_stats()["rejected_connections"]) == 0);
 }
 
+
+// A player that doesn't trust the host's certificate never joins.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that doesn't trust the host's certificate can't join") {
 	TestCertificate host;
 	TestCertificate other;
@@ -369,6 +410,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that do
 	CHECK(mesh.nodes[2]->get_status() != Mesh::STATUS_CONNECTED);
 	CHECK(mesh.nodes[1]->get_peers().is_empty());
 }
+
 
 // Waits until every node but the removed ones sees `p_expected` peers.
 static bool wait_peer_counts(HostedMesh &r_mesh, const int *p_nodes, int p_node_count, int p_expected, int p_rounds, int p_skip_node) {
@@ -390,6 +432,9 @@ static bool wait_peer_counts(HostedMesh &r_mesh, const int *p_nodes, int p_node_
 	return false;
 }
 
+
+// When the host hands the mesh over, the first player of the succession hosts, the others follow it keeping their
+// direct links, and the engines hear of the new host before the old one's disconnection.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player takes over when the host leaves") {
 	HostedMesh mesh(3);
 	mesh.wait_everyone_connected();
@@ -440,6 +485,7 @@ struct MultiplayerReport {
 static MultiplayerReport multiplayer_reports[16];
 static int multiplayer_report_count = 0;
 
+// Records a `host_migrated` signal of a multiplayer peer.
 static void report_migration(int p_old_host, int p_new_host, int p_peer) {
 	if (multiplayer_report_count < 16) {
 		MultiplayerReport &report = multiplayer_reports[multiplayer_report_count++];
@@ -450,6 +496,8 @@ static void report_migration(int p_old_host, int p_new_host, int p_peer) {
 	}
 }
 
+
+// Records a `peer_disconnected` signal of a multiplayer peer.
 static void report_peer_left(int p_left, int p_peer) {
 	if (multiplayer_report_count < 16) {
 		MultiplayerReport &report = multiplayer_reports[multiplayer_report_count++];
@@ -459,6 +507,8 @@ static void report_peer_left(int p_left, int p_peer) {
 	}
 }
 
+
+// Every player's multiplayer peer reports the migration, then that the old host left.
 TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer reports the host migration") {
 	HostedMesh mesh(3);
 	Ref<TickMultiplayerPeer> peers[5];
@@ -505,6 +555,7 @@ TEST_CASE("[Modules][TickSynchronizer][TickMultiplayerPeer] The multiplayer peer
 	multiplayer_report_count = 0;
 }
 
+
 // Hands the mesh over from the host (1) and waits until player 2 hosts and the players `p_first`..`p_last` follow it.
 static void hand_over_to_player_2(HostedMesh &r_mesh, int p_first, int p_last) {
 	CHECK(r_mesh.nodes[1]->hand_over() == OK);
@@ -521,6 +572,9 @@ static void hand_over_to_player_2(HostedMesh &r_mesh, int p_first, int p_last) {
 	r_mesh.poll(50);
 }
 
+
+// A player with a takeover port takes new players there once it hosts: a new player gets a fresh id, learns who hosts,
+// and punches a direct link with a player that followed.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] New players join the host that took over") {
 	HostedMesh mesh(3);
 	mesh.wait_everyone_connected();
@@ -561,6 +615,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] New players join
 	CHECK(mesh.nodes[5]->get_peer_path(3) == Mesh::PATH_DIRECT);
 }
 
+
+// The same with DTLS: the successor takes new players with its own certificate, and the pairs register on the port
+// after its takeover port.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] New players join the host that took over, with DTLS") {
 	TestCertificate host;
 	TestCertificate successor;
@@ -590,6 +647,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] New players join
 	CHECK(mesh.nodes[4]->get_peer_path(3) == Mesh::PATH_DIRECT);
 }
 
+
+// When the host stops answering, the players time out and migrate to the successor; a player that was only relayed
+// can't reach it and leaves the mesh.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that stops answering is replaced; relayed players are lost") {
 	// Player 4 is only relayed: it can't reach the successor.
 	HostedMesh mesh(3, 4);
@@ -616,6 +676,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that stop
 	CHECK_FALSE(mesh.nodes[2]->is_peer_connected(4));
 }
 
+
+// The authority of `TickSyncCore` migrates with the host: the new host simulates the old one's objects, owns its
+// spawns, and the other players join it again and predict.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority migrates with the host") {
 	HostedMesh mesh(3);
 	mesh.wait_everyone_connected();
@@ -707,6 +770,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The authority mi
 	}
 }
 
+
+// A player that joins the host that took over is welcomed by the new authority, predicts, and has its inputs simulated
+// there.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that joins after a migration plays with the new host") {
 	HostedMesh mesh(2);
 	mesh.wait_everyone_connected();
@@ -784,6 +850,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that jo
 	}
 }
 
+
+// A player the host removes leaves with `DISCONNECT_REASON_REFUSED`, without taking over; the others stay with the
+// host.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player the host removes leaves without migrating") {
 	HostedMesh mesh(3);
 	mesh.wait_everyone_connected();
@@ -803,6 +872,8 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player the hos
 	CHECK(mesh.nodes[4]->get_host_peer() == 1);
 }
 
+
+// A player the authority refuses (another protocol version) is removed by the host and doesn't take over.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player refused by the authority doesn't take over") {
 	HostedMesh mesh(2);
 	mesh.wait_everyone_connected();
@@ -836,6 +907,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player refused
 	host.stop();
 }
 
+
 // Drops the events waiting at `p_node`; returns whether one of them was a host migration.
 static bool drain_events(const Ref<Mesh> &p_node) {
 	bool migrated = false;
@@ -846,6 +918,8 @@ static bool drain_events(const Ref<Mesh> &p_node) {
 	return migrated;
 }
 
+
+// When the host closes, the mesh ends for every player: no migration, and `DISCONNECT_REASON_ENDED`.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that closes ends the mesh for everyone") {
 	HostedMesh mesh(3);
 	mesh.wait_everyone_connected();
@@ -873,8 +947,10 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A host that clos
 	}
 }
 
-// The game's decision on the players joining: the ones that send "secret" are admitted, "later" waits for the game.
+// The player `check_join()` left waiting for the game's decision.
 static int waiting_player = 0;
+// The join validator of the tests: admits the players that send "secret" from localhost, leaves the ones that send
+// "later" waiting, and refuses the others.
 static Variant check_join(int p_peer, const PackedByteArray &p_data, const String &p_address) {
 	const String password = String::utf8((const char *)p_data.ptr(), p_data.size());
 	if (password == "later") {
@@ -883,6 +959,7 @@ static Variant check_join(int p_peer, const PackedByteArray &p_data, const Strin
 	}
 	return password == "secret" && p_address == "127.0.0.1";
 }
+
 
 // Joins the mesh as the next node, with `p_join_data`, and waits until it's connected or refused.
 static void join(HostedMesh &r_mesh, const String &p_join_data) {
@@ -894,6 +971,9 @@ static void join(HostedMesh &r_mesh, const String &p_join_data) {
 	}
 }
 
+
+// The host admits the players the validator accepts; a refused one never gets an id and nobody hears of it; one left
+// waiting joins when the game admits it.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The host admits only the players the game accepts") {
 	HostedMesh mesh(0);
 	mesh.nodes[1]->set_join_validator(callable_mp_static(&check_join));
@@ -927,6 +1007,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] The host admits 
 	waiting_player = 0;
 }
 
+
+// Five joins at once from one address are admitted; the sixth is refused right away, and learns that the address is
+// busy.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Joins from one address are limited") {
 	HostedMesh mesh(0);
 	// Five joins at once from the same address are fine; the sixth is refused right away.
@@ -959,6 +1042,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Joins from one a
 	mesh.poll(20);
 }
 
+
 // A bare ENet socket on localhost, to play a host the protocol tests control (`ENetConnection` through the class
 // database: the tests don't include ENet's headers). Uses the players' compression (range coder).
 static Ref<RefCounted> bare_host(int &r_port) {
@@ -976,6 +1060,9 @@ static Ref<RefCounted> bare_host(int &r_port) {
 	return host;
 }
 
+
+// A player refused because the mesh is full, or because its protocol version isn't the host's, learns why, in both
+// directions (an older player, a newer host).
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Refused players learn why: a full mesh, another version of the protocol") {
 	// A mesh of two: the host and one player (on a random port, tried again if another program uses it).
 	int port = 0;
@@ -1052,6 +1139,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Refused players 
 	host->close();
 }
 
+
+// A player that hears nobody for a while finds the host gone for it alone: the other player still has it, so it leaves
+// instead of taking over.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player cut off from the host leaves instead of taking over") {
 	HostedMesh mesh(2);
 	for (int i = 1; i <= 3; i++) {
@@ -1084,6 +1174,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player cut off
 	CHECK(mesh.nodes[1]->is_peer_connected(3));
 }
 
+
+// A player that stops answering is reported as disconnected once to each of the others, and never as connected again
+// through a relay.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that vanishes leaves once for the others") {
 	HostedMesh mesh(3);
 	// The players' direct links time out before the host's link, as seen over the internet.
@@ -1127,6 +1220,9 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player that va
 	CHECK(int(mesh.nodes[3]->get_stats()["failed_punches"]) == 0);
 }
 
+
+// Players that notice the frozen host first follow the successor before it notices; once it hosts, it takes them in,
+// and their relayed pair comes back through it.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Players that follow the successor before it notices the host is gone") {
 	// Players 2 and 3 link directly; then player 3 refuses direct links, so 3-4 is relayed while 2-4 is direct.
 	HostedMesh mesh(2);
@@ -1176,6 +1272,7 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Players that fol
 	CHECK(received);
 }
 
+
 // Sends a control message of the hosted mesh protocol: a type byte, then little-endian fields.
 static void send_control(const Variant &p_link, int p_type, const LocalVector<uint32_t> &p_fields) {
 	PackedByteArray message;
@@ -1192,6 +1289,9 @@ static void send_control(const Variant &p_link, int p_type, const LocalVector<ui
 	}
 }
 
+
+// A player introduced by a fake host to more players than the mesh can have keeps only as many pairs as the mesh has
+// other players.
 TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] A player keeps no more pairs than the mesh can have") {
 	// A fake host welcomes a player into a mesh of 4 players, then introduces it to 50 others.
 	int port = 0;

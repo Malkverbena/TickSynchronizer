@@ -1,3 +1,7 @@
+// Implementation of `EnetMeshTransport`: the sockets of a mesh between servers, who is accepted as a node (the id it
+// declares, the address it comes from, and the proof of the mesh's secret), and the queues of events and packets the
+// engines consume.
+
 #include "enet_mesh_transport.h"
 
 #include "../sync/tick_protocol.h"
@@ -10,10 +14,6 @@
 
 #include "modules/enet/enet_connection.h"
 #include "modules/enet/enet_packet_peer.h"
-
-// Implementation of `EnetMeshTransport`: the sockets of a mesh between servers, who is accepted as a node (the id it
-// declares, the address it comes from, and the proof of the mesh's secret), and the queues of events and packets the
-// engines consume.
 
 static_assert(int(EnetMeshTransport::COMPRESSION_ZSTD) == int(ENetConnection::COMPRESS_ZSTD), "The compression modes must match ENet's.");
 

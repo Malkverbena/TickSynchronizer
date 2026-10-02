@@ -1,3 +1,10 @@
+// Tests of a cluster of servers: a mesh with one authority whose game servers relay the objects to their own clients
+// through a star that follows the cluster's timeline (ADR-038, ADR-039); and of `EnetMeshTransport`, the real mesh
+// between servers, with who it accepts as a node (ADR-076).
+//
+// `BridgeObject` is the edge's view of a cluster proxy; `ClusterWorld` has three servers in a mesh, one of them with a
+// star and a client.
+
 #pragma once
 
 #include "../source/transport/enet_mesh_transport.h"
@@ -17,15 +24,36 @@ class BridgeObject : public TickSyncObject {
 public:
 	TestMover *proxy = nullptr;
 
+	// The view of `p_proxy`, the object the cluster's network moves.
 	explicit BridgeObject(TestMover *p_proxy) :
 			proxy(p_proxy) {}
 
+
+	// `TickSyncObject`: the proxy's path.
 	virtual String get_sync_path() const override { return proxy->get_sync_path(); }
+
+
+	// `TickSyncObject`: the server of the edge.
 	virtual int get_controller_peer() const override { return 1; }
+
+
+	// `TickSyncObject`: the proxy's variables.
 	virtual const TickSchema &get_sync_schema() const override { return proxy->get_sync_schema(); }
+
+
+	// `TickSyncObject`: reads the proxy's variable.
 	virtual Variant get_sync_var(int p_index) const override { return proxy->get_sync_var(p_index); }
+
+
+	// `TickSyncObject`: sets the proxy's variable.
 	virtual void set_sync_var(int p_index, const Variant &p_value) override { proxy->set_sync_var(p_index, p_value); }
+
+
+	// `TickSyncObject`: no input: the edge simulates nothing.
 	virtual void collect_input(TickDataBuffer &r_input) override {}
+
+
+	// `TickSyncObject`: nothing to simulate: the cluster's network moves the proxy.
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override {}
 };
 
@@ -48,6 +76,8 @@ struct ClusterWorld {
 	BridgeObject a_bridge = BridgeObject(&a_npc);
 	TestMover client_npc = TestMover("npc", 1, TickCodec::PRECISION_SINGLE);
 
+	// Builds the cluster (1 ms between servers) and the edge (30 ms to its client), registers the NPC on every engine,
+	// and starts them all.
 	ClusterWorld() {
 		cluster_network.set_latency_usec(1000);
 		edge_network.set_latency_usec(30000);
@@ -89,8 +119,8 @@ struct ClusterWorld {
 	// The local clocks of A, B and the client started this long after W's (other processes, started later).
 	uint64_t late_start_usec = 0;
 
-	// Each network in the process order of a game server: the cluster before the edge. With `p_only_w`, the
-	// others don't exist yet.
+	// Runs every network for `p_seconds`, in the process order of a game server: the cluster before the edge. With
+	// `p_only_w`, the other processes don't exist yet.
 	void run(double p_seconds, bool p_only_w = false) {
 		for (int i = 0; i < int(p_seconds * 60.0); i++) {
 			const double delta = (i % 2 == 0) ? 0.016 : 0.0173333;
@@ -110,6 +140,8 @@ struct ClusterWorld {
 	}
 };
 
+// The game servers' proxies follow the authority within a few frames, the edge runs on the authority's frames, and the
+// final client predicts ahead and interpolates the NPC behind by the interpolation delay plus the latency.
 TEST_CASE("[Modules][TickSynchronizer][Cluster] A mesh with one authority and a bridged star share the timeline") {
 	ClusterWorld world;
 	world.run(0.1);
@@ -140,6 +172,9 @@ TEST_CASE("[Modules][TickSynchronizer][Cluster] A mesh with one authority and a 
 	CHECK(world.a.get_stats().malformed_packets == 0);
 }
 
+
+// A game server that starts 10 seconds after the authority (so the timeline is older than its clock) still keeps its
+// client on time.
 TEST_CASE("[Modules][TickSynchronizer][Cluster] A game server started after the authority keeps the clients on time") {
 	ClusterWorld world;
 	// W runs alone for 10 s: when A starts, the cluster's frames are older than A's clock (negative epoch).
@@ -154,6 +189,8 @@ TEST_CASE("[Modules][TickSynchronizer][Cluster] A game server started after the 
 	CHECK(lag_frames < 10.0);
 }
 
+
+// Polls `p_count` transports `p_times` times, a millisecond apart.
 inline void poll_mesh(const Ref<EnetMeshTransport> *p_transports, int p_count, int p_times) {
 	for (int t = 0; t < p_times; t++) {
 		for (int i = 0; i < p_count; i++) {
@@ -163,6 +200,10 @@ inline void poll_mesh(const Ref<EnetMeshTransport> *p_transports, int p_count, i
 	}
 }
 
+
+// Three ENet nodes connect into a full mesh; a node that isn't in the list, or that claims an id already connected, is
+// refused; a packet carries the sender of its connection; and a cluster with one authority synchronizes over the real
+// sockets.
 TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] Three ENet nodes form a mesh and sync a cluster") {
 	const int base_port = 42000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
 	Ref<EnetMeshTransport> nodes[3];

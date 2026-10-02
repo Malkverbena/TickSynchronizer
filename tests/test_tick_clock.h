@@ -1,3 +1,7 @@
+// Tests of `TickFixedStepper` and `TickClock`: fixed ticks from variable deltas, hitches and the time scale; the
+// estimate of the master clock from ping samples, negative offsets, the slewing of a changed offset, the timeline held
+// while the master changes, times no network has, and the wrap around of frame indices.
+
 #pragma once
 
 #include "../source/sync/tick_protocol.h"
@@ -8,6 +12,8 @@
 
 namespace TestTickClock {
 
+// The stepper turns frame deltas into whole ticks, keeps the remainder, and follows the elapsed time at an irregular
+// frame rate.
 TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Fixed ticks from variable deltas") {
 	TickFixedStepper stepper;
 	stepper.set_ticks_per_second(60);
@@ -39,6 +45,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Fixed ticks from variab
 	CHECK(stepper.get_next_frame_index() == uint32_t(ticks));
 }
 
+
+// A long hitch yields at most the limit of ticks and counts the dropped ones; the time scale multiplies the ticks;
+// frame indices wrap around.
 TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Hitches are capped and time scale applies") {
 	TickFixedStepper stepper;
 	stepper.set_ticks_per_second(30);
@@ -58,6 +67,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Hitches are capped and 
 	CHECK(stepper.pop_tick() == 0);
 }
 
+
+// The clock takes the offset from the sample with the lowest round trip, converts times both ways, and keeps only the
+// latest samples of its window.
 TEST_CASE("[Modules][TickSynchronizer][TickClock] Estimates the master clock from ping samples") {
 	TickClock clock;
 	clock.set_sample_window(8, 3);
@@ -95,6 +107,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Estimates the master clock fro
 	CHECK(clock.get_offset_usec() == true_offset);
 }
 
+
+// A master clock behind the local one gives a negative offset; frames count from the epoch and are 0 before it; invalid
+// samples are ignored; the master is synchronized with itself.
 TEST_CASE("[Modules][TickSynchronizer][TickClock] Negative offsets and frames") {
 	TickClock clock;
 	clock.set_sample_window(4, 1);
@@ -122,6 +137,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Negative offsets and frames") 
 	CHECK(master.local_to_master_usec(123) == 123);
 }
 
+
+// Once synchronized, a change of the estimate is applied at 5% of the elapsed time, so the master frame only goes
+// forward; a change above 100 ms applies at once.
 TEST_CASE("[Modules][TickSynchronizer][TickClock] Offset changes are slewed, big ones applied at once") {
 	TickClock clock;
 	clock.set_sample_window(4, 2);
@@ -169,6 +187,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Offset changes are slewed, big
 	CHECK(clock.get_applied_offset_usec(4020000) == offset);
 }
 
+
+// When the master changes, the frames go on from the held timeline until the new master's samples are enough, then move
+// to its timeline without going back; a timeline far from the held one applies at once.
 TEST_CASE("[Modules][TickSynchronizer][TickClock] The frames go on from the held timeline when the master changes") {
 	TickClock clock;
 	clock.set_ticks_per_second(100);

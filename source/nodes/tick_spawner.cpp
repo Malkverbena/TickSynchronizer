@@ -1,3 +1,6 @@
+// Implementation of `TickSpawner`: making the node of a spawn (a listed scene, or what the game's function returns),
+// announcing it through the network, and following the spawns and despawns of the other peers.
+
 #include "tick_spawner.h"
 
 #include "../common/tick_engine_compat.h"
@@ -8,6 +11,8 @@
 #include "scene/main/scene_tree.h"
 #include "scene/resources/packed_scene.h"
 
+// The network this spawner works with: the one at `network_path`, the nearest ancestor, or the first one in the
+// scene.
 TickNetwork *TickSpawner::find_network() const {
 	if (!network_path.is_empty()) {
 		return Object::cast_to<TickNetwork>(get_node_or_null(network_path));
@@ -21,12 +26,17 @@ TickNetwork *TickSpawner::find_network() const {
 	return is_inside_tree() ? Object::cast_to<TickNetwork>(get_tree()->get_first_node_in_group(SNAME("_tick_networks"))) : nullptr;
 }
 
+
+// Adds a scene to the list, if it isn't there.
 void TickSpawner::add_spawnable_scene(const String &p_path) {
 	if (!spawnable_scenes.has(p_path)) {
 		spawnable_scenes.push_back(p_path);
 	}
 }
 
+
+// Makes the node of a spawn: scene `p_scene` of `spawnable_scenes`, or, when it's negative, what `spawn_function`
+// returns for `p_data`. Null on failure.
 Node *TickSpawner::instantiate(int p_scene, const Variant &p_data) const {
 	if (p_scene < 0) {
 		ERR_FAIL_COND_V_MSG(!spawn_function.is_valid(), nullptr, "A custom spawn needs a valid `spawn_function`.");
@@ -43,6 +53,8 @@ Node *TickSpawner::instantiate(int p_scene, const Variant &p_data) const {
 	return scene->instantiate();
 }
 
+
+// Sets the controller of every `TickObject` in a node and in its children.
 void TickSpawner::apply_controller(Node *p_node, int p_controller) {
 	TickObject *object = Object::cast_to<TickObject>(p_node);
 	if (object) {
@@ -53,6 +65,9 @@ void TickSpawner::apply_controller(Node *p_node, int p_controller) {
 	}
 }
 
+
+// Names a spawned node, adds it under `spawn_path`, keeps it by its spawn id and emits `spawned`. Frees the node
+// when the spawn path leads nowhere.
 Node *TickSpawner::add_spawned(Node *p_node, uint32_t p_spawn_id, const String &p_name) {
 	Node *parent = get_node_or_null(spawn_path);
 	if (parent == nullptr) {
@@ -67,6 +82,9 @@ Node *TickSpawner::add_spawned(Node *p_node, uint32_t p_spawn_id, const String &
 	return p_node;
 }
 
+
+// Spawns on this peer and tells the others: checks that this peer may spawn, makes the node, announces the spawn
+// and adds the node. Null when it can't.
 Node *TickSpawner::server_spawn(int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	TickNetwork *network = find_network();
 	ERR_FAIL_NULL_V_MSG(network, nullptr, "TickSpawner can't find a TickNetwork.");
@@ -101,16 +119,24 @@ Node *TickSpawner::server_spawn(int p_scene, const String &p_name, int p_control
 	return add_spawned(node, spawn_id, name);
 }
 
+
+// Spawns one of `spawnable_scenes` here and on every other peer. Only the server of a single authority network, or
+// any node of a distributed one, can. `p_controller` becomes the controller of every `TickObject` of the new node
+// (0: this peer). An empty name gets one from the scene and the spawn id.
 Node *TickSpawner::spawn(const String &p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	const int index = spawnable_scenes.find(p_scene);
 	ERR_FAIL_COND_V_MSG(index < 0, nullptr, vformat("\"%s\" isn't in `spawnable_scenes`.", p_scene));
 	return server_spawn(index, p_name, p_controller, p_data);
 }
 
+
+// Spawns the node `spawn_function` makes from `p_data`, here and on every other peer; the rest is as in `spawn()`.
 Node *TickSpawner::spawn_custom(const Variant &p_data, const String &p_name, int p_controller) {
 	return server_spawn(-1, p_name, p_controller, p_data);
 }
 
+
+// The nodes spawned through this spawner that are still alive.
 TypedArray<Node> TickSpawner::get_spawned_nodes() const {
 	TypedArray<Node> nodes;
 	for (const KeyValue<uint32_t, ObjectID> &E : nodes_by_spawn) {
@@ -122,6 +148,9 @@ TypedArray<Node> TickSpawner::get_spawned_nodes() const {
 	return nodes;
 }
 
+
+// A spawned node is leaving the tree: forgets it, despawns it on the other peers when this peer owns the spawn, and
+// emits `despawned`.
 void TickSpawner::_on_spawned_exiting(uint32_t p_spawn_id) {
 	const ObjectID *id = nodes_by_spawn.getptr(p_spawn_id);
 	Node *node = id ? ObjectDB::get_instance<Node>(*id) : nullptr;
@@ -135,6 +164,9 @@ void TickSpawner::_on_spawned_exiting(uint32_t p_spawn_id) {
 	}
 }
 
+
+// Called by the network: another peer spawned this; makes the same node here. A spawn already known is ignored (a
+// new host sends them again after a migration).
 void TickSpawner::client_spawn(uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	if (nodes_by_spawn.has(p_spawn_id)) {
 		// Sent again by a new host after a migration.
@@ -149,6 +181,8 @@ void TickSpawner::client_spawn(uint32_t p_spawn_id, int p_scene, const String &p
 	add_spawned(node, p_spawn_id, p_name);
 }
 
+
+// Called by the network: another peer removed a spawn; frees its node here.
 void TickSpawner::client_despawn(uint32_t p_spawn_id) {
 	const ObjectID *id = nodes_by_spawn.getptr(p_spawn_id);
 	ERR_FAIL_NULL_MSG(id, vformat("Spawn %d doesn't exist.", p_spawn_id));
@@ -158,6 +192,8 @@ void TickSpawner::client_despawn(uint32_t p_spawn_id) {
 	}
 }
 
+
+// Exposes the class to scripts.
 void TickSpawner::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_spawn_path", "path"), &TickSpawner::set_spawn_path);
 	ClassDB::bind_method(D_METHOD("get_spawn_path"), &TickSpawner::get_spawn_path);

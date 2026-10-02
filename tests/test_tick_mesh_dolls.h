@@ -1,3 +1,9 @@
+// Tests of the dolls of `TickSyncCore` (ADR-045, ADR-046): in a mesh with a single authority, the peers that don't
+// control an object simulate it with its controller's inputs, on a timeline delayed by the latency to that controller.
+//
+// `DollMover` is a body that is a doll on the peers that don't control it; `DollWorld` has three players in a mesh (or
+// in a star), each with its own body, and an NPC of the authority.
+
 #pragma once
 
 #include "../source/nodes/tick_object.h"
@@ -14,9 +20,12 @@ class DollMover : public TestMover {
 public:
 	bool doll = true;
 
+	// A body at `p_path` controlled by `p_controller`, sent at single precision.
 	DollMover(const String &p_path, int p_controller) :
 			TestMover(p_path, p_controller, TickCodec::PRECISION_SINGLE) {}
 
+
+	// `TickSyncObject`: whether the body is a doll on the peers that don't control it.
 	virtual bool is_doll_enabled() const override { return doll; }
 };
 
@@ -29,6 +38,8 @@ struct DollWorld {
 	// `movers[peer][controller]`; `movers[peer][0]` is the NPC.
 	DollMover *movers[4][4] = {};
 
+	// Builds the three peers with a latency for each pair, the jitter and the loss given, and bodies with scripts of
+	// `p_script_length` ticks; connects them all, or only to the authority with `p_star`.
 	DollWorld(uint64_t p_latency_12, uint64_t p_latency_13, uint64_t p_latency_23, uint64_t p_jitter_usec, double p_packet_loss, int p_script_length, bool p_star = false) {
 		network.set_seed(777);
 		network.set_jitter_usec(p_jitter_usec);
@@ -60,6 +71,8 @@ struct DollWorld {
 		}
 	}
 
+
+	// Stops the engines and frees the bodies.
 	~DollWorld() {
 		for (int peer = 1; peer <= 3; peer++) {
 			cores[peer].stop();
@@ -69,6 +82,8 @@ struct DollWorld {
 		}
 	}
 
+
+	// Runs the network and the three engines for `p_seconds`, with a slightly irregular frame time.
 	void run(double p_seconds) {
 		const int frames = int(p_seconds * 60.0);
 		for (int i = 0; i < frames; i++) {
@@ -81,10 +96,17 @@ struct DollWorld {
 		}
 	}
 
+
+	// Where a peer has the body of a controller (0: the NPC).
 	Vector2 position(int p_peer, int p_controller) const { return movers[p_peer][p_controller]->position; }
+
+
+	// How many times a peer rewound its dolls.
 	uint64_t doll_rewinds(int p_peer) { return cores[p_peer].get_stats().doll_rewinds; }
 };
 
+// The dolls follow their controllers behind by the latency of the direct link plus the input buffer (more frames with a
+// slower link), and a deterministic simulation never rewinds them after the start.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Mesh dolls follow their controller, delayed by the latency to it") {
 	// The direct link between 2 and 3 is faster than the path through the authority.
 	DollWorld fast(40000, 40000, 10000, 0, 0.0, 100000);
@@ -124,6 +146,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Mesh dolls follow their con
 	CHECK(fast.position(3, 3).length() > 1.0);
 }
 
+
+// With jitter and 10% of packet loss, once the inputs stop every copy of every body ends where the authority's is.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Dolls converge with jitter and packet loss") {
 	// 260 ticks: the bodies end away from the origin (see the core tests).
 	DollWorld world(40000, 50000, 20000, 20000, 0.1, 260);
@@ -140,6 +164,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Dolls converge with jitter 
 	CHECK(world.cores[2].get_stats().malformed_packets == 0);
 }
 
+
+// A doll moved from outside the simulation is rewound to the authority's state.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A diverged doll is rewound to the authority's state") {
 	DollWorld world(30000, 30000, 20000, 0, 0.0, 400);
 	world.run(3.0);
@@ -156,6 +182,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A diverged doll is rewound 
 	CHECK(codec->is_equal(world.position(2, 3), world.position(1, 3)));
 }
 
+
+// Inputs a peer sends for the doll of another peer's object are ignored: dolls only take the inputs of their
+// controller.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A peer can't drive another peer's doll") {
 	DollWorld world(20000, 20000, 20000, 0, 0.0, 0);
 	world.run(2.0);
@@ -193,6 +222,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A peer can't drive another 
 	CHECK(world.doll_rewinds(2) == 0);
 }
 
+
+// Without a direct link to its controller (a star, or a link that went down), an object is interpolated instead of
+// simulated as a doll, and still converges.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Without direct inputs, dolls are interpolated") {
 	// A star: the clients only reach the server, so only the server's objects can be dolls.
 	DollWorld star(30000, 30000, 30000, 0, 0.0, 200, true);
@@ -218,6 +250,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Without direct inputs, doll
 	CHECK(mesh.position(1, 3).length() > 1.0);
 }
 
+
+// The `remote_mode` property of a `TickObject` turns the doll on.
 TEST_CASE("[Modules][TickSynchronizer][TickObject] Remote mode") {
 	TickObject *object = memnew(TickObject);
 	CHECK(object->get_remote_mode() == TickObject::REMOTE_MODE_INTERPOLATE);

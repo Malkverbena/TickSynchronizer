@@ -1,3 +1,6 @@
+// Implementation of `TickSyncCore`: the handshake, the server's ticks and snapshots (deltas, parts, interest), the
+// client's prediction and reconciliation, the interpolation, the dolls, the host migration, the spawns and the events.
+
 #include "tick_sync_core.h"
 
 #include "tick_net_ids.h"
@@ -31,7 +34,9 @@ static constexpr double DOLL_REWIND_FRAMES_PER_TICK = 2.0;
 // A doll that used all of them is interpolated from the snapshots for this long.
 static constexpr uint64_t DOLL_SUSPENSION_USEC = 2000000;
 
+// The order of the pending events.
 struct PendingEventOrder {
+	// Whether `p_a` runs before `p_b`: the events without a frame first, then by frame, then in arrival order.
 	template <typename T>
 	bool operator()(const T &p_a, const T &p_b) const {
 		// Events without frame first, then by frame, then in arrival order.
@@ -45,6 +50,7 @@ struct PendingEventOrder {
 	}
 };
 
+// Whether a sorted list has a value (binary search).
 static bool sorted_contains(const LocalVector<uint16_t> &p_sorted, uint16_t p_value) {
 	uint32_t low = 0;
 	uint32_t high = p_sorted.size();
@@ -59,11 +65,15 @@ static bool sorted_contains(const LocalVector<uint16_t> &p_sorted, uint16_t p_va
 	return low < p_sorted.size() && p_sorted[low] == p_value;
 }
 
+
+// Enters a call that may run game code.
 TickSyncCore::BusyScope::BusyScope(TickSyncCore *p_core) :
 		core(p_core) {
 	core->busy_depth++;
 }
 
+
+// Leaves the call; the outermost one stops the engine if game code asked for it.
 TickSyncCore::BusyScope::~BusyScope() {
 	core->busy_depth--;
 	if (core->busy_depth == 0 && core->stop_requested) {
@@ -71,6 +81,8 @@ TickSyncCore::BusyScope::~BusyScope() {
 	}
 }
 
+
+// Takes one token; tokens refill at `p_rate` per second, up to `p_rate`.
 bool TickSyncCore::RateLimiter::take(double p_rate, uint64_t p_now_usec) {
 	if (tokens < 0.0) {
 		tokens = p_rate;
@@ -85,6 +97,8 @@ bool TickSyncCore::RateLimiter::take(double p_rate, uint64_t p_now_usec) {
 	return true;
 }
 
+
+// `TickEngine`: takes the settings if they're valid; not while running.
 void TickSyncCore::set_settings(const Settings &p_settings) {
 	ERR_FAIL_COND_MSG(role != ROLE_NONE, "The settings can't change while the network is running.");
 	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0 || p_settings.ticks_per_second > TICK_MAX_TICKS_PER_SECOND, vformat("The ticks per second must be between 1 and %d.", TICK_MAX_TICKS_PER_SECOND));
@@ -96,6 +110,9 @@ void TickSyncCore::set_settings(const Settings &p_settings) {
 	settings = p_settings;
 }
 
+
+// `TickEngine`: starts as the server or as a client. The role comes from the transport: the `authority_peer` is the
+// server.
 Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec) {
 	ERR_FAIL_COND_V_MSG(stop_requested, ERR_BUSY, "The network is stopping: start it again once its callbacks return (for example, with `call_deferred()`).");
 	ERR_FAIL_COND_V_MSG(role != ROLE_NONE, ERR_ALREADY_IN_USE, "The network is already running.");
@@ -164,6 +181,9 @@ Error TickSyncCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 	return OK;
 }
 
+
+// `TickEngine`: stops the engine. Called from game code the engine is running (a tick, an event, a signal), it
+// stops once that call returns; it isn't running anymore from now on.
 void TickSyncCore::stop() {
 	if (busy_depth > 0) {
 		// Game code the engine is running asked for it: the engine's state is freed once that code returns.
@@ -173,6 +193,9 @@ void TickSyncCore::stop() {
 	stop_now();
 }
 
+
+// Frees the session's state: peers, histories, remote objects, spawns, pending events. The registered objects stay
+// for the next start.
 void TickSyncCore::stop_now() {
 	stop_requested = false;
 	role = ROLE_NONE;
@@ -203,6 +226,10 @@ void TickSyncCore::stop_now() {
 	rewinding = false;
 }
 
+
+// `TickEngine`: starts synchronizing an object, also before the engine starts. Server: objects are simulated and
+// replicated. Client: objects are bound to the server's objects with the same path, then predicted (controlled by
+// this client) or interpolated.
 void TickSyncCore::register_object(TickSyncObject *p_object) {
 	ERR_FAIL_NULL(p_object);
 	const String path = p_object->get_sync_path();
@@ -228,6 +255,8 @@ void TickSyncCore::register_object(TickSyncObject *p_object) {
 	}
 }
 
+
+// Server: gives an object a net id (never one still in quarantine) and registers it with every accepted client.
 void TickSyncCore::server_add_object(TickSyncObject *p_object) {
 	const uint32_t current = stepper.get_next_frame_index();
 	const uint32_t quarantine = uint32_t(settings.history_size) * 2;
@@ -268,6 +297,9 @@ void TickSyncCore::server_add_object(TickSyncObject *p_object) {
 	}
 }
 
+
+// `TickEngine`: stops synchronizing an object. The server tells the clients and keeps the object's id in
+// quarantine.
 void TickSyncCore::unregister_object(TickSyncObject *p_object) {
 	ERR_FAIL_NULL(p_object);
 	const String path = p_object->get_sync_path();
@@ -311,6 +343,8 @@ void TickSyncCore::unregister_object(TickSyncObject *p_object) {
 	}
 }
 
+
+// `TickEngine`: the net id of an object, or 0.
 uint16_t TickSyncCore::get_net_id(const TickSyncObject *p_object) const {
 	if (role == ROLE_SERVER) {
 		const uint16_t *net_id = server_ids_by_object.getptr(const_cast<TickSyncObject *>(p_object));
@@ -324,6 +358,9 @@ uint16_t TickSyncCore::get_net_id(const TickSyncObject *p_object) const {
 	return 0;
 }
 
+
+// Sends a message to a peer, or to all of them with `PEER_BROADCAST`, trimmed to what was written; nothing if the
+// peer already left.
 void TickSyncCore::send(int p_peer, TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message) {
 	ERR_FAIL_COND(transport.is_null());
 	if (p_peer != TickTransport::PEER_BROADCAST && !transport->is_peer_connected(p_peer)) {
@@ -335,6 +372,8 @@ void TickSyncCore::send(int p_peer, TickChannel p_channel, TickTransport::Transf
 	transport->send(p_peer, p_channel, p_mode, bytes.ptr(), int(bytes.size()));
 }
 
+
+// Reads every synchronized variable of an object into `r_values`.
 void TickSyncCore::read_states(TickSyncObject *p_object, LocalVector<Variant> &r_values) const {
 	const int count = p_object->get_sync_schema().size();
 	r_values.resize(count);
@@ -343,6 +382,8 @@ void TickSyncCore::read_states(TickSyncObject *p_object, LocalVector<Variant> &r
 	}
 }
 
+
+// Sets every variable of an object to the value its codec delivers, so every peer simulates from the same values.
 void TickSyncCore::quantize_object(TickSyncObject *p_object) const {
 	const TickSchema &schema = p_object->get_sync_schema();
 	for (int i = 0; i < schema.size(); i++) {
@@ -350,6 +391,8 @@ void TickSyncCore::quantize_object(TickSyncObject *p_object) const {
 	}
 }
 
+
+// Splits the input of a frame into the input of each object, by net id; `false` if it's malformed.
 bool TickSyncCore::parse_frame_input(TickDataBuffer &p_frame_input, HashMap<uint16_t, TickDataBuffer> &r_inputs) {
 	r_inputs.clear();
 	const int count = int(p_frame_input.read_uint_bits(8));
@@ -366,6 +409,9 @@ bool TickSyncCore::parse_frame_input(TickDataBuffer &p_frame_input, HashMap<uint
 	return true;
 }
 
+
+// Writes the inputs of consecutive frames starting at `p_first_frame`; consecutive identical inputs are sent once
+// with a duplicate count (NetworkSynchronizer `encode_inputs`).
 void TickSyncCore::write_input_groups(TickDataBuffer &r_message, uint32_t p_first_frame, const LocalVector<const TickDataBuffer *> &p_frames) {
 	LocalVector<const TickDataBuffer *> groups;
 	LocalVector<int> duplicates;
@@ -385,6 +431,8 @@ void TickSyncCore::write_input_groups(TickDataBuffer &r_message, uint32_t p_firs
 	}
 }
 
+
+// `TickEngine`: receives, simulates the pending ticks, sends, and updates the interpolated objects.
 void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 	ERR_FAIL_COND_MSG(!is_active(), "The network isn't running.");
 	BusyScope busy(this);
@@ -478,6 +526,8 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 	transport->poll();
 }
 
+
+// Handles what the transport reported: connections, disconnections and a host migration.
 void TickSyncCore::handle_events() {
 	TickTransport::Event event;
 	while (is_active() && transport->pop_event(event)) {
@@ -528,6 +578,9 @@ void TickSyncCore::handle_events() {
 	}
 }
 
+
+// Hands a received message to the handler of its type, for this peer's role. A client only takes state from the
+// server.
 void TickSyncCore::handle_packet(const TickTransport::Packet &p_packet) {
 	if (p_packet.data.is_empty()) {
 		stats.malformed_packets++;
@@ -608,8 +661,10 @@ void TickSyncCore::handle_packet(const TickTransport::Packet &p_packet) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Server
 
+// Server: a client's handshake: accepts it if its protocol version and its precision match, rejects it otherwise.
 void TickSyncCore::server_handle_hello(int p_peer, TickDataBuffer &p_message) {
 	PeerState *peer = peers.getptr(p_peer);
 	if (peer == nullptr || peer->accepted || peer->rejected) {
@@ -634,6 +689,8 @@ void TickSyncCore::server_handle_hello(int p_peer, TickDataBuffer &p_message) {
 	server_accept_peer(p_peer);
 }
 
+
+// Server: welcomes a client: the tick rate and the epoch, the live spawns, then every object.
 void TickSyncCore::server_accept_peer(int p_peer) {
 	PeerState &peer = peers[p_peer];
 	peer.accepted = true;
@@ -665,6 +722,8 @@ void TickSyncCore::server_accept_peer(int p_peer) {
 	}
 }
 
+
+// Server: tells a peer why it's refused. It's disconnected a moment later, so the reason reaches it.
 void TickSyncCore::server_reject_peer(int p_peer, const String &p_reason) {
 	PeerState &peer = peers[p_peer];
 	peer.rejected = true;
@@ -677,6 +736,8 @@ void TickSyncCore::server_reject_peer(int p_peer, const String &p_reason) {
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, reject);
 }
 
+
+// Server: tells a client about an object: its id, path, controller and schema hash.
 void TickSyncCore::server_send_register(int p_peer, uint16_t p_net_id) {
 	const ServerObject &object = server_objects[p_net_id];
 	TickDataBuffer message;
@@ -689,6 +750,9 @@ void TickSyncCore::server_send_register(int p_peer, uint16_t p_net_id) {
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Server: a client's inputs message: the snapshot it acknowledges, whether it wants a full one, and the inputs of
+// its recent frames, kept for the frames still to simulate.
 void TickSyncCore::server_handle_inputs(int p_peer, TickDataBuffer &p_message) {
 	PeerState *peer = peers.getptr(p_peer);
 	if (peer == nullptr || !peer->accepted) {
@@ -758,6 +822,9 @@ void TickSyncCore::server_handle_inputs(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
+// Server: answers a ping with its time and the epoch of its timeline. An untrusted client gets a limited number of
+// answers.
 void TickSyncCore::server_handle_ping(int p_peer, TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
 	PeerState *peer = peers.getptr(p_peer);
@@ -780,6 +847,9 @@ void TickSyncCore::server_handle_ping(int p_peer, TickDataBuffer &p_message) {
 	send(p_peer, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, pong);
 }
 
+
+// Local time of frame 0 of this server's timeline, from the frame it's at now (signed: a server following another
+// network's clock has frames older than its process).
 int64_t TickSyncCore::server_compute_epoch() const {
 	// The epoch that matches the frame the server is really at, including the part of the next frame already
 	// accumulated: the server's frames can drift from its start time (startup, hitches, another network's clock).
@@ -788,6 +858,9 @@ int64_t TickSyncCore::server_compute_epoch() const {
 	return int64_t(stepped_at) - int64_t(elapsed_frames * 1000000.0 * get_tick_delta());
 }
 
+
+// Server: takes a client's input for a frame, or repeats its last one (a ghost input), and splits it by object.
+// Oversized inputs of untrusted clients are dropped.
 void TickSyncCore::server_resolve_input(PeerState &r_peer, uint32_t p_frame) {
 	r_peer.tick_inputs.clear();
 	InputRecord &record = r_peer.inputs[p_frame % uint32_t(settings.history_size)];
@@ -820,6 +893,9 @@ void TickSyncCore::server_resolve_input(PeerState &r_peer, uint32_t p_frame) {
 	}
 }
 
+
+// Server: simulates one frame: resolves the clients' inputs, runs the events due, ticks every object with its
+// controller's input, records the states, updates the interest and sends the snapshots.
 void TickSyncCore::server_tick(uint32_t p_frame) {
 	for (KeyValue<int, PeerState> &E : peers) {
 		if (E.value.accepted) {
@@ -920,6 +996,8 @@ void TickSyncCore::server_tick(uint32_t p_frame) {
 	}
 }
 
+
+// Server: sends the clients the inputs of the objects it controls that are dolls on them.
 void TickSyncCore::server_send_own_inputs(uint32_t p_frame) {
 	// The same format as a client's inputs, with the last `input_redundancy` frames.
 	uint32_t first_frame = p_frame;
@@ -948,6 +1026,8 @@ void TickSyncCore::server_send_own_inputs(uint32_t p_frame) {
 	}
 }
 
+
+// Writes an object's values, each after a bit that tells whether it changed from the base.
 void TickSyncCore::write_object_state(TickDataBuffer &r_message, const ServerObject &p_object, const LocalVector<Variant> &p_values, const LocalVector<Variant> *p_base) const {
 	const TickSchema &schema = p_object.object->get_sync_schema();
 	TickDataBuffer &payload = scratch_payload;
@@ -963,6 +1043,9 @@ void TickSyncCore::write_object_state(TickDataBuffer &r_message, const ServerObj
 	r_message.add_data_buffer(payload);
 }
 
+
+// Server: sends a client the state, at a frame, of the objects relevant to it: a delta over a snapshot the client
+// has, or a full one. A delta bigger than a datagram is split in parts.
 void TickSyncCore::server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t p_frame) {
 	const SnapshotRecord &record = server_history[history_index(p_frame)];
 
@@ -1084,6 +1167,8 @@ void TickSyncCore::server_send_snapshot(int p_peer, PeerState &r_peer, uint32_t 
 	}
 }
 
+
+// The entry of one object in a snapshot: its id, whether it changed from the base, and the changed values.
 void TickSyncCore::write_snapshot_entry(TickDataBuffer &r_message, uint16_t p_net_id, const LocalVector<Variant> *p_values, const LocalVector<Variant> *p_base) const {
 	r_message.add_uint_bits(p_net_id, 16);
 	if (p_values == nullptr) {
@@ -1101,6 +1186,8 @@ void TickSyncCore::write_snapshot_entry(TickDataBuffer &r_message, uint16_t p_ne
 	}
 }
 
+
+// Registers an object with a client and decides whether it's relevant to it.
 void TickSyncCore::server_register_for_peer(int p_peer, PeerState &r_peer, uint16_t p_net_id) {
 	const ServerObject *object = server_objects.getptr(p_net_id);
 	ERR_FAIL_NULL(object);
@@ -1127,6 +1214,9 @@ void TickSyncCore::server_register_for_peer(int p_peer, PeerState &r_peer, uint1
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Server: starts or stops sending an object's state to a client, and tells it. An object stays relevant to its
+// controller.
 void TickSyncCore::server_set_peer_relevant(int p_peer, PeerState &r_peer, uint16_t p_net_id, bool p_relevant) {
 	const ServerObject *object = server_objects.getptr(p_net_id);
 	if (object == nullptr) {
@@ -1153,6 +1243,8 @@ void TickSyncCore::server_set_peer_relevant(int p_peer, PeerState &r_peer, uint1
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Server: asks the listener's filter about every object and every client.
 void TickSyncCore::server_update_relevance() {
 	if (listener == nullptr) {
 		return;
@@ -1177,6 +1269,9 @@ void TickSyncCore::server_update_relevance() {
 	}
 }
 
+
+// Interest (ADR-053): server only; `p_peer` 0 changes it for every client. An object is always relevant to its
+// controller.
 Error TickSyncCore::set_relevant(TickSyncObject *p_object, int p_peer, bool p_relevant) {
 	ERR_FAIL_COND_V_MSG(role != ROLE_SERVER, ERR_UNAVAILABLE, "Only the server decides what's relevant to each client.");
 	const uint16_t *net_id = server_ids_by_object.getptr(p_object);
@@ -1195,6 +1290,8 @@ Error TickSyncCore::set_relevant(TickSyncObject *p_object, int p_peer, bool p_re
 	return OK;
 }
 
+
+// `TickEngine`: server: whether the object's state goes to `p_peer`; client: whether the server sends it here.
 bool TickSyncCore::is_relevant(const TickSyncObject *p_object, int p_peer) const {
 	if (role == ROLE_SERVER) {
 		const uint16_t *net_id = server_ids_by_object.getptr(const_cast<TickSyncObject *>(p_object));
@@ -1210,8 +1307,10 @@ bool TickSyncCore::is_relevant(const TickSyncObject *p_object, int p_peer) const
 	return false;
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Client
 
+// Client: the server accepted it: takes the tick rate and the epoch of the timeline.
 void TickSyncCore::client_handle_welcome(TickDataBuffer &p_message) {
 	const int ticks_per_second = int(p_message.read_uint_bits(16));
 	const int64_t epoch = p_message.read_int_bits(64);
@@ -1232,6 +1331,8 @@ void TickSyncCore::client_handle_welcome(TickDataBuffer &p_message) {
 	}
 }
 
+
+// Client: the server refused it: reports the reason.
 void TickSyncCore::client_handle_reject(TickDataBuffer &p_message) {
 	const String reason = p_message.read_string();
 	rejected = true;
@@ -1241,6 +1342,8 @@ void TickSyncCore::client_handle_reject(TickDataBuffer &p_message) {
 	}
 }
 
+
+// Client: the server registered an object: binds it to the local object with the same path, if there is one.
 void TickSyncCore::client_handle_register(TickDataBuffer &p_message) {
 	const uint16_t net_id = uint16_t(p_message.read_uint_bits(16));
 	RemoteObject remote;
@@ -1259,6 +1362,8 @@ void TickSyncCore::client_handle_register(TickDataBuffer &p_message) {
 	}
 }
 
+
+// Client: the server removed an object.
 void TickSyncCore::client_handle_unregister(TickDataBuffer &p_message) {
 	const uint16_t net_id = uint16_t(p_message.read_uint_bits(16));
 	if (p_message.is_buffer_failed()) {
@@ -1269,6 +1374,9 @@ void TickSyncCore::client_handle_unregister(TickDataBuffer &p_message) {
 	predicted_ids_dirty = true;
 }
 
+
+// Client: binds a registered object to the local object with the same path, if their schemas match, and runs the
+// events that waited for it.
 void TickSyncCore::client_bind(uint16_t p_net_id, RemoteObject &r_remote) {
 	TickSyncObject **local = local_objects.getptr(r_remote.path);
 	ERR_FAIL_NULL(local);
@@ -1303,6 +1411,8 @@ void TickSyncCore::client_bind(uint16_t p_net_id, RemoteObject &r_remote) {
 	}
 }
 
+
+// Client: works out again, when something changed, which objects it predicts and which are dolls of each peer.
 void TickSyncCore::client_update_predicted_ids() {
 	if (!predicted_ids_dirty) {
 		return;
@@ -1334,6 +1444,8 @@ void TickSyncCore::client_update_predicted_ids() {
 	}
 }
 
+
+// Client: whether it's predicting the object.
 bool TickSyncCore::client_is_predicted(uint16_t p_net_id) const {
 	if (!predicting) {
 		return false;
@@ -1346,6 +1458,8 @@ bool TickSyncCore::client_is_predicted(uint16_t p_net_id) const {
 	return false;
 }
 
+
+// Client: the snapshot received for a frame, or null.
 const TickSyncCore::SnapshotRecord *TickSyncCore::client_get_received(uint32_t p_frame) const {
 	if (p_frame == TICK_FRAME_NONE || received.is_empty()) {
 		return nullptr;
@@ -1354,6 +1468,8 @@ const TickSyncCore::SnapshotRecord *TickSyncCore::client_get_received(uint32_t p
 	return record.frame == p_frame ? &record : nullptr;
 }
 
+
+// The state of an object at an exact frame, from the history of this peer (ADR-054), or null.
 const LocalVector<Variant> *TickSyncCore::find_state(uint16_t p_net_id, uint32_t p_frame) const {
 	if (p_frame == TICK_FRAME_NONE) {
 		return nullptr;
@@ -1376,6 +1492,9 @@ const LocalVector<Variant> *TickSyncCore::find_state(uint16_t p_net_id, uint32_t
 	return record ? record->states.getptr(p_net_id) : nullptr;
 }
 
+
+// `TickEngine`: history (ADR-054): the state of an object at a frame, interpolated between the nearest states
+// known.
 bool TickSyncCore::get_state_at(const TickSyncObject *p_object, double p_frame, LocalVector<Variant> &r_values) const {
 	if (role == ROLE_NONE || !(p_frame >= 0.0)) {
 		return false;
@@ -1415,6 +1534,8 @@ bool TickSyncCore::get_state_at(const TickSyncObject *p_object, double p_frame, 
 	return true;
 }
 
+
+// `TickEngine`: the frame the interpolated objects show; on the server, the timeline's.
 double TickSyncCore::get_view_frame(uint64_t p_now_usec) const {
 	if (role == ROLE_CLIENT) {
 		if (latest_snapshot == TICK_FRAME_NONE) {
@@ -1428,6 +1549,8 @@ double TickSyncCore::get_view_frame(uint64_t p_now_usec) const {
 	return get_timeline_frame(p_now_usec);
 }
 
+
+// The newest snapshot received before `p_frame`, or `TICK_FRAME_NONE`.
 uint32_t TickSyncCore::client_find_snapshot_before(uint32_t p_frame) const {
 	uint32_t found = TICK_FRAME_NONE;
 	for (const SnapshotRecord &record : received) {
@@ -1441,6 +1564,8 @@ uint32_t TickSyncCore::client_find_snapshot_before(uint32_t p_frame) const {
 	return found;
 }
 
+
+// Client: the snapshot received for a frame, or null.
 TickSyncCore::SnapshotRecord *TickSyncCore::client_get_received(uint32_t p_frame) {
 	if (p_frame == TICK_FRAME_NONE || received.is_empty()) {
 		return nullptr;
@@ -1449,6 +1574,9 @@ TickSyncCore::SnapshotRecord *TickSyncCore::client_get_received(uint32_t p_frame
 	return record.frame == p_frame ? &record : nullptr;
 }
 
+
+// Client: a snapshot, or a part of one: decodes it over its base into the history, and finishes it once every part
+// arrived.
 void TickSyncCore::client_handle_snapshot(TickDataBuffer &p_message, bool p_full) {
 	const uint32_t frame = uint32_t(p_message.read_uint_bits(32));
 	const uint32_t base = uint32_t(p_message.read_uint_bits(32));
@@ -1534,6 +1662,8 @@ void TickSyncCore::client_handle_snapshot(TickDataBuffer &p_message, bool p_full
 	client_finish_snapshot(frame, p_full, complete.server_buffer, complete.missing_state);
 }
 
+
+// Reads `p_count` object states of a snapshot into `r_states`; `false` if the message is malformed.
 bool TickSyncCore::client_read_snapshot_objects(TickDataBuffer &p_message, int p_count, const SnapshotRecord *p_base, ObjectStates &r_states, bool &r_missing_state) {
 	for (int i = 0; i < p_count; i++) {
 		const uint16_t net_id = uint16_t(p_message.read_uint_bits(16));
@@ -1593,6 +1723,9 @@ bool TickSyncCore::client_read_snapshot_objects(TickDataBuffer &p_message, int p
 	return !p_message.is_buffer_failed();
 }
 
+
+// Client: a snapshot is complete: it's acknowledged, the speed is adjusted, and the predicted objects and the dolls
+// are reconciled with it.
 void TickSyncCore::client_finish_snapshot(uint32_t p_frame, bool p_full, int p_server_buffer, bool p_missing_state) {
 	if (p_full && !p_missing_state) {
 		needs_full = false;
@@ -1609,6 +1742,8 @@ void TickSyncCore::client_finish_snapshot(uint32_t p_frame, bool p_full, int p_s
 	client_reconcile_dolls(p_frame);
 }
 
+
+// Client: the server started or stopped sending an object's state.
 void TickSyncCore::client_handle_relevance(TickDataBuffer &p_message) {
 	const uint16_t net_id = uint16_t(p_message.read_uint_bits(16));
 	const bool relevant = p_message.read_bool();
@@ -1628,6 +1763,8 @@ void TickSyncCore::client_handle_relevance(TickDataBuffer &p_message) {
 	}
 }
 
+
+// Client: the answer to a ping: a sample for the clock and the epoch of the timeline, when they're plausible.
 void TickSyncCore::client_handle_pong(TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
 	const uint64_t server_time = p_message.read_uint_bits(64);
@@ -1645,6 +1782,8 @@ void TickSyncCore::client_handle_pong(TickDataBuffer &p_message) {
 	clock.set_master_epoch_usec(epoch);
 }
 
+
+// Client: sends a ping with its time.
 void TickSyncCore::client_send_ping() {
 	last_ping_usec = now_usec;
 	TickDataBuffer ping;
@@ -1654,6 +1793,9 @@ void TickSyncCore::client_send_ping() {
 	send(settings.authority_peer, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, ping);
 }
 
+
+// Client: the frame to predict now so that its inputs reach the server ahead of time: the server's frame, plus the
+// travel time and the input buffer.
 uint32_t TickSyncCore::client_compute_start_frame() const {
 	const double tick_usec = 1000000.0 * get_tick_delta();
 	const double jitter_frames = double(clock.get_rtt_spread_usec()) / tick_usec;
@@ -1662,6 +1804,9 @@ uint32_t TickSyncCore::client_compute_start_frame() const {
 	return clock.get_master_frame(now_usec) + uint32_t(travel + target + 1);
 }
 
+
+// Client: starts predicting: jumps to the frame its inputs must be for, and puts the predicted objects at the
+// server's latest state.
 void TickSyncCore::client_start_prediction() {
 	client_update_predicted_ids();
 	predicting = true;
@@ -1695,6 +1840,9 @@ void TickSyncCore::client_start_prediction() {
 	}
 }
 
+
+// Client: speeds up or slows down so that the server keeps the wanted number of its inputs buffered; jumps when
+// it's too far off.
 void TickSyncCore::client_adjust_speed(int p_server_buffer) {
 	if (!predicting) {
 		return;
@@ -1720,6 +1868,9 @@ void TickSyncCore::client_adjust_speed(int p_server_buffer) {
 	stepper.set_time_scale(1.0 + delta);
 }
 
+
+// Client: compares its prediction of a frame with the server's state; when they differ, takes the server's and
+// simulates the later frames again.
 void TickSyncCore::client_reconcile(uint32_t p_frame) {
 	// The game may have removed a predicted object since the last tick.
 	client_update_predicted_ids();
@@ -1829,6 +1980,9 @@ void TickSyncCore::client_reconcile(uint32_t p_frame) {
 	}
 }
 
+
+// Client: predicts one frame: runs the events due, collects the inputs and ticks the predicted objects, then
+// advances the dolls.
 void TickSyncCore::client_tick(uint32_t p_frame) {
 	client_update_predicted_ids();
 	run_events(p_frame);
@@ -1878,6 +2032,9 @@ void TickSyncCore::client_tick(uint32_t p_frame) {
 	client_advance_dolls();
 }
 
+
+// Client: sends the server the newest snapshot it has, whether it needs a full one, and the inputs of its last
+// frames. In a mesh the inputs go to the other peers too, for their dolls.
 void TickSyncCore::client_send_inputs() {
 	TickDataBuffer message;
 	message.begin_write();
@@ -1930,6 +2087,9 @@ void TickSyncCore::client_send_inputs() {
 	}
 }
 
+
+// `TickEngine`: the server's frame at the time given, with its fraction; negative on a client that doesn't know it
+// yet.
 double TickSyncCore::get_timeline_frame(uint64_t p_now_usec) const {
 	if (role == ROLE_SERVER) {
 		return double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
@@ -1940,6 +2100,8 @@ double TickSyncCore::get_timeline_frame(uint64_t p_now_usec) const {
 	return -1.0;
 }
 
+
+// `TickEngine`: client: updates the interpolated objects for the time given.
 void TickSyncCore::update_interpolation(uint64_t p_now_usec) {
 	if (role != ROLE_CLIENT || stop_requested) {
 		return;
@@ -1950,6 +2112,9 @@ void TickSyncCore::update_interpolation(uint64_t p_now_usec) {
 	client_update_interpolation();
 }
 
+
+// Client: shows the objects it neither predicts nor simulates as dolls between the two snapshots around the view
+// frame.
 void TickSyncCore::client_update_interpolation() {
 	if (latest_snapshot == TICK_FRAME_NONE) {
 		return;
@@ -2003,8 +2168,10 @@ void TickSyncCore::client_update_interpolation() {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Dolls
 
+// Client: the dolls of a peer (ADR-045, ADR-046), made when first needed.
 TickSyncCore::DollPeer &TickSyncCore::client_get_doll(int p_peer) {
 	DollPeer *doll = dolls.getptr(p_peer);
 	if (doll) {
@@ -2017,6 +2184,8 @@ TickSyncCore::DollPeer &TickSyncCore::client_get_doll(int p_peer) {
 	return dolls[p_peer];
 }
 
+
+// Client: makes every doll start again, with its delay measured anew.
 void TickSyncCore::client_reset_dolls() {
 	for (KeyValue<int, DollPeer> &E : dolls) {
 		E.value.started = false;
@@ -2025,6 +2194,9 @@ void TickSyncCore::client_reset_dolls() {
 	}
 }
 
+
+// Client: inputs from the controller of dolls: keeps the ones near the local timeline, and measures the jitter of
+// their arrival.
 void TickSyncCore::client_handle_doll_inputs(int p_peer, TickDataBuffer &p_message) {
 	if (!welcomed) {
 		return;
@@ -2102,6 +2274,8 @@ void TickSyncCore::client_handle_doll_inputs(int p_peer, TickDataBuffer &p_messa
 	}
 }
 
+
+// Client: how many inputs to keep ahead of a doll: the minimum plus the jitter of their arrival.
 int TickSyncCore::client_get_doll_target(const DollPeer &p_doll) const {
 	// Inputs kept ahead of the doll: the minimum plus the jitter of their arrival.
 	double spread = 0.0;
@@ -2117,6 +2291,8 @@ int TickSyncCore::client_get_doll_target(const DollPeer &p_doll) const {
 	return CLAMP(settings.min_input_buffer + int(Math::ceil(spread)), settings.min_input_buffer, settings.max_input_buffer);
 }
 
+
+// Client: whether the object is being simulated as a doll right now.
 bool TickSyncCore::client_is_active_doll(uint16_t p_net_id) const {
 	if (dolls.is_empty()) {
 		return false;
@@ -2129,6 +2305,8 @@ bool TickSyncCore::client_is_active_doll(uint16_t p_net_id) const {
 	return doll && doll->started && predicting;
 }
 
+
+// Client: how many frames the dolls of `p_peer` are behind the local timeline, or -1 when there are none.
 int TickSyncCore::get_doll_delay(int p_peer) const {
 	const DollPeer *doll = dolls.getptr(p_peer);
 	if (doll == nullptr || !doll->started || !predicting || doll->ids.is_empty()) {
@@ -2137,6 +2315,8 @@ int TickSyncCore::get_doll_delay(int p_peer) const {
 	return int(int32_t(stepper.get_next_frame_index() - doll->next_frame));
 }
 
+
+// Simulates one frame of the doll; if the authority's state of that frame already arrived, the doll takes it.
 void TickSyncCore::client_simulate_doll(DollPeer &r_doll, uint32_t p_frame) {
 	// The controller's input for the frame, or its latest one before it (ghost input).
 	const uint32_t ring = uint32_t(settings.history_size);
@@ -2214,6 +2394,8 @@ void TickSyncCore::client_simulate_doll(DollPeer &r_doll, uint32_t p_frame) {
 	stats.doll_corrections++;
 }
 
+
+// Client: whether a doll's states at a frame equal the authority's, within the tolerance of the codecs.
 bool TickSyncCore::client_doll_matches(const DollPeer &p_doll, const ObjectStates &p_doll_states, const SnapshotRecord &p_snapshot) const {
 	for (const uint16_t net_id : p_doll.ids) {
 		const LocalVector<Variant> *authority_values = p_snapshot.states.getptr(net_id);
@@ -2235,6 +2417,8 @@ bool TickSyncCore::client_doll_matches(const DollPeer &p_doll, const ObjectState
 	return true;
 }
 
+
+// Applies the snapshot of `p_snapshot_frame` to the doll, then simulates it up to `p_next_frame`.
 bool TickSyncCore::client_restore_doll(DollPeer &r_doll, uint32_t p_snapshot_frame, uint32_t p_next_frame) {
 	SnapshotRecord *snapshot = client_get_received(p_snapshot_frame);
 	if (snapshot == nullptr) {
@@ -2273,6 +2457,9 @@ bool TickSyncCore::client_restore_doll(DollPeer &r_doll, uint32_t p_snapshot_fra
 	return true;
 }
 
+
+// Client: advances each peer's dolls on their timeline, a little faster or slower to keep their input buffer;
+// starts, restarts or suspends them as needed.
 void TickSyncCore::client_advance_dolls() {
 	const int resync_threshold = MAX(20, settings.ticks_per_second / 2);
 	for (KeyValue<int, DollPeer> &E : dolls) {
@@ -2318,6 +2505,9 @@ void TickSyncCore::client_advance_dolls() {
 	}
 }
 
+
+// Client: compares the dolls with the authority's state of a frame they already simulated, and rewinds the ones
+// that differ, within their budget.
 void TickSyncCore::client_reconcile_dolls(uint32_t p_frame) {
 	if (!predicting || dolls.is_empty()) {
 		return;
@@ -2377,8 +2567,10 @@ bool TickSyncCore::client_take_doll_budget(DollPeer &r_doll, int p_frames) {
 	return true;
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Migration
 
+// Host migration (ADR-062): the transport's host changed: this client becomes the server, or follows the new one.
 void TickSyncCore::handle_host_migrated(int p_new_host) {
 	if (role != ROLE_CLIENT || p_new_host == settings.authority_peer) {
 		return;
@@ -2394,6 +2586,8 @@ void TickSyncCore::handle_host_migrated(int p_new_host) {
 	}
 }
 
+
+// Client: starts over with the new authority: a new handshake and a new clock, with the objects still bound.
 void TickSyncCore::client_follow_authority(int p_new_authority) {
 	// A new handshake with the new authority; the objects stay bound (it keeps the net ids).
 	settings.authority_peer = p_new_authority;
@@ -2425,6 +2619,9 @@ void TickSyncCore::client_follow_authority(int p_new_authority) {
 	}
 }
 
+
+// Client: becomes the server: keeps the net ids and the spawns, puts the objects at the freshest authoritative
+// state, and waits for the handshakes of the other peers.
 void TickSyncCore::client_become_server(int p_old_authority) {
 	const int local_peer = transport->get_local_peer_id();
 	// The freshest authoritative state of each object: the last snapshot, except for the objects this peer predicted.
@@ -2520,8 +2717,11 @@ void TickSyncCore::client_become_server(int p_old_authority) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Spawns
 
+// Server: records a spawn and sends it to the clients (and to the ones joining later). Call it before the
+// spawned objects are registered, so the clients create them before binding them.
 uint32_t TickSyncCore::spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	ERR_FAIL_COND_V_MSG(role != ROLE_SERVER, 0, "Only the server can spawn.");
 	ERR_FAIL_COND_V_MSG(p_name.is_empty(), 0, "A spawned node needs a name.");
@@ -2544,6 +2744,8 @@ uint32_t TickSyncCore::spawn(const String &p_spawner, int p_scene, const String 
 	return spawn_id;
 }
 
+
+// `TickEngine`: server: removes a spawn and tells the clients.
 void TickSyncCore::despawn(uint32_t p_spawn_id) {
 	ERR_FAIL_COND_MSG(role != ROLE_SERVER, "Only the server can despawn.");
 	const SpawnRecord *record = spawns.getptr(p_spawn_id);
@@ -2563,6 +2765,8 @@ void TickSyncCore::despawn(uint32_t p_spawn_id) {
 	stats.despawns++;
 }
 
+
+// Server: tells a client about a live spawn.
 void TickSyncCore::server_send_spawn(int p_peer, uint32_t p_spawn_id) {
 	const SpawnRecord &record = spawns[p_spawn_id];
 	TickDataBuffer message;
@@ -2577,6 +2781,8 @@ void TickSyncCore::server_send_spawn(int p_peer, uint32_t p_spawn_id) {
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Client: the server spawned something: keeps the record and tells the listener.
 void TickSyncCore::client_handle_spawn(TickDataBuffer &p_message) {
 	const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
 	const String spawner = p_message.read_string();
@@ -2606,6 +2812,8 @@ void TickSyncCore::client_handle_spawn(TickDataBuffer &p_message) {
 	}
 }
 
+
+// Client: the server removed a spawn.
 void TickSyncCore::client_handle_despawn(TickDataBuffer &p_message) {
 	const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
 	const String spawner = p_message.read_string();
@@ -2621,8 +2829,10 @@ void TickSyncCore::client_handle_despawn(TickDataBuffer &p_message) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Events
 
+// Writes an event message.
 void TickSyncCore::write_event(TickDataBuffer &r_message, uint16_t p_target, uint32_t p_frame, const StringName &p_name, const Variant &p_payload) {
 	r_message.begin_write();
 	r_message.add_uint_bits(TICK_MESSAGE_EVENT, 8);
@@ -2632,6 +2842,9 @@ void TickSyncCore::write_event(TickDataBuffer &r_message, uint16_t p_target, uin
 	TickCodec::variant()->encode(p_payload, r_message);
 }
 
+
+// Reads an event from a message; `false` if it's malformed. `r_payload_bytes` gets the size of the payload, which a
+// server checks before decoding it.
 bool TickSyncCore::read_event(TickDataBuffer &p_message, PendingEvent &r_event, int &r_payload_bytes) {
 	r_event.target = uint16_t(p_message.read_uint_bits(16));
 	r_event.requested_frame = uint32_t(p_message.read_uint_bits(32));
@@ -2650,6 +2863,8 @@ bool TickSyncCore::read_event(TickDataBuffer &p_message, PendingEvent &r_event, 
 	return !p_message.is_buffer_failed();
 }
 
+
+// Keeps an event until its frame, in order.
 void TickSyncCore::queue_event(const PendingEvent &p_event) {
 	PendingEvent event = p_event;
 	event.sequence = next_event_sequence++;
@@ -2657,6 +2872,9 @@ void TickSyncCore::queue_event(const PendingEvent &p_event) {
 	pending_events.sort_custom<PendingEventOrder>();
 }
 
+
+// Runs an event on its target, or on the listener. `false` when the target doesn't exist yet and the event should
+// wait.
 bool TickSyncCore::execute_event(const PendingEvent &p_event) {
 	const uint32_t frame = p_event.requested_frame != TICK_FRAME_NONE ? p_event.requested_frame : p_event.frame;
 	if (p_event.target == 0) {
@@ -2685,6 +2903,9 @@ bool TickSyncCore::execute_event(const PendingEvent &p_event) {
 	return true;
 }
 
+
+// Executes the events due at `p_frame`, or every event whose target is available when `p_frame` is
+// `TICK_FRAME_NONE`.
 void TickSyncCore::run_events(uint32_t p_frame) {
 	if (pending_events.is_empty()) {
 		return;
@@ -2707,6 +2928,8 @@ void TickSyncCore::run_events(uint32_t p_frame) {
 	pending_events.sort_custom<PendingEventOrder>();
 }
 
+
+// Server: an event from a client: checks its rate, its size, who may send it and its frame, then queues it.
 void TickSyncCore::server_handle_event(int p_peer, TickDataBuffer &p_message) {
 	PeerState *peer = peers.getptr(p_peer);
 	if (peer == nullptr || !peer->accepted) {
@@ -2770,6 +2993,8 @@ void TickSyncCore::server_handle_event(int p_peer, TickDataBuffer &p_message) {
 	queue_event(event);
 }
 
+
+// Client: an event from the server: runs it now, or queues it for its frame, or until its target exists.
 void TickSyncCore::client_handle_event(TickDataBuffer &p_message) {
 	PendingEvent event;
 	int payload_bytes = 0;
@@ -2795,6 +3020,9 @@ void TickSyncCore::client_handle_event(TickDataBuffer &p_message) {
 	}
 }
 
+
+// Sends an event to `p_target` (or the network when null). Client: to the server. Server: to `p_peer`, or
+// every client with 0. `p_frame` schedules it (`TICK_FRAME_NONE`: see `notes/f3-design.md`).
 Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) {
 	ERR_FAIL_COND_V_MSG(role == ROLE_NONE, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
@@ -2834,10 +3062,14 @@ Error TickSyncCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 	return OK;
 }
 
+
+// A frame `p_seconds` after the current one, to schedule events that every peer runs at the same frame.
 uint32_t TickSyncCore::get_event_frame(double p_seconds) const {
 	return stepper.get_next_frame_index() + uint32_t(Math::ceil(MAX(p_seconds, 0.0) * double(settings.ticks_per_second)));
 }
 
+
+// `TickEngine`: the counters, the dolls' delays, the time scale and the frames, by name.
 Dictionary TickSyncCore::get_stats_dictionary() const {
 	Dictionary result;
 	result["rewinds"] = stats.rewinds;

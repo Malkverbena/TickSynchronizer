@@ -1,3 +1,8 @@
+// Tests of what a peer can't make another one pay for (audit of 2026-10-01, ADR-078): a controller that makes the
+// other players simulate its doll over and over, pings without end, a client that takes snapshots and never
+// acknowledges them, reals that aren't finite inside an event, a tick rate no network runs at. Each case sends what a
+// program that isn't this module could send, through the transport of a peer whose engine was stopped.
+
 #pragma once
 
 #include "../source/sync/tick_protocol.h"
@@ -7,11 +12,6 @@
 #include "core/io/marshalls.h"
 #include "core/os/os.h"
 #include "tests/test_macros.h"
-
-// Tests of what a peer can't make another one pay for (audit of 2026-10-01, ADR-078): a controller that makes the
-// other players simulate its doll over and over, pings without end, a client that takes snapshots and never
-// acknowledges them, reals that aren't finite inside an event, a tick rate no network runs at. Each case sends what a
-// program that isn't this module could send, through the transport of a peer whose engine was stopped.
 
 namespace TestTickLimits {
 

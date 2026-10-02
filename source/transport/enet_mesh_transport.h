@@ -1,11 +1,3 @@
-#pragma once
-
-#include "tick_transport.h"
-
-#include "core/io/ip_address.h"
-#include "core/templates/hash_map.h"
-#include "core/variant/variant.h"
-
 // The transport of a mesh between servers: `EnetMeshTransport`.
 //
 // It runs over plain `ENetConnection` sockets (ADR-037), so the process's `SceneMultiplayer` stays free for the star
@@ -23,6 +15,15 @@
 // trusted network.
 //
 // For debugging, a latency can be simulated per node on the sending side (ADR-029).
+
+#pragma once
+
+#include "tick_transport.h"
+
+#include "core/io/ip_address.h"
+#include "core/templates/hash_map.h"
+#include "core/variant/variant.h"
+
 class EnetMeshTransport : public TickTransport {
 	GDCLASS(EnetMeshTransport, TickTransport);
 
@@ -159,9 +160,11 @@ private:
 	// Closes the link with a node and its outgoing socket, without reporting anything.
 	void close_node(MeshNode &r_node);
 
+
 protected:
 	// Exposes the class to scripts.
 	static void _bind_methods();
+
 
 public:
 	// Binds a host on `p_port` for this node (`p_local_id`, positive).

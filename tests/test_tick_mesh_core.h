@@ -1,3 +1,12 @@
+// Tests of `TickMeshCore`, the mesh with distributed authority, over the simulated network: objects registered once and
+// replicated by their owner, changes of owner (requests, assignments, releases, orphans), the roles (how the registry
+// and the clock move, who takes them when their node is lost, the quorum, a node that restarts), the mesh's timeline,
+// the spawns, and values no honest node sends.
+//
+// `AuthMover` is a body that records what happens to its authority; `MeshListener` records what the engine reports and
+// makes bodies for the spawns; `MeshWorld` is a full mesh of up to five nodes with a crate on each; `RestartedNode` is
+// the new process of a node that restarted; `OddMover` is a body whose state doesn't take a whole number of bytes.
+
 #pragma once
 
 #include "../source/sync/tick_mesh_core.h"
@@ -16,23 +25,31 @@ public:
 	LocalVector<Vector2i> changes;
 	LocalVector<int> event_senders;
 
+	// A body at `p_path` controlled by `p_controller`, which always moves right.
 	explicit AuthMover(const String &p_path, int p_controller) :
 			TestMover(p_path, p_controller, TickCodec::PRECISION_SINGLE) {
 		constant_direction = true;
 		direction_override = 1;
 	}
 
+
+	// `TickSyncObject`: records the change of owner.
 	virtual void on_authority_changed(int p_old_owner, int p_new_owner) override {
 		changes.push_back(Vector2i(p_old_owner, p_new_owner));
 	}
 
+
+	// `TickSyncObject`: answers with `approve`: -1 approves, as the default does.
 	virtual int approve_authority_request(int p_requester) override { return approve; }
 
+
+	// `TickSyncObject`: records who sent the event.
 	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override {
 		event_senders.push_back(p_sender);
 	}
 };
 
+// Records what a mesh engine reports, and makes a body for every spawn it hears of.
 class MeshListener : public TickEngine::Listener {
 public:
 	TickMeshCore *core = nullptr;
@@ -45,28 +62,41 @@ public:
 	int despawned = 0;
 	LocalVector<AuthMover *> spawned;
 
+	// Counts the orphaned objects, and keeps the last owner of the last one.
 	virtual void on_authority_orphaned(TickSyncObject *p_object, int p_last_owner, uint32_t p_last_frame) override {
 		orphaned++;
 		last_orphan_owner = p_last_owner;
 	}
 
+
+	// Counts the requests and releases that were denied.
 	virtual void on_authority_request_denied(TickSyncObject *p_object) override { denied++; }
 
+
+	// Counts the changes of the roles.
 	virtual void on_roles_changed(int p_registry, int p_clock_master) override { roles_changes++; }
 
+
+	// Counts the changes of the quorum, and keeps the last state.
 	virtual void on_role_quorum_changed(bool p_has_quorum) override {
 		quorum_changes++;
 		has_quorum = p_has_quorum;
 	}
 
+
+	// Counts the despawns.
 	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override { despawned++; }
 
+
+	// Makes a body for the spawn and registers it.
 	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override {
 		AuthMover *mover = memnew(AuthMover(p_spawner + "/" + p_name, p_controller));
 		spawned.push_back(mover);
 		core->register_object(mover);
 	}
 
+
+	// Unregisters and frees the bodies it made.
 	~MeshListener() {
 		for (AuthMover *mover : spawned) {
 			core->unregister_object(mover);
@@ -88,6 +118,8 @@ struct MeshWorld {
 	// Another engine stepped with the world's: a node's process that restarted (see `RestartedNode`).
 	TickMeshCore *extra = nullptr;
 
+	// Starts `p_nodes` nodes, trusted and without interpolation, with the candidates and the quorum given, each with
+	// its crate; connects them all unless told otherwise.
 	explicit MeshWorld(int p_nodes, bool p_connect_all = true, const Vector<int> &p_candidates = Vector<int>(), int p_quorum = 0) {
 		count = p_nodes;
 		network.set_seed(5);
@@ -110,6 +142,8 @@ struct MeshWorld {
 		}
 	}
 
+
+	// Unregisters and frees the crates.
 	~MeshWorld() {
 		for (int i = 1; i <= count; i++) {
 			cores[i].unregister_object(crates[i]);
@@ -117,6 +151,8 @@ struct MeshWorld {
 		}
 	}
 
+
+	// Runs the network and the running engines (also a restarted node's) for `p_seconds`.
 	void run(double p_seconds) {
 		for (int f = 0; f < int(p_seconds * 60.0); f++) {
 			network.process(1.0 / 60.0);
@@ -131,6 +167,7 @@ struct MeshWorld {
 		}
 	}
 
+
 	// Cuts every link of a node (its machine is gone, or cut off from the others).
 	void isolate(int p_node) {
 		for (int i = 1; i <= count; i++) {
@@ -140,6 +177,8 @@ struct MeshWorld {
 		}
 	}
 
+
+	// Links a node to every other node again.
 	void reconnect(int p_node) {
 		for (int i = 1; i <= count; i++) {
 			if (i != p_node) {
@@ -148,6 +187,8 @@ struct MeshWorld {
 		}
 	}
 
+
+	// Sends a hand-made message from a node's transport, as a node that isn't this module could.
 	void send_raw(int p_from, int p_to, TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message) {
 		p_message.dry();
 		const LocalVector<uint8_t> &bytes = p_message.get_buffer().get_bytes();
@@ -163,6 +204,8 @@ struct RestartedNode {
 	AuthMover *crate = nullptr;
 	MeshWorld *world = nullptr;
 
+	// Stops the engine of `p_node` and starts a new one on its transport, with the world's settings and a crate of its
+	// own.
 	RestartedNode(MeshWorld &r_world, int p_node) {
 		world = &r_world;
 		r_world.cores[p_node].stop();
@@ -175,6 +218,8 @@ struct RestartedNode {
 		r_world.extra = &core;
 	}
 
+
+	// Stops the new engine and frees its crate.
 	~RestartedNode() {
 		world->extra = nullptr;
 		core.stop();
@@ -183,6 +228,8 @@ struct RestartedNode {
 	}
 };
 
+// Every node gives the crate the same id, owner and version; only the owner moves it, and the others follow its state
+// on the clock master's timeline.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Objects register once and replicate from their owner") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -201,6 +248,7 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Objects register once and repli
 	CHECK(Math::abs(int32_t(world.cores[3].get_frame() - world.cores[1].get_frame())) <= 3);
 	CHECK(world.cores[1].get_stats().malformed_packets == 0);
 }
+
 
 // Node 1 registers the objects and drops them, a frame apart; returns how many of them got an id.
 static int churn_objects(MeshWorld &r_world, const LocalVector<AuthMover *> &p_movers) {
@@ -223,15 +271,20 @@ class OddMover : public AuthMover {
 public:
 	bool moving = false;
 
+	// A body with a boolean besides its position and velocity: 129 bits of state.
 	OddMover(const String &p_path, int p_controller) :
 			AuthMover(p_path, p_controller) {
 		schema.add("moving", TickCodec::boolean());
 	}
 
+
+	// `TickSyncObject`: the boolean is the third variable.
 	virtual Variant get_sync_var(int p_index) const override {
 		return p_index == 2 ? Variant(moving) : AuthMover::get_sync_var(p_index);
 	}
 
+
+	// `TickSyncObject`: the boolean is the third variable.
 	virtual void set_sync_var(int p_index, const Variant &p_value) override {
 		if (p_index == 2) {
 			moving = p_value;
@@ -240,12 +293,16 @@ public:
 		}
 	}
 
+
+	// `TickSyncObject`: moves, and sets the boolean.
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override {
 		AuthMover::process_tick(p_delta, p_input);
 		moving = true;
 	}
 };
 
+// Three objects of one owner whose states don't end at a byte boundary go in the same message, and every node reads
+// each of them right.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Every object of an owner replicates, whatever the size of its state") {
 	MeshWorld world(3);
 	// Node 2 owns three more bodies, whose states take 129 bits each: they go in the same message, one after another.
@@ -274,6 +331,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Every object of an owner replic
 	}
 }
 
+
+// The registry gives ids to 60,000 objects that come and go within the quarantine, and goes on giving them past 65,535
+// objects once the quarantine is over.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Registry ids past their quarantine are reused, however many came before") {
 	MeshWorld world(1);
 	world.run(0.2);
@@ -302,6 +362,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Registry ids past their quarant
 	}
 }
 
+
+// A requested object changes owner on every node, with a new version and the callback; the new owner continues from the
+// released state, and the former one follows it.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A requested object changes owner and keeps its state") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -323,6 +386,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A requested object changes owne
 	CHECK(Math::abs(world.crates[2]->position.x - world.crates[3]->position.x) < 0.5);
 }
 
+
+// When two nodes ask for the same object at once, exactly one gets it, with a single change of owner, and the other is
+// denied.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Concurrent requests give the object to exactly one node") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -343,6 +409,8 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Concurrent requests give the ob
 	CHECK(world.listeners[owner].denied == 0);
 }
 
+
+// A state from the former owner is discarded, whether it carries the old version or the current one.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] State from a former owner or an old version is discarded") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -373,6 +441,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] State from a former owner or an
 	CHECK(world.crates[1]->position.x < 1000.0);
 }
 
+
+// When an owner leaves, its object is orphaned on every node and nobody simulates it, until the project assigns it to a
+// node.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A lost owner orphans its objects until the project assigns them") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -406,6 +477,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A lost owner orphans its object
 	CHECK(Math::abs(world.crates[1]->position.x - world.crates[2]->position.x) < 0.5);
 }
 
+
+// When the node with both roles is lost, the lowest node takes them: it orphans the lost node's object, answers
+// requests, and the others follow its clock.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] When the registry and clock node is lost, the lowest node takes both roles") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -445,6 +519,8 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] When the registry and clock nod
 	CHECK(world.cores[3].get_stats().malformed_packets == 0);
 }
 
+
+// A request on its way to a registry that is lost is denied, and asking again works with the new registry.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A request the lost registry didn't answer is denied") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -461,6 +537,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A request the lost registry did
 	CHECK(world.cores[3].get_owner(world.crates[3]) == 3);
 }
 
+
+// Any node moves the roles to connected nodes while the mesh runs: every node follows, the new registry answers
+// requests, and gives new objects ids that aren't in use.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] The registry and the clock move while the mesh runs") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -503,6 +582,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] The registry and the clock move
 	}
 }
 
+
+// The registry's node comes back as an empty process after another node took the roles: it adopts the mesh's roles and
+// ids instead of being the registry again.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] The registry's node comes back empty and joins as a plain node") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -552,6 +634,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] The registry's node comes back 
 	memdelete(fresh_crate);
 }
 
+
+// An owner refuses a request but not an assignment, releases the object to another node, and an event sent to a former
+// owner is forwarded to the current one with its origin.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Owners approve requests, release objects and forward events") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -599,6 +684,8 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Owners approve requests, releas
 	CHECK(world.crates[1]->event_senders[1] == 2);
 }
 
+
+// Any node spawns, with its id in the spawn id; a node that joins late gets the registry's objects and the live spawns.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Any node spawns, and late nodes get the registry and the spawns") {
 	MeshWorld world(4, false);
 	world.network.connect_peers(1, 2);
@@ -631,6 +718,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Any node spawns, and late nodes
 	memdelete(rock);
 }
 
+
+// With candidates, the first of them in the mesh takes the lost roles, not the lowest node; when no candidate is left
+// the roles stay vacant, requests fail, and the objects go on with their owners.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] The first candidate in the mesh takes the roles, not the lowest node") {
 	// Node 1 has the roles and node 3 is its reserve; nodes 2 and 4 never take them.
 	Vector<int> candidates;
@@ -664,6 +754,10 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] The first candidate in the mesh
 	CHECK(Math::abs(world.crates[4]->position.x - world.crates[2]->position.x) < 0.5);
 }
 
+
+// The only candidate restarts as an empty process: the other nodes tell it its roles belonged to another process, and
+// it takes them again from their views: the same ids and owners, new versions, and the mesh's timeline instead of frame
+// 0.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node with the roles that restarts takes them again from the other nodes") {
 	// Only node 1 may have the roles.
 	Vector<int> candidates;
@@ -736,6 +830,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node with the roles that rest
 	memdelete(barrels[1]);
 }
 
+
+// A node that joins while a restarted node takes its roles again, and first takes the new process for the registry,
+// ends with the mesh's view and timeline.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node that joins while a restarted node takes its roles again gets the mesh's view") {
 	Vector<int> candidates;
 	candidates.push_back(1);
@@ -782,6 +879,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node that joins while a resta
 	CHECK(Math::abs(fresh.crate->position.x - world.crates[2]->position.x) < 0.5);
 }
 
+
+// A node that loses only its link to the registry doesn't take the roles while another node still sees the registry; it
+// takes them once that node loses it too.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node that only lost its link to the registry doesn't take its place") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -822,6 +922,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node that only lost its link 
 	}
 }
 
+
+// With a quorum, a node cut off from the others neither takes the roles nor orphans their objects; the side with the
+// quorum moves the roles, and the node follows them when it's back.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node without its quorum neither takes nor uses the roles") {
 	// Two of the three nodes are needed.
 	MeshWorld world(3, true, Vector<int>(), 2);
@@ -872,6 +975,7 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A node without its quorum neith
 	CHECK(world.cores[1].get_roles_term() == 1);
 }
 
+
 // Steps the world and returns the longest run of steps in which a node's frame didn't advance.
 static int longest_stall(MeshWorld &r_world, int p_node, int p_steps) {
 	int longest = 0;
@@ -889,6 +993,9 @@ static int longest_stall(MeshWorld &r_world, int p_node, int p_steps) {
 	return longest;
 }
 
+
+// While the clock moves, by the project or because its node was lost, the other nodes go on simulating without
+// stalling, and end on the new clock's timeline.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] The nodes go on simulating while the clock moves") {
 	MeshWorld world(3);
 	world.run(2.0);
@@ -922,6 +1029,9 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] The nodes go on simulating whil
 	CHECK((apart >= -3 && apart <= 3));
 }
 
+
+// The spawn of a node that left belongs to the registry: it sends it to late nodes, it goes with the role when the
+// registry moves, and the registry removes it for every node.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] The spawns of a node that left belong to the registry") {
 	MeshWorld world(4, false);
 	world.network.connect_peers(1, 2);

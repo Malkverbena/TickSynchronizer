@@ -1,3 +1,7 @@
+// Implementation of `TickMeshCore`: the handshake between nodes, the registry (claims, transfers, releases, orphans)
+// and each node's replica of it, the states and their interpolation, the roles (who has them, how they move, how a
+// registry takes over), the mesh's timeline, the spawns and the events.
+
 #include "tick_mesh_core.h"
 
 #include "tick_net_ids.h"
@@ -61,7 +65,9 @@ static uint32_t mesh_candidates_hash(const Vector<int> &p_candidates) {
 	return hash_fmix32(hash);
 }
 
+// The order of the pending events.
 struct MeshEventOrder {
+	// Whether `p_a` runs before `p_b`: the events without a frame first, then by frame, then in arrival order.
 	template <typename T>
 	bool operator()(const T &p_a, const T &p_b) const {
 		if (p_a.frame != p_b.frame) {
@@ -74,11 +80,14 @@ struct MeshEventOrder {
 	}
 };
 
+// Enters a call that may run game code.
 TickMeshCore::BusyScope::BusyScope(TickMeshCore *p_core) :
 		core(p_core) {
 	core->busy_depth++;
 }
 
+
+// Leaves the call; the outermost one stops the engine if game code asked for it.
 TickMeshCore::BusyScope::~BusyScope() {
 	core->busy_depth--;
 	if (core->busy_depth == 0 && core->stop_requested) {
@@ -86,6 +95,8 @@ TickMeshCore::BusyScope::~BusyScope() {
 	}
 }
 
+
+// `TickEngine`: takes the settings if they're valid; not while running.
 void TickMeshCore::set_settings(const Settings &p_settings) {
 	ERR_FAIL_COND_MSG(running, "The settings can't change while the network is running.");
 	ERR_FAIL_COND_MSG(p_settings.ticks_per_second <= 0 || p_settings.ticks_per_second > TICK_MAX_TICKS_PER_SECOND, vformat("The ticks per second must be between 1 and %d.", TICK_MAX_TICKS_PER_SECOND));
@@ -98,6 +109,9 @@ void TickMeshCore::set_settings(const Settings &p_settings) {
 	settings = p_settings;
 }
 
+
+// `TickEngine`: starts this node of the mesh: a new process id, the roles as configured, a hello to every connected
+// node, and the claims of its objects.
 Error TickMeshCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_usec) {
 	ERR_FAIL_COND_V_MSG(stop_requested, ERR_BUSY, "The network is stopping: start it again once its callbacks return (for example, with `call_deferred()`).");
 	ERR_FAIL_COND_V_MSG(running, ERR_ALREADY_IN_USE, "The network is already running.");
@@ -160,6 +174,9 @@ Error TickMeshCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 	return OK;
 }
 
+
+// `TickEngine`: stops the engine. Called from game code the engine is running (a tick, an event, a signal), it
+// stops once that call returns; it isn't running anymore from now on.
 void TickMeshCore::stop() {
 	if (busy_depth > 0) {
 		// Game code the engine is running asked for it: the engine's state is freed once that code returns.
@@ -169,6 +186,9 @@ void TickMeshCore::stop() {
 	stop_now();
 }
 
+
+// Frees the session's state: nodes, entries, the registry's records, spawns, pending events and messages. The
+// registered objects stay for the next start.
 void TickMeshCore::stop_now() {
 	stop_requested = false;
 	running = false;
@@ -190,6 +210,8 @@ void TickMeshCore::stop_now() {
 	pending_requests.clear();
 }
 
+
+// Whether a node passed the handshake; this node always did.
 bool TickMeshCore::is_peer_ready(int p_peer) const {
 	if (p_peer == local_id) {
 		return true;
@@ -198,6 +220,8 @@ bool TickMeshCore::is_peer_ready(int p_peer) const {
 	return peer && peer->ready;
 }
 
+
+// How many other nodes passed the handshake.
 int TickMeshCore::get_ready_count() const {
 	int count = 0;
 	for (const KeyValue<int, PeerState> &E : peers) {
@@ -208,10 +232,14 @@ int TickMeshCore::get_ready_count() const {
 	return count;
 }
 
+
+// `TickEngine`: whether this node is connected to enough nodes to take or keep the roles.
 bool TickMeshCore::has_role_quorum() const {
 	return settings.role_quorum <= 1 || get_ready_count() + 1 >= settings.role_quorum;
 }
 
+
+// The process of a node (this one, or a connected one); 0 if unknown.
 uint32_t TickMeshCore::get_node_boot(int p_node) const {
 	if (p_node == local_id) {
 		return boot_id;
@@ -220,10 +248,14 @@ uint32_t TickMeshCore::get_node_boot(int p_node) const {
 	return peer && peer->ready ? peer->boot : 0;
 }
 
+
+// Whether the process with a role is this one or connected to it.
 bool TickMeshCore::is_role_process_present(int p_node, uint32_t p_boot) const {
 	return p_boot != 0 && get_node_boot(p_node) == p_boot;
 }
 
+
+// What this node sees of the process with a role: unknown, seen or lost.
 int TickMeshCore::get_role_view(int p_node, uint32_t p_boot) const {
 	if (p_boot == 0) {
 		return ROLE_VIEW_UNKNOWN;
@@ -231,12 +263,16 @@ int TickMeshCore::get_role_view(int p_node, uint32_t p_boot) const {
 	return is_role_process_present(p_node, p_boot) ? ROLE_VIEW_SEEN : ROLE_VIEW_LOST;
 }
 
+
+// Forgets what this node knew about the objects: it learns them again from the registry.
 void TickMeshCore::forget_objects() {
 	entries.clear();
 	ids_by_path.clear();
 	pending_requests.clear();
 }
 
+
+// Sends a message to a node. One for this node itself is queued, and handled in the same step.
 void TickMeshCore::send(int p_peer, TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message) {
 	p_message.dry();
 	const LocalVector<uint8_t> &bytes = p_message.get_buffer().get_bytes();
@@ -255,6 +291,8 @@ void TickMeshCore::send(int p_peer, TickChannel p_channel, TickTransport::Transf
 	transport->send(p_peer, p_channel, p_mode, bytes.ptr(), int(bytes.size()));
 }
 
+
+// Sends a message to every node that passed the handshake and, with `p_include_self`, to this node.
 void TickMeshCore::send_to_ready_peers(TickChannel p_channel, TickTransport::TransferMode p_mode, TickDataBuffer &p_message, bool p_include_self) {
 	for (const KeyValue<int, PeerState> &E : peers) {
 		if (E.value.ready) {
@@ -266,6 +304,8 @@ void TickMeshCore::send_to_ready_peers(TickChannel p_channel, TickTransport::Tra
 	}
 }
 
+
+// Reads every synchronized variable of an object into `r_values`.
 void TickMeshCore::read_values(TickSyncObject *p_object, LocalVector<Variant> &r_values) const {
 	const int count = p_object->get_sync_schema().size();
 	r_values.resize(count);
@@ -274,6 +314,8 @@ void TickMeshCore::read_values(TickSyncObject *p_object, LocalVector<Variant> &r
 	}
 }
 
+
+// Writes an object's values with their codecs.
 void TickMeshCore::write_values(TickDataBuffer &r_payload, TickSyncObject *p_object, const LocalVector<Variant> &p_values) const {
 	const TickSchema &schema = p_object->get_sync_schema();
 	r_payload.begin_write();
@@ -282,6 +324,8 @@ void TickMeshCore::write_values(TickDataBuffer &r_payload, TickSyncObject *p_obj
 	}
 }
 
+
+// Reads an object's values with its codecs; `false` if the payload is malformed.
 bool TickMeshCore::read_payload_values(TickDataBuffer &p_payload, TickSyncObject *p_object, LocalVector<Variant> &r_values) const {
 	const TickSchema &schema = p_object->get_sync_schema();
 	r_values.resize(schema.size());
@@ -291,6 +335,9 @@ bool TickMeshCore::read_payload_values(TickDataBuffer &p_payload, TickSyncObject
 	return !p_payload.is_buffer_failed();
 }
 
+
+// Sets every variable of an object to the value its codec delivers, so the owner simulates from what the others
+// receive.
 void TickMeshCore::quantize_object(TickSyncObject *p_object) const {
 	const TickSchema &schema = p_object->get_sync_schema();
 	for (int i = 0; i < schema.size(); i++) {
@@ -298,6 +345,8 @@ void TickMeshCore::quantize_object(TickSyncObject *p_object) const {
 	}
 }
 
+
+// The entry bound to a local object, with its id in `r_id`; null when it has none.
 TickMeshCore::Entry *TickMeshCore::find_entry(const TickSyncObject *p_object, uint16_t *r_id) {
 	for (KeyValue<uint16_t, Entry> &E : entries) {
 		if (E.value.object == p_object) {
@@ -310,6 +359,8 @@ TickMeshCore::Entry *TickMeshCore::find_entry(const TickSyncObject *p_object, ui
 	return nullptr;
 }
 
+
+// The entry bound to a local object, with its id in `r_id`; null when it has none.
 const TickMeshCore::Entry *TickMeshCore::find_entry(const TickSyncObject *p_object, uint16_t *r_id) const {
 	for (const KeyValue<uint16_t, Entry> &E : entries) {
 		if (E.value.object == p_object) {
@@ -322,6 +373,8 @@ const TickMeshCore::Entry *TickMeshCore::find_entry(const TickSyncObject *p_obje
 	return nullptr;
 }
 
+
+// Binds an entry to the local object with its path, if there is one and their schemas match.
 void TickMeshCore::bind_entry(uint16_t p_id, Entry &r_entry) {
 	if (r_entry.object) {
 		return;
@@ -337,8 +390,11 @@ void TickMeshCore::bind_entry(uint16_t p_id, Entry &r_entry) {
 	r_entry.object = *local;
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Objects
 
+// `TickEngine`: starts synchronizing an object: binds it to its entry if the mesh knows its path, and claims it
+// from the registry.
 void TickMeshCore::register_object(TickSyncObject *p_object) {
 	ERR_FAIL_NULL(p_object);
 	const String path = p_object->get_sync_path();
@@ -358,6 +414,8 @@ void TickMeshCore::register_object(TickSyncObject *p_object) {
 	}
 }
 
+
+// `TickEngine`: stops synchronizing an object. Its owner tells the registry, which forgets it.
 void TickMeshCore::unregister_object(TickSyncObject *p_object) {
 	ERR_FAIL_NULL(p_object);
 	const String path = p_object->get_sync_path();
@@ -382,6 +440,8 @@ void TickMeshCore::unregister_object(TickSyncObject *p_object) {
 	}
 }
 
+
+// Asks the registry to register an object, once the registry's process is in reach.
 void TickMeshCore::claim(TickSyncObject *p_object) {
 	if (!is_registry_reachable()) {
 		// Claimed once the registry is ready.
@@ -396,6 +456,8 @@ void TickMeshCore::claim(TickSyncObject *p_object) {
 	send(settings.registry_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Claims every local object that has no entry bound to it.
 void TickMeshCore::claim_unbound_objects() {
 	for (const KeyValue<String, TickSyncObject *> &E : local_objects) {
 		const uint16_t *id = ids_by_path.getptr(E.key);
@@ -405,24 +467,33 @@ void TickMeshCore::claim_unbound_objects() {
 	}
 }
 
+
+// `TickEngine`: the id the registry gave an object, or 0.
 uint16_t TickMeshCore::get_net_id(const TickSyncObject *p_object) const {
 	uint16_t id = 0;
 	find_entry(p_object, &id);
 	return id;
 }
 
+
+// Owner of an object, 0 when it has none or it isn't registered yet.
 int TickMeshCore::get_owner(const TickSyncObject *p_object) const {
 	const Entry *entry = find_entry(p_object);
 	return entry ? entry->owner : 0;
 }
 
+
+// The version of an object's ownership as this node knows it; 0 when the object isn't registered.
 uint32_t TickMeshCore::get_version(const TickSyncObject *p_object) const {
 	const Entry *entry = find_entry(p_object);
 	return entry ? entry->version : 0;
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Session
 
+// Sends this node's handshake: the protocol version, the precision, the roles as it knows them, its process and the
+// hash of its candidates.
 void TickMeshCore::send_hello(int p_peer) {
 	TickDataBuffer hello;
 	hello.begin_write();
@@ -441,6 +512,9 @@ void TickMeshCore::send_hello(int p_peer) {
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, hello);
 }
 
+
+// Another node's handshake: checks the version, the precision, the roles and the candidates, adopts newer roles,
+// and marks the node as ready.
 void TickMeshCore::handle_hello(int p_peer, TickDataBuffer &p_message) {
 	PeerState *peer = peers.getptr(p_peer);
 	if (peer == nullptr || peer->ready || peer->rejected) {
@@ -492,6 +566,9 @@ void TickMeshCore::handle_hello(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
+// A node passed the handshake: it gets the registry's announcements and the live spawns from the nodes that own
+// them, and this node's view of the roles.
 void TickMeshCore::on_peer_ready(int p_peer) {
 	peers[p_peer].ready = true;
 	if (is_registry() && registry_boot == boot_id) {
@@ -517,6 +594,9 @@ void TickMeshCore::on_peer_ready(int p_peer) {
 	}
 }
 
+
+// Handles what the transport reported: a new node gets this node's hello; when a node leaves, its spawns go to the
+// registry and, on the registry, its objects are orphaned.
 void TickMeshCore::handle_events() {
 	LocalVector<int> left;
 	TickTransport::Event event;
@@ -570,6 +650,9 @@ void TickMeshCore::handle_events() {
 	}
 }
 
+
+// Hands a received message to its handler, checking who may send it: the registry's messages come only from the
+// registry's process, and the ones for the registry are taken only when this node has the role and can act.
 void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 	if (p_packet.data.is_empty()) {
 		stats.malformed_packets++;
@@ -710,14 +793,18 @@ void TickMeshCore::handle_packet(const TickTransport::Packet &p_packet) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Clock
 
+// Clock master: the local time of frame 0 of its timeline, from the frame it's at now.
 int64_t TickMeshCore::compute_epoch() const {
 	const double elapsed_frames = double(stepper.get_next_frame_index()) + stepper.get_interpolation_fraction();
 	const uint64_t stepped_at = stepped_usec != 0 ? stepped_usec : now_usec;
 	return int64_t(stepped_at) - int64_t(elapsed_frames * 1000000.0 * get_tick_delta());
 }
 
+
+// Clock master: answers a ping with its time and the epoch of the timeline.
 void TickMeshCore::handle_ping(int p_peer, TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
 	if (p_message.is_buffer_failed()) {
@@ -742,6 +829,8 @@ void TickMeshCore::handle_ping(int p_peer, TickDataBuffer &p_message) {
 	send(p_peer, TICK_CHANNEL_STATS, TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED, pong);
 }
 
+
+// The clock master's answer to a ping: a sample for the clock and the epoch, when they're plausible.
 void TickMeshCore::handle_pong(int p_peer, TickDataBuffer &p_message) {
 	const uint64_t client_time = p_message.read_uint_bits(64);
 	const uint64_t master_time = p_message.read_uint_bits(64);
@@ -765,6 +854,9 @@ void TickMeshCore::handle_pong(int p_peer, TickDataBuffer &p_message) {
 	timeline_trusted = true;
 }
 
+
+// `TickEngine`: the frame of the mesh's timeline at the time given, with its fraction; negative while this node
+// doesn't know it.
 double TickMeshCore::get_timeline_frame(uint64_t p_now_usec) const {
 	if (!running) {
 		return -1.0;
@@ -778,6 +870,8 @@ double TickMeshCore::get_timeline_frame(uint64_t p_now_usec) const {
 	return clock.is_synchronized() ? clock.get_master_frame_time(p_now_usec) : -1.0;
 }
 
+
+// Simulates the frames up to the timeline's current one; jumps when it's too far off.
 void TickMeshCore::follow_timeline(double p_target_frame) {
 	if (p_target_frame < 0.0) {
 		// The timeline isn't known yet: nothing is simulated.
@@ -799,8 +893,11 @@ void TickMeshCore::follow_timeline(double p_target_frame) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Process
 
+// `TickEngine`: receives, settles the roles, simulates the frames due on the mesh's timeline, sends, and updates
+// the remote objects.
 void TickMeshCore::process(double p_delta, uint64_t p_now_usec) {
 	ERR_FAIL_COND_MSG(!is_active(), "The network isn't running.");
 	BusyScope busy(this);
@@ -880,6 +977,9 @@ void TickMeshCore::process(double p_delta, uint64_t p_now_usec) {
 	transport->poll();
 }
 
+
+// Simulates one frame: runs the events due, ticks the objects this node owns with their own input, and sends their
+// states.
 void TickMeshCore::tick(uint32_t p_frame) {
 	run_events(p_frame);
 	const double delta = get_tick_delta();
@@ -911,6 +1011,7 @@ void TickMeshCore::tick(uint32_t p_frame) {
 // The count's place in a state message, written once known.
 static constexpr int MESH_STATE_COUNT_OFFSET = 8 + 32;
 
+// Writes the count of a state message and sends it to every ready node.
 void TickMeshCore::send_state_message(TickDataBuffer &r_message, int p_count) {
 	const int end = r_message.total_size();
 	r_message.seek(MESH_STATE_COUNT_OFFSET);
@@ -920,6 +1021,9 @@ void TickMeshCore::send_state_message(TickDataBuffer &r_message, int p_count) {
 	stats.states_sent += uint64_t(p_count);
 }
 
+
+// Sends the state of the objects this node owns that changed, or of all of them on a keyframe, in as many messages
+// as it takes.
 void TickMeshCore::send_states(uint32_t p_frame) {
 	const bool keyframe = p_frame % uint32_t(settings.keyframe_interval) == 0;
 	const int limit_bits = MAX(64, transport->get_max_payload_size()) * 8;
@@ -977,6 +1081,9 @@ void TickMeshCore::send_states(uint32_t p_frame) {
 	}
 }
 
+
+// States from an owner: kept for interpolation when they come from the registered owner, with the current version,
+// newer than the last one and not far ahead of this node's timeline.
 void TickMeshCore::handle_state(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t frame = uint32_t(p_message.read_uint_bits(32));
 	const int count = int(p_message.read_uint_bits(16));
@@ -1022,6 +1129,8 @@ void TickMeshCore::handle_state(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
+// `TickEngine`: shows the objects of other owners between the states received, or at the latest one.
 void TickMeshCore::update_interpolation(uint64_t p_now_usec) {
 	if (!is_active()) {
 		return;
@@ -1069,8 +1178,11 @@ void TickMeshCore::update_interpolation(uint64_t p_now_usec) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Registry
 
+// Registry: a node claims an object. A new path gets an id, an owner (the controller, or the claimant) and an
+// announcement to every node; a known one is announced again to the claimant.
 void TickMeshCore::registry_handle_claim(int p_peer, const String &p_path, int p_owner, uint32_t p_schema_hash) {
 	const uint16_t *existing = registry_ids_by_path.getptr(p_path);
 	if (existing) {
@@ -1114,6 +1226,8 @@ void TickMeshCore::registry_handle_claim(int p_peer, const String &p_path, int p
 	registry_send_announce(0, id, nullptr);
 }
 
+
+// Registry: an owner's object is gone: forgets it, keeps its id in quarantine and tells every node.
 void TickMeshCore::registry_handle_drop(int p_peer, uint16_t p_id) {
 	RegistryRecord *record = registry.getptr(p_id);
 	if (record == nullptr || record->owner != p_peer) {
@@ -1129,6 +1243,8 @@ void TickMeshCore::registry_handle_drop(int p_peer, uint16_t p_id) {
 	send_to_ready_peers(TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message, true);
 }
 
+
+// Registry: writes the state this node has of an object, to send with an announcement; `false` when it has none.
 bool TickMeshCore::registry_local_state(uint16_t p_id, TickDataBuffer &r_state) const {
 	const Entry *entry = entries.getptr(p_id);
 	if (entry == nullptr || entry->object == nullptr) {
@@ -1140,6 +1256,9 @@ bool TickMeshCore::registry_local_state(uint16_t p_id, TickDataBuffer &r_state) 
 	return true;
 }
 
+
+// Registry: announces an object to a node, or to every node with 0, with the state to continue from when there is
+// one.
 void TickMeshCore::registry_send_announce(int p_peer, uint16_t p_id, const TickDataBuffer *p_state) {
 	const RegistryRecord &record = registry[p_id];
 	TickDataBuffer message;
@@ -1162,6 +1281,8 @@ void TickMeshCore::registry_send_announce(int p_peer, uint16_t p_id, const TickD
 	}
 }
 
+
+// Registry: tells a node that what it asked for an object won't happen.
 void TickMeshCore::registry_deny(int p_peer, uint16_t p_id) {
 	if (p_peer <= 0 || !is_peer_ready(p_peer)) {
 		return;
@@ -1194,6 +1315,8 @@ void TickMeshCore::registry_refuse_release(const TickTransport::Packet &p_packet
 }
 
 
+// Registry: writes the new owner of an object, with a new version, and announces it to every node. A pending
+// transfer to someone else is denied.
 void TickMeshCore::registry_change_owner(uint16_t p_id, int p_new_owner, uint32_t p_frame, const TickDataBuffer *p_state) {
 	RegistryRecord &record = registry[p_id];
 	if (record.pending_to >= 0 && record.pending_to != p_new_owner) {
@@ -1211,6 +1334,8 @@ void TickMeshCore::registry_change_owner(uint16_t p_id, int p_new_owner, uint32_
 	registry_send_announce(0, p_id, p_state);
 }
 
+
+// Registry: a node asks for an object. An orphan goes to it at once; otherwise the owner is asked to hand it over.
 void TickMeshCore::registry_handle_request(int p_peer, uint16_t p_id) {
 	RegistryRecord *record = registry.getptr(p_id);
 	if (record == nullptr || record->pending_to >= 0) {
@@ -1242,6 +1367,8 @@ void TickMeshCore::registry_handle_request(int p_peer, uint16_t p_id) {
 	send(record->owner, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Registry: a node assigns an object to another one: the owner is told to hand it over, and can't refuse.
 void TickMeshCore::registry_handle_assign(int p_peer, uint16_t p_id, int p_target) {
 	RegistryRecord *record = registry.getptr(p_id);
 	if (record == nullptr || record->pending_to >= 0 || p_target < 0 || (p_target > 0 && !is_peer_ready(p_target))) {
@@ -1272,6 +1399,9 @@ void TickMeshCore::registry_handle_assign(int p_peer, uint16_t p_id, int p_targe
 	send(record->owner, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Registry: an owner releases an object, or refuses a request for it. Every release gets an answer: an announcement
+// with the new owner, or a denial.
 void TickMeshCore::registry_handle_release(int p_peer, TickDataBuffer &p_message) {
 	const uint16_t id = uint16_t(p_message.read_uint_bits(16));
 	const uint32_t version = uint32_t(p_message.read_uint_bits(32));
@@ -1319,6 +1449,8 @@ void TickMeshCore::registry_handle_release(int p_peer, TickDataBuffer &p_message
 	registry_change_owner(id, to, frame, has_state ? &state : nullptr);
 }
 
+
+// Registry: a node left: its objects are orphaned, and the transfers it took part in are cancelled.
 void TickMeshCore::registry_on_peer_left(int p_peer) {
 	LocalVector<uint16_t> ids;
 	for (const KeyValue<uint16_t, RegistryRecord> &E : registry) {
@@ -1346,6 +1478,8 @@ void TickMeshCore::registry_on_peer_left(int p_peer) {
 	}
 }
 
+
+// Registry: cancels the transfers their owner didn't answer in time.
 void TickMeshCore::registry_check_timeouts() {
 	for (KeyValue<uint16_t, RegistryRecord> &E : registry) {
 		RegistryRecord &record = E.value;
@@ -1358,8 +1492,11 @@ void TickMeshCore::registry_check_timeouts() {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Replica
 
+// The registry's word about an object: its owner, its version and, when the owner changes, the state to continue
+// from. Updates this node's entry and tells the game about a change of owner.
 void TickMeshCore::handle_announce(int p_peer, TickDataBuffer &p_message) {
 	const uint16_t id = uint16_t(p_message.read_uint_bits(16));
 	const String path = p_message.read_string();
@@ -1477,6 +1614,8 @@ void TickMeshCore::handle_announce(int p_peer, TickDataBuffer &p_message) {
 	run_events(stepper.get_next_frame_index() - 1);
 }
 
+
+// The registry removed an object.
 void TickMeshCore::handle_unregister(int p_peer, TickDataBuffer &p_message) {
 	const uint16_t id = uint16_t(p_message.read_uint_bits(16));
 	if (p_message.is_buffer_failed()) {
@@ -1490,6 +1629,9 @@ void TickMeshCore::handle_unregister(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
+// Owner: stops simulating an object and sends the registry its release, with the last simulated frame and the state
+// at it.
 void TickMeshCore::release_frozen(uint16_t p_id, Entry &r_entry, int p_to) {
 	r_entry.frozen = true;
 	TickDataBuffer message;
@@ -1511,6 +1653,9 @@ void TickMeshCore::release_frozen(uint16_t p_id, Entry &r_entry, int p_to) {
 	send(settings.registry_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// The registry asks this owner to hand an object to another node. The object may refuse a request, never an
+// assignment; otherwise it's released.
 void TickMeshCore::handle_transfer(int p_peer, TickDataBuffer &p_message) {
 	const uint16_t id = uint16_t(p_message.read_uint_bits(16));
 	const uint32_t version = uint32_t(p_message.read_uint_bits(32));
@@ -1540,6 +1685,9 @@ void TickMeshCore::handle_transfer(int p_peer, TickDataBuffer &p_message) {
 	release_frozen(id, *entry, to);
 }
 
+
+// The registry didn't do what this node asked: an object frozen for a release is taken back, and the game is told
+// when the request was its own.
 void TickMeshCore::handle_denied(int p_peer, TickDataBuffer &p_message) {
 	const uint16_t id = uint16_t(p_message.read_uint_bits(16));
 	if (p_message.is_buffer_failed()) {
@@ -1566,6 +1714,9 @@ void TickMeshCore::handle_denied(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
+// `TickEngine`: asks the registry for an object another node owns. The answer comes as a change of owner, or as a
+// denial.
 Error TickMeshCore::request_authority(TickSyncObject *p_object) {
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	uint16_t id = 0;
@@ -1584,6 +1735,9 @@ Error TickMeshCore::request_authority(TickSyncObject *p_object) {
 	return OK;
 }
 
+
+// `TickEngine`: the owner hands an object to `p_to_peer`; 0 leaves it orphaned. The object isn't simulated here
+// until the registry answers.
 Error TickMeshCore::release_authority(TickSyncObject *p_object, int p_to_peer) {
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(p_to_peer < 0, ERR_INVALID_PARAMETER, "The new owner can't be negative (0 leaves the object orphaned).");
@@ -1602,6 +1756,8 @@ Error TickMeshCore::release_authority(TickSyncObject *p_object, int p_to_peer) {
 	return OK;
 }
 
+
+// `TickEngine`: asks the registry to give an object to `p_peer`, whoever owns it.
 Error TickMeshCore::assign_authority(TickSyncObject *p_object, int p_peer) {
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(p_peer < 0, ERR_INVALID_PARAMETER, "The new owner can't be negative.");
@@ -1621,6 +1777,8 @@ Error TickMeshCore::assign_authority(TickSyncObject *p_object, int p_peer) {
 	return OK;
 }
 
+
+// Moves the registry and the clock master to connected nodes (this one included) while the mesh runs.
 Error TickMeshCore::change_roles(int p_registry, int p_clock_master) {
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(!is_peer_ready(p_registry) || !is_peer_ready(p_clock_master), ERR_UNAVAILABLE, "The registry and the clock master must be nodes connected to this one.");
@@ -1637,8 +1795,11 @@ Error TickMeshCore::change_roles(int p_registry, int p_clock_master) {
 	return OK;
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Roles
 
+// Whether an assignment of the roles wins over another: the newer term; with the same term, the lower registry id,
+// then the lower clock master id.
 bool TickMeshCore::roles_beat(uint32_t p_term, int p_registry, int p_clock, uint32_t p_other_term, int p_other_registry, int p_other_clock) {
 	if (p_term != p_other_term) {
 		// Terms wrap around; one too far ahead to be this mesh's beats nothing.
@@ -1650,6 +1811,8 @@ bool TickMeshCore::roles_beat(uint32_t p_term, int p_registry, int p_clock, uint
 	return p_clock < p_other_clock;
 }
 
+
+// Sends an assignment of the roles to a node, or to every ready node with 0.
 void TickMeshCore::send_roles(int p_peer, uint32_t p_term, int p_registry, int p_clock, uint32_t p_registry_boot, uint32_t p_clock_boot) {
 	TickDataBuffer message;
 	message.begin_write();
@@ -1666,6 +1829,9 @@ void TickMeshCore::send_roles(int p_peer, uint32_t p_term, int p_registry, int p
 	}
 }
 
+
+// An assignment of the roles from another node: adopted and passed on when it wins over the one known here;
+// answered with the current one when it's older.
 void TickMeshCore::handle_roles(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t term = uint32_t(p_message.read_uint_bits(32));
 	const int new_registry = int(p_message.read_int_bits(32));
@@ -1690,6 +1856,8 @@ void TickMeshCore::handle_roles(int p_peer, TickDataBuffer &p_message) {
 	adopt_roles(term, new_registry, new_clock, new_registry_boot, new_clock_boot, false);
 }
 
+
+// The node that should take a lost role, or 0 if none of the candidates is in the mesh.
 int TickMeshCore::get_role_successor() const {
 	if (settings.role_candidates.is_empty()) {
 		// Any node: the lowest id in the mesh.
@@ -1716,6 +1884,9 @@ int TickMeshCore::get_role_successor() const {
 	return 0;
 }
 
+
+// Takes the lost roles when this node is their successor, has its quorum, and no node it's connected to still sees
+// the process that had them.
 void TickMeshCore::fill_vacant_roles() {
 	const bool registry_lost = is_registry_lost();
 	const bool clock_lost = is_clock_lost();
@@ -1753,6 +1924,8 @@ void TickMeshCore::fill_vacant_roles() {
 	adopt_roles(term, new_registry, new_clock, new_registry_boot, new_clock_boot, false);
 }
 
+
+// Another node, with the same roles, knows other processes as their holders.
 void TickMeshCore::learn_role_boots(uint32_t p_registry_boot, uint32_t p_clock_boot) {
 	// Two nodes with the same roles know different processes as the holder of one: its node restarted, and no node
 	// took the role since. The process that had the role is the one that isn't here anymore; a node that believed in
@@ -1789,6 +1962,8 @@ void TickMeshCore::learn_role_boots(uint32_t p_registry_boot, uint32_t p_clock_b
 	}
 }
 
+
+// This node's view of the roles, to tell the others.
 TickMeshCore::RoleStatus TickMeshCore::make_role_status() const {
 	RoleStatus status;
 	status.term = roles_term;
@@ -1801,6 +1976,9 @@ TickMeshCore::RoleStatus TickMeshCore::make_role_status() const {
 	return status;
 }
 
+
+// Sends a view of the roles to a node, or to every ready node with 0, with the timeline's frame when this node
+// follows it.
 void TickMeshCore::send_role_status(int p_peer, const RoleStatus &p_status) {
 	TickDataBuffer message;
 	message.begin_write();
@@ -1826,6 +2004,9 @@ void TickMeshCore::send_role_status(int p_peer, const RoleStatus &p_status) {
 	}
 }
 
+
+// Another node's view of the roles: kept to decide who takes a lost role. Its frame is the reference for a clock
+// master that takes over.
 void TickMeshCore::handle_role_status(int p_peer, TickDataBuffer &p_message) {
 	RoleStatus status;
 	status.term = uint32_t(p_message.read_uint_bits(32));
@@ -1860,6 +2041,8 @@ void TickMeshCore::handle_role_status(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
+// After the events and the packets of a step: tells the other nodes what changed, and acts on what they said.
 void TickMeshCore::update_roles() {
 	if (settings.role_quorum > 1) {
 		const bool quorum = has_role_quorum();
@@ -1892,6 +2075,10 @@ void TickMeshCore::update_roles() {
 	fill_vacant_roles();
 }
 
+
+// Takes an assignment of the roles: this node becomes, or stops being, the registry and the clock master, follows
+// the new clock, and reports its objects to the new registry. `p_resync`: this node joined a mesh that moved its
+// roles meanwhile, so its view of the objects starts over.
 void TickMeshCore::adopt_roles(uint32_t p_term, int p_registry, int p_clock, uint32_t p_registry_boot, uint32_t p_clock_boot, bool p_resync) {
 	// A node that never met the process with a role announces the role without it (0). The role's node takes it as its
 	// own process; the others keep the one they knew for that node, or learn it later from the nodes that know it.
@@ -2044,6 +2231,9 @@ void TickMeshCore::reset_received_states() {
 	}
 }
 
+
+// Registry: keeps a message it can't answer yet. When too many wait, new ones are dropped, and a release is refused
+// so its object isn't left frozen.
 void TickMeshCore::registry_defer(const TickTransport::Packet &p_packet) {
 	if (registry_deferred.size() >= MESH_MAX_DEFERRED) {
 		WARN_PRINT_ONCE("The registry of the mesh can't answer (it's taking over, or it lost its quorum) and too many messages wait for it: the new ones are dropped.");
@@ -2055,6 +2245,9 @@ void TickMeshCore::registry_defer(const TickTransport::Packet &p_packet) {
 	registry_deferred.push_back(p_packet);
 }
 
+
+// Registry: it can act again: orphans the objects of the nodes that left meanwhile, and handles the messages that
+// waited.
 void TickMeshCore::registry_resume() {
 	if (registry_orphan_check) {
 		registry_orphan_check = false;
@@ -2083,6 +2276,8 @@ void TickMeshCore::registry_resume() {
 	}
 }
 
+
+// Sends this node's view of the objects to the registry, in as many messages as it takes.
 void TickMeshCore::send_registry_report() {
 	const int registry_node = settings.registry_peer;
 	if (registry_node == local_id || !is_registry_reachable()) {
@@ -2137,6 +2332,7 @@ void TickMeshCore::send_registry_report() {
 	}
 }
 
+
 // Sends this node's view of the objects to a registry it reaches and didn't report to yet, so the registry learns
 // what only this node knows (the registry answers a late report with its own view), then claims the objects of this
 // node that have no id. A node that knows no object has nothing to report.
@@ -2155,6 +2351,8 @@ void TickMeshCore::sync_with_registry() {
 }
 
 
+// Registry: a node's view of the objects, where the newest version of each object wins. While taking over it's
+// merged; later, each newer record is announced as it comes, and the node gets the registry's view back.
 void TickMeshCore::handle_registry_report(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t term = uint32_t(p_message.read_uint_bits(32));
 	const bool last = p_message.read_bool();
@@ -2245,6 +2443,8 @@ void TickMeshCore::handle_registry_report(int p_peer, TickDataBuffer &p_message)
 	}
 }
 
+
+// This node becomes the registry: it starts from its own view of the objects, and waits for the other nodes' views.
 void TickMeshCore::registry_take_over() {
 	// This node's view of the objects is where the registry starts from; the other nodes' views complete it.
 	registry.clear();
@@ -2272,6 +2472,9 @@ void TickMeshCore::registry_take_over() {
 	registry_deferred.clear();
 }
 
+
+// Registry: the views are in, or the time is up: announces every object again with a new version, orphans the ones
+// whose owner left, takes the spawns of the nodes that left, and answers the messages that waited.
 void TickMeshCore::registry_finish_take_over() {
 	registry_settling = false;
 	registry_unreported.clear();
@@ -2317,12 +2520,17 @@ void TickMeshCore::registry_finish_take_over() {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Spawns
 
+// `TickEngine`: the id the next spawn gets.
 uint32_t TickMeshCore::get_next_spawn_id() const {
 	return (uint32_t(local_id & 0xFFF) << 20) | (next_spawn_counter & 0xFFFFF);
 }
 
+
+// `TickEngine`: records a spawn and sends it to every node. Spawn ids carry the id of the node that spawned (below
+// 4096) in their high bits.
 uint32_t TickMeshCore::spawn(const String &p_spawner, int p_scene, const String &p_name, int p_controller, const Variant &p_data) {
 	ERR_FAIL_COND_V_MSG(!running, 0, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(local_id >= 4096, 0, "Only mesh nodes with an id below 4096 can spawn.");
@@ -2353,6 +2561,8 @@ uint32_t TickMeshCore::spawn(const String &p_spawner, int p_scene, const String 
 	return spawn_id;
 }
 
+
+// Tells a node about a live spawn.
 void TickMeshCore::send_spawn(int p_peer, uint32_t p_spawn_id) {
 	const SpawnRecord &record = spawns[p_spawn_id];
 	TickDataBuffer message;
@@ -2368,6 +2578,8 @@ void TickMeshCore::send_spawn(int p_peer, uint32_t p_spawn_id) {
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// This node's spawns, and for the registry the ones of the nodes that left.
 bool TickMeshCore::owns_spawn(uint32_t p_spawn_id) const {
 	if (!running) {
 		return false;
@@ -2380,6 +2592,8 @@ bool TickMeshCore::owns_spawn(uint32_t p_spawn_id) const {
 	return record->adopted ? (is_registry() && registry_boot == boot_id) : record->origin == local_id;
 }
 
+
+// `TickEngine`: removes a spawn this node owns, and tells every node.
 void TickMeshCore::despawn(uint32_t p_spawn_id) {
 	const SpawnRecord *record = spawns.getptr(p_spawn_id);
 	ERR_FAIL_COND_MSG(record == nullptr || !owns_spawn(p_spawn_id), vformat("Spawn %d doesn't belong to this node.", p_spawn_id));
@@ -2394,6 +2608,8 @@ void TickMeshCore::despawn(uint32_t p_spawn_id) {
 	stats.despawns++;
 }
 
+
+// Another node spawned something, or the registry sends the spawn of a node that left.
 void TickMeshCore::handle_spawn(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
 	const String spawner = p_message.read_string();
@@ -2439,6 +2655,8 @@ void TickMeshCore::handle_spawn(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
+// A spawn was removed by its node, or by the registry.
 void TickMeshCore::handle_despawn(int p_peer, TickDataBuffer &p_message) {
 	const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
 	const String spawner = p_message.read_string();
@@ -2459,12 +2677,16 @@ void TickMeshCore::handle_despawn(int p_peer, TickDataBuffer &p_message) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Events
 
+// `TickEngine`: a frame `p_seconds` after the current one, to schedule events every node runs at the same frame.
 uint32_t TickMeshCore::get_event_frame(double p_seconds) const {
 	return stepper.get_next_frame_index() + uint32_t(Math::ceil(MAX(p_seconds, 0.0) * double(settings.ticks_per_second)));
 }
 
+
+// Keeps an event until its frame, in order.
 void TickMeshCore::queue_event(const PendingEvent &p_event) {
 	PendingEvent event = p_event;
 	event.sequence = next_event_sequence++;
@@ -2472,6 +2694,8 @@ void TickMeshCore::queue_event(const PendingEvent &p_event) {
 	pending_events.sort_custom<MeshEventOrder>();
 }
 
+
+// Sends an event to a node: the owner of its target, or the destination of an event without target.
 void TickMeshCore::forward_event(int p_peer, const PendingEvent &p_event) {
 	TickDataBuffer message;
 	message.begin_write();
@@ -2485,6 +2709,8 @@ void TickMeshCore::forward_event(int p_peer, const PendingEvent &p_event) {
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 }
 
+
+// Runs, forwards or keeps an event; returns `false` to keep it.
 bool TickMeshCore::dispatch_event(PendingEvent &r_event) {
 	const uint32_t frame = r_event.requested_frame != TICK_FRAME_NONE ? r_event.requested_frame : r_event.frame;
 	if (r_event.target == 0) {
@@ -2527,6 +2753,8 @@ bool TickMeshCore::dispatch_event(PendingEvent &r_event) {
 	return true;
 }
 
+
+// Runs the events due at a frame; the ones whose target has no owner yet stay.
 void TickMeshCore::run_events(uint32_t p_frame) {
 	if (pending_events.is_empty()) {
 		return;
@@ -2548,6 +2776,8 @@ void TickMeshCore::run_events(uint32_t p_frame) {
 	pending_events.sort_custom<MeshEventOrder>();
 }
 
+
+// An event from another node, sent or forwarded: validated and queued for its frame.
 void TickMeshCore::handle_mesh_event(int p_peer, TickDataBuffer &p_message) {
 	PendingEvent event;
 	event.target = uint16_t(p_message.read_uint_bits(16));
@@ -2577,6 +2807,9 @@ void TickMeshCore::handle_mesh_event(int p_peer, TickDataBuffer &p_message) {
 	queue_event(event);
 }
 
+
+// Object events go to the target's current owner (forwarded if it changed on the way); events without target
+// go to `p_peer`, or every node with 0.
 Error TickMeshCore::send_event(TickSyncObject *p_target, const StringName &p_name, const Variant &p_payload, uint32_t p_frame, int p_peer) {
 	ERR_FAIL_COND_V_MSG(!running, ERR_UNCONFIGURED, "The network isn't running.");
 	ERR_FAIL_COND_V_MSG(String(p_name).is_empty(), ERR_INVALID_PARAMETER, "The event needs a name.");
@@ -2616,6 +2849,8 @@ Error TickMeshCore::send_event(TickSyncObject *p_target, const StringName &p_nam
 	return OK;
 }
 
+
+// `TickEngine`: the counters, the term of the roles, the quorum and the timeline's frame, by name.
 Dictionary TickMeshCore::get_stats_dictionary() const {
 	Dictionary result;
 	result["states_sent"] = stats.states_sent;

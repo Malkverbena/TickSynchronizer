@@ -1,3 +1,10 @@
+// Tests of the events and the spawns of `TickSyncCore`, and of what it does with messages no honest peer sends: the
+// frame an event runs at, who may send it, the limits of untrusted clients, events for objects that don't exist yet,
+// spawns for late clients, the quarantine of net ids, and spoofed inputs, states and names.
+//
+// `EventMover` is a body that records its events; `SpawnListener` makes bodies for the spawns it hears of, as a game's
+// spawner would; `EventWorld` is a server with up to three peers, each with the same body controlled by peer 2.
+
 #pragma once
 
 #include "test_tick_sync_core.h"
@@ -8,6 +15,7 @@ namespace TestTickSyncEvents {
 
 using TestTickSyncCore::TestMover;
 
+// An event as an object or a listener ran it.
 struct ExecutedEvent {
 	int sender = 0;
 	StringName name;
@@ -24,13 +32,18 @@ public:
 	int validator = -1;
 	LocalVector<ExecutedEvent> events;
 
+	// A body at `p_path` controlled by `p_controller`.
 	EventMover(const String &p_path, int p_controller) :
 			TestMover(p_path, p_controller) {}
 
+
+	// `TickSyncObject`: answers with `validator`: -1 leaves it to the network's policy.
 	virtual int validate_event(int p_sender, const StringName &p_event, const Variant &p_payload) override {
 		return validator;
 	}
 
+
+	// `TickSyncObject`: records the event, with the frame the engine was at.
 	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override {
 		ExecutedEvent event;
 		event.sender = p_sender;
@@ -50,6 +63,7 @@ public:
 	LocalVector<ExecutedEvent> network_events;
 	int despawned = 0;
 
+	// Makes a body for the spawn, at the position that came as its data, and registers it.
 	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override {
 		EventMover *mover = memnew(EventMover(p_spawner + "/" + p_name, p_controller));
 		mover->position = p_data;
@@ -57,10 +71,14 @@ public:
 		core->register_object(mover);
 	}
 
+
+	// Counts the despawns.
 	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override {
 		despawned++;
 	}
 
+
+	// Records an event without target object.
 	virtual void on_network_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override {
 		ExecutedEvent event;
 		event.sender = p_sender;
@@ -70,6 +88,8 @@ public:
 		network_events.push_back(event);
 	}
 
+
+	// Unregisters and frees the bodies it made.
 	~SpawnListener() {
 		for (EventMover *mover : spawned) {
 			core->unregister_object(mover);
@@ -87,6 +107,7 @@ struct EventWorld {
 	EventMover *movers[4] = {};
 	int peer_count = 0;
 
+	// Starts `p_peers` peers (peer 1 is the server), each with its body, and connects the clients to the server.
 	EventWorld(int p_peers, bool p_trusted = false) {
 		network.set_seed(99);
 		network.set_latency_usec(30000);
@@ -108,6 +129,8 @@ struct EventWorld {
 		}
 	}
 
+
+	// Unregisters and frees the bodies.
 	~EventWorld() {
 		for (int i = 1; i <= peer_count; i++) {
 			cores[i].unregister_object(movers[i]);
@@ -115,6 +138,8 @@ struct EventWorld {
 		}
 	}
 
+
+	// Runs the network and the engines from `p_first_peer` on for `p_seconds`, at 60 frames per second.
 	void run(double p_seconds, int p_first_peer = 1) {
 		const int frames = int(p_seconds * 60.0);
 		for (int f = 0; f < frames; f++) {
@@ -127,6 +152,8 @@ struct EventWorld {
 		}
 	}
 
+
+	// Sends a hand-made message from a peer's transport, as a program that isn't this module could.
 	void send_raw(int p_from, int p_to, TickChannel p_channel, TickDataBuffer &p_message) {
 		p_message.dry();
 		const LocalVector<uint8_t> &bytes = p_message.get_buffer().get_bytes();
@@ -134,6 +161,8 @@ struct EventWorld {
 	}
 };
 
+// A controller's event runs on the server at the frame the client was predicting; another client's is refused unless
+// the object's validator accepts it; an event without target reaches the listener with its sender.
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Client events run on the server at the predicted frame") {
 	EventWorld world(3);
 	world.run(2.0);
@@ -174,6 +203,8 @@ TEST_CASE("[Modules][TickSynchronizer][EventSync] Client events run on the serve
 	CHECK(String(world.listeners[1].network_events[0].payload) == "hi");
 }
 
+
+// In a trusted network, a client that isn't the controller can send events to the object.
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Trusted peers can send events to any object") {
 	EventWorld world(3, true);
 	world.run(2.0);
@@ -182,6 +213,9 @@ TEST_CASE("[Modules][TickSynchronizer][EventSync] Trusted peers can send events 
 	CHECK(world.movers[1]->events.size() == 1);
 }
 
+
+// An event the server schedules for a frame runs on every client when its simulation reaches that frame; without a
+// frame it runs on arrival, and only on the peer it was sent to.
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Server events scheduled for a frame run at that frame everywhere") {
 	EventWorld world(3);
 	world.run(2.0);
@@ -209,6 +243,9 @@ TEST_CASE("[Modules][TickSynchronizer][EventSync] Server events scheduled for a 
 	CHECK(int(world.listeners[3].network_events[0].payload) == 7);
 }
 
+
+// An untrusted client gets about 30 events per second through; a payload above the limit is refused by the sender, and
+// by the server when a modified client sends it anyway.
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Untrusted clients are rate and size limited") {
 	EventWorld world(2);
 	world.run(2.0);
@@ -244,6 +281,8 @@ TEST_CASE("[Modules][TickSynchronizer][EventSync] Untrusted clients are rate and
 	CHECK(world.cores[1].get_stats().events_rejected == rejected + 1);
 }
 
+
+// An event for an object the client hasn't created yet waits, and runs when the object is registered.
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Events wait for objects the client doesn't have yet") {
 	EventWorld world(2);
 	world.run(2.0);
@@ -266,6 +305,9 @@ TEST_CASE("[Modules][TickSynchronizer][EventSync] Events wait for objects the cl
 	world.cores[2].unregister_object(&client_door);
 }
 
+
+// A spawn reaches the connected client and, later, a client that joins: both bind the spawned object to the server's;
+// the despawn reaches both.
 TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Spawns replicate, also to late clients") {
 	EventWorld world(3);
 	// Peer 3 joins later.
@@ -298,6 +340,8 @@ TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Spawns replicate, also to late
 	CHECK(world.listeners[3].despawned == 1);
 }
 
+
+// A net id that was just released isn't given to the next object.
 TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Released net ids are quarantined") {
 	EventWorld world(1);
 	world.run(0.1);
@@ -313,6 +357,9 @@ TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Released net ids are quarantin
 	world.cores[1].unregister_object(&b);
 }
 
+
+// 65530 objects registered and removed within the quarantine all get an id, and after the quarantine the ids are used
+// again.
 TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Net ids past their quarantine are reused, however many came before") {
 	EventWorld world(1);
 	world.run(0.1);
@@ -338,6 +385,8 @@ TEST_CASE("[Modules][TickSynchronizer][SpawnSync] Net ids past their quarantine 
 	CHECK(reused == 100);
 }
 
+
+// An event payload or spawn data holding an object is refused by the sender.
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Payloads that only mean something in this process aren't sent") {
 	EventWorld world(2);
 	world.run(2.0);
@@ -352,6 +401,8 @@ TEST_CASE("[Modules][TickSynchronizer][EventSync] Payloads that only mean someth
 	CHECK(world.cores[2].get_stats().events_sent == 0);
 }
 
+
+// An inputs message that repeats a frame 256 times is malformed, and none of its frames is looked at.
 TEST_CASE("[Modules][TickSynchronizer][Security] An input message can't describe more frames than a sender repeats") {
 	EventWorld world(2);
 	world.run(2.0);
@@ -387,6 +438,9 @@ TEST_CASE("[Modules][TickSynchronizer][Security] An input message can't describe
 	CHECK(after.rejected_inputs == before.rejected_inputs);
 }
 
+
+// An event name above the limit is refused by the sender; one at the limit goes through; a longer one, or one that
+// isn't UTF-8, sent by a modified client is malformed.
 TEST_CASE("[Modules][TickSynchronizer][EventSync] Event names are limited and must be valid UTF-8") {
 	EventWorld world(2);
 	world.run(2.0);
@@ -429,6 +483,9 @@ TEST_CASE("[Modules][TickSynchronizer][EventSync] Event names are limited and mu
 	CHECK(world.movers[1]->events.size() == 1);
 }
 
+
+// A client ignores a snapshot, a spawn and an event that come from another client (H2), and the server ignores inputs a
+// client sends for another client's object (H1).
 TEST_CASE("[Modules][TickSynchronizer][Security] Spoofed input and state are ignored (H1, H2)") {
 	EventWorld world(3);
 	// Clients also see each other directly, as in a mesh or through a relay.

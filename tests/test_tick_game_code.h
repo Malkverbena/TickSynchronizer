@@ -1,3 +1,8 @@
+// Tests of what game code may do from inside the engines. Game code runs inside the engines (ticks, events, signals)
+// and may change the network from there: remove or register objects, or stop it. The engines go on, or stop cleanly.
+//
+// `RudeMover` is a body whose tick does those things; `ServerWorld` is a server alone on a simulated network.
+
 #pragma once
 
 #include "../source/sync/tick_mesh_core.h"
@@ -5,8 +10,6 @@
 
 #include "tests/test_macros.h"
 
-// Game code runs inside the engines (ticks, events, signals) and may change the network from there: remove or
-// register objects, or stop it.
 namespace TestTickGameCode {
 
 using TestTickSyncCore::TestMover;
@@ -22,9 +25,13 @@ public:
 	LocalVector<TickSyncObject *> add;
 	bool stop = false;
 
+	// A body at `p_path` that acts on `p_engine`.
 	RudeMover(const String &p_path, int p_controller, TickEngine *p_engine) :
 			TestMover(p_path, p_controller), engine(p_engine) {}
 
+
+	// Moves as a `TestMover`, counts the tick and, at frame `act_at`, does what it was told: removes an object,
+	// registers others, stops the network.
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override {
 		TestMover::process_tick(p_delta, p_input);
 		const uint32_t frame = engine->get_frame();
@@ -44,6 +51,8 @@ public:
 		}
 	}
 
+
+	// How many times the body was simulated in a frame.
 	int get_ticks(uint32_t p_frame) const {
 		const int *ticks = ticks_by_frame.getptr(p_frame);
 		return ticks ? *ticks : 0;
@@ -56,11 +65,14 @@ struct ServerWorld {
 	Ref<TickLocalTransport> transport;
 	TickSyncCore server;
 
+	// Starts the server.
 	ServerWorld() {
 		transport = network.add_peer();
 		REQUIRE(server.start(transport, 0) == OK);
 	}
 
+
+	// Runs the server for `p_frames` frames, or until it stops.
 	void run(int p_frames) {
 		for (int i = 0; i < p_frames && server.is_running(); i++) {
 			network.process(1.0 / 60.0);
@@ -69,6 +81,8 @@ struct ServerWorld {
 	}
 };
 
+// When an object's tick removes another object, the removed one isn't simulated in that frame nor later, and the ones
+// after it are simulated exactly once.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] An object removed by another object's tick isn't simulated twice") {
 	ServerWorld world;
 	RudeMover a("a", 1, &world.server);
@@ -98,6 +112,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] An object removed by anothe
 	world.server.unregister_object(&c);
 }
 
+
+// Objects registered during a tick are simulated from the next one, once per frame; an object that removes itself isn't
+// simulated again.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Objects registered or removed by their own ticks") {
 	ServerWorld world;
 	RudeMover spawner("spawner", 1, &world.server);
@@ -139,6 +156,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Objects registered or remov
 	world.server.unregister_object(&last);
 }
 
+
+// A client goes on predicting, without malformed packets, after its game removes the object it predicted; registered
+// again, the object is bound and predicted again.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A predicted object the game removes doesn't break the reconciliation") {
 	// The bodies stand still, so the deltas carry their state over from the base.
 	TestTickSyncCore::TestWorld world(30000, 0, 0.0, 0);
@@ -158,6 +178,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A predicted object the game
 	CHECK(world.client_a.get_net_id(&world.a_mover_a) == world.server.get_net_id(&world.server_mover_a));
 }
 
+
+// A server and a client that stop from inside a tick stop cleanly, and can start again.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Game code can stop the network from a tick") {
 	TickLocalNetwork network;
 	network.set_latency_usec(20000);
@@ -208,6 +230,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Game code can stop the netw
 	server.stop();
 }
 
+
+// In a distributed mesh, an owner can remove its own object in its tick, and an object's tick can stop the network.
 TEST_CASE("[Modules][TickSynchronizer][MeshCore] Game code can remove objects and stop the network from a tick") {
 	TickLocalNetwork network;
 	Ref<TickLocalTransport> transport = network.add_peer();

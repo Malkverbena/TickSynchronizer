@@ -1,3 +1,10 @@
+// Test of the distributed authority as a game uses it: two `TickNetwork` nodes in `AUTHORITY_DISTRIBUTED` mode, with a
+// scripted `TickObject` each, over the simulated network. Ownership is requested and refused through the object, and
+// the roles move through the network's properties.
+//
+// `MeshNodeWorld` is one node of the mesh: a network (the root of its world) with one body, and a script object that
+// records the network's signals.
+
 #pragma once
 
 #include "../source/nodes/tick_network.h"
@@ -19,6 +26,7 @@ namespace TestTickMeshNodes {
 
 #ifdef MODULE_GDSCRIPT_ENABLED
 
+// Compiles GDScript source into a script; the test fails if it doesn't compile.
 inline Ref<GDScript> make_mesh_script(const String &p_source) {
 	GDScriptLanguage::get_singleton()->init();
 	Ref<GDScript> script;
@@ -38,6 +46,8 @@ struct MeshNodeWorld {
 	TickObject *sync = nullptr;
 	Ref<RefCounted> recorder;
 
+	// Builds a distributed, trusted network named `p_name` with a body under it, connects the recorder to its signals,
+	// and adds it to the scene tree.
 	MeshNodeWorld(const String &p_name, const Ref<GDScript> &p_script, const Ref<GDScript> &p_recorder_script) {
 		network = memnew(TickNetwork);
 		network->set_name(p_name);
@@ -59,12 +69,17 @@ struct MeshNodeWorld {
 		SceneTree::get_singleton()->get_root()->add_child(network);
 	}
 
+
+	// Stops the network and frees the world.
 	~MeshNodeWorld() {
 		network->stop();
 		memdelete(network);
 	}
 };
 
+// The quorum and the candidates are set before the start; the controller's node owns the body and the other follows it;
+// a request moves the ownership, with the object's callback and the network's signal; the owner's script refuses a
+// request; and the registry and the clock master move while the mesh runs, one at a time and both at once.
 TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickNetwork] Distributed authority through the nodes") {
 	const Ref<GDScript> body_script = make_mesh_script(R"(
 extends TickObject

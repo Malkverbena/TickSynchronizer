@@ -1,3 +1,6 @@
+// Implementation of `TickLocalTransport` and `TickLocalNetwork`: the links between the peers, the packets on their way
+// with their arrival times, the order each transfer mode keeps, and the virtual clock that delivers them.
+
 #include "tick_local_transport.h"
 
 #include "core/error/error_macros.h"
@@ -6,6 +9,7 @@
 
 #include <cstring>
 
+// `TickTransport`: the peers this one is linked to, in order.
 void TickLocalTransport::get_connected_peers(LocalVector<int> &r_peers) const {
 	r_peers.clear();
 	for (const int peer : connected_peers) {
@@ -14,21 +18,29 @@ void TickLocalTransport::get_connected_peers(LocalVector<int> &r_peers) const {
 	r_peers.sort();
 }
 
+
+// `TickTransport`: the channels of the network.
 int TickLocalTransport::get_channel_count() const {
 	ERR_FAIL_NULL_V(network, 0);
 	return network->get_channel_count();
 }
 
+
+// `TickTransport`: the largest payload of the network.
 int TickLocalTransport::get_max_payload_size() const {
 	ERR_FAIL_NULL_V(network, 0);
 	return network->get_max_payload_size();
 }
 
+
+// `TickTransport`: unlinks this peer from `p_peer`.
 void TickLocalTransport::disconnect_peer(int p_peer) {
 	ERR_FAIL_NULL(network);
 	network->disconnect_peers(peer_id, p_peer);
 }
 
+
+// `TickTransport`: hands the bytes to the network, for one linked peer or for all of them.
 Error TickLocalTransport::send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
 	ERR_FAIL_NULL_V_MSG(network, ERR_UNCONFIGURED, "This transport was removed from its network.");
 	ERR_FAIL_COND_V_MSG(p_peer < 0, ERR_INVALID_PARAMETER, "The target peer can't be negative.");
@@ -45,6 +57,8 @@ Error TickLocalTransport::send(int p_peer, int p_channel, TransferMode p_mode, c
 	return network->send(peer_id, p_peer, p_channel, p_mode, p_data, p_size);
 }
 
+
+// `TickTransport`: the next connection or disconnection, if any.
 bool TickLocalTransport::pop_event(Event &r_event) {
 	if (next_event >= events.size()) {
 		events.clear();
@@ -55,6 +69,8 @@ bool TickLocalTransport::pop_event(Event &r_event) {
 	return true;
 }
 
+
+// `TickTransport`: the next packet delivered, if any.
 bool TickLocalTransport::pop_packet(Packet &r_packet) {
 	if (next_packet >= inbox.size()) {
 		inbox.clear();
@@ -65,10 +81,14 @@ bool TickLocalTransport::pop_packet(Packet &r_packet) {
 	return true;
 }
 
+
+// A network without peers, seeded with 1.
 TickLocalNetwork::TickLocalNetwork() {
 	rng.seed(1);
 }
 
+
+// Detaches the endpoints, which may outlive the network.
 TickLocalNetwork::~TickLocalNetwork() {
 	// The transports may outlive the network.
 	for (KeyValue<int, Ref<TickLocalTransport>> &E : peers) {
@@ -77,6 +97,8 @@ TickLocalNetwork::~TickLocalNetwork() {
 	peers.clear();
 }
 
+
+// Creates a peer with the next free id (starting at 1).
 Ref<TickLocalTransport> TickLocalNetwork::add_peer() {
 	const int peer_id = next_peer_id++;
 	Ref<TickLocalTransport> peer;
@@ -87,6 +109,8 @@ Ref<TickLocalTransport> TickLocalNetwork::add_peer() {
 	return peer;
 }
 
+
+// Disconnects a peer and removes it from the network; its links' in-flight packets are dropped.
 void TickLocalNetwork::remove_peer(int p_peer) {
 	Ref<TickLocalTransport> peer = get_peer(p_peer);
 	ERR_FAIL_COND_MSG(peer.is_null(), vformat("Peer %d doesn't exist.", p_peer));
@@ -100,11 +124,15 @@ void TickLocalNetwork::remove_peer(int p_peer) {
 	peer->network = nullptr;
 }
 
+
+// The endpoint of a peer; null when the peer doesn't exist.
 Ref<TickLocalTransport> TickLocalNetwork::get_peer(int p_peer) const {
 	const Ref<TickLocalTransport> *peer = peers.getptr(p_peer);
 	return peer ? *peer : Ref<TickLocalTransport>();
 }
 
+
+// Links two peers; both receive `EVENT_PEER_CONNECTED`.
 Error TickLocalNetwork::connect_peers(int p_peer_a, int p_peer_b) {
 	ERR_FAIL_COND_V_MSG(p_peer_a == p_peer_b, ERR_INVALID_PARAMETER, "A peer can't connect to itself.");
 	Ref<TickLocalTransport> a = get_peer(p_peer_a);
@@ -127,6 +155,8 @@ Error TickLocalNetwork::connect_peers(int p_peer_a, int p_peer_b) {
 	return OK;
 }
 
+
+// Unlinks two peers; both receive `EVENT_PEER_DISCONNECTED`, and in-flight packets are dropped.
 void TickLocalNetwork::disconnect_peers(int p_peer_a, int p_peer_b) {
 	Ref<TickLocalTransport> a = get_peer(p_peer_a);
 	Ref<TickLocalTransport> b = get_peer(p_peer_b);
@@ -148,6 +178,8 @@ void TickLocalNetwork::disconnect_peers(int p_peer_a, int p_peer_b) {
 	b->events.push_back(event);
 }
 
+
+// Links every pair of peers.
 void TickLocalNetwork::connect_all() {
 	LocalVector<int> ids;
 	for (const KeyValue<int, Ref<TickLocalTransport>> &E : peers) {
@@ -163,28 +195,40 @@ void TickLocalNetwork::connect_all() {
 	}
 }
 
+
+// Sets how many channels the endpoints carry (1 to 255).
 void TickLocalNetwork::set_channel_count(int p_channel_count) {
 	ERR_FAIL_COND_MSG(p_channel_count <= 0 || p_channel_count > 255, "The channel count must be between 1 and 255.");
 	channel_count = p_channel_count;
 }
 
+
+// Probability, in [0, 1], of losing an unreliable packet. Reliable packets are never lost.
 void TickLocalNetwork::set_packet_loss(double p_packet_loss) {
 	ERR_FAIL_COND_MSG(!(p_packet_loss >= 0.0 && p_packet_loss <= 1.0), "The packet loss must be between 0 and 1.");
 	packet_loss = p_packet_loss;
 }
 
+
+// One way latency between two peers, in both directions, instead of the network's.
 void TickLocalNetwork::set_link_latency_usec(int p_peer_a, int p_peer_b, uint64_t p_latency_usec) {
 	link_latencies.insert(make_link_key(MIN(p_peer_a, p_peer_b), MAX(p_peer_a, p_peer_b), 0), p_latency_usec);
 }
 
+
+// Seeds the generator of the jitter and of the packet loss: the same seed repeats the same run.
 void TickLocalNetwork::set_seed(uint64_t p_seed) {
 	rng.seed(p_seed);
 }
 
+
+// The key of a link in the maps: who sends, who receives and the channel.
 uint64_t TickLocalNetwork::make_link_key(int p_from, int p_to, int p_channel) {
 	return (uint64_t(uint32_t(p_from) & 0xFFFFFF) << 40) | (uint64_t(uint32_t(p_to) & 0xFFFFFF) << 16) | uint64_t(uint32_t(p_channel) & 0xFFFF);
 }
 
+
+// Drops the packets on their way between two peers, in both directions, and forgets the order kept for their links.
 void TickLocalNetwork::drop_in_flight_between(int p_peer_a, int p_peer_b) {
 	LocalVector<InFlightPacket> kept;
 	for (const InFlightPacket &packet : in_flight) {
@@ -203,6 +247,9 @@ void TickLocalNetwork::drop_in_flight_between(int p_peer_a, int p_peer_b) {
 	}
 }
 
+
+// Puts a packet on its way from `p_from` to `p_to`: it may be lost (unless reliable), and arrives after the link's
+// latency and jitter. Called by `TickLocalTransport::send()`.
 Error TickLocalNetwork::send(int p_from, int p_to, int p_channel, TickTransport::TransferMode p_mode, const uint8_t *p_data, int p_size) {
 	ERR_FAIL_INDEX_V_MSG(p_channel, channel_count, ERR_INVALID_PARAMETER, vformat("The channel must be between 0 and %d.", channel_count - 1));
 	ERR_FAIL_COND_V_MSG(p_size < 0, ERR_INVALID_PARAMETER, "The packet size can't be negative.");
@@ -249,11 +296,15 @@ Error TickLocalNetwork::send(int p_from, int p_to, int p_channel, TickTransport:
 	return OK;
 }
 
+
+// Same as `process_usec()`, with the time in seconds.
 void TickLocalNetwork::process(double p_delta) {
 	ERR_FAIL_COND_MSG(!(p_delta >= 0.0), "The delta can't be negative.");
 	process_usec(uint64_t(p_delta * 1000000.0 + 0.5));
 }
 
+
+// Advances the virtual clock and delivers the packets that arrived.
 void TickLocalNetwork::process_usec(uint64_t p_delta_usec) {
 	time_usec += p_delta_usec;
 	if (in_flight.is_empty()) {

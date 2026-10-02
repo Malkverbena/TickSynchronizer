@@ -1,3 +1,13 @@
+// The interface between the engines and the network: `TickTransport`.
+//
+// A transport moves bytes between peers; the sync engines only talk to the network through this interface. The
+// transport identifies the sender of every packet: `Packet::from_peer` comes from the connection, never from the
+// payload, so a peer can't impersonate another one. Events and packets are queued by `poll()` and consumed with
+// `pop_event()` and `pop_packet()`.
+//
+// The implementations are `EnetStarTransport` (clients and a server), `EnetMeshTransport` (servers of a mesh),
+// `EnetHostedMeshTransport` (players of a mesh with a host) and `TickLocalTransport` (in memory, for tests).
+
 #pragma once
 
 #include "core/error/error_list.h"
@@ -5,12 +15,6 @@
 #include "core/object/ref_counted.h"
 #include "core/templates/local_vector.h"
 
-// Moves bytes between peers; the sync engines only talk to the network through this interface.
-//
-// The transport identifies the sender of every packet: `Packet::from_peer` comes from the connection, never from
-// the payload, so a peer can't impersonate another one.
-//
-// Events and packets are queued by `poll()` and consumed with `pop_event()` and `pop_packet()`.
 class TickTransport : public RefCounted {
 	GDCLASS(TickTransport, RefCounted);
 
@@ -32,11 +36,13 @@ public:
 		EVENT_HOST_MIGRATED,
 	};
 
+	// A peer that connected or disconnected, or the host that changed.
 	struct Event {
 		EventType type = EVENT_PEER_CONNECTED;
 		int peer = 0;
 	};
 
+	// A packet received, with the peer its connection belongs to.
 	struct Packet {
 		int from_peer = 0;
 		int channel = 0;
@@ -55,32 +61,54 @@ public:
 	static constexpr int PEER_SERVER = 1;
 
 protected:
+	// Exposes the interface to scripts.
 	static void _bind_methods();
+
 
 	// Whether a received packet of `p_size` bytes still fits a queue holding `p_count` packets of `p_bytes` bytes.
 	static bool queue_has_room(uint32_t p_count, uint64_t p_bytes, int p_size) {
 		return p_count < uint32_t(MAX_QUEUED_PACKETS) && p_bytes + uint64_t(p_size) <= uint64_t(MAX_QUEUED_BYTES);
 	}
 
+
 public:
+	// The id of this peer in the network.
 	virtual int get_local_peer_id() const = 0;
+
+
+	// Whether this peer has a connection with `p_peer`.
 	virtual bool is_peer_connected(int p_peer) const = 0;
+
+
+	// Fills `r_peers` with the ids of the peers this one is connected to.
 	virtual void get_connected_peers(LocalVector<int> &r_peers) const = 0;
+
+
+	// How many channels the transport carries; the engines use the ones in `TickChannel`.
 	virtual int get_channel_count() const = 0;
+
 
 	// Largest payload that fits in a single datagram (no fragmentation).
 	virtual int get_max_payload_size() const = 0;
 
+
 	// Queues `p_size` bytes for `p_peer`, or for every connected peer with `PEER_BROADCAST`.
 	virtual Error send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) = 0;
+
 
 	// Closes the connection with a peer; used to drop peers that fail the handshake.
 	virtual void disconnect_peer(int p_peer) = 0;
 
+
 	// Sends the queued packets and receives the incoming ones.
 	virtual void poll() = 0;
 
+
+	// Takes the oldest event queued by `poll()`; `false` when there is none.
 	virtual bool pop_event(Event &r_event) = 0;
+
+
+	// Takes the oldest packet queued by `poll()`; `false` when there is none.
 	virtual bool pop_packet(Packet &r_packet) = 0;
 };
 

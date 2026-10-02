@@ -1,3 +1,22 @@
+// Robustness tests: fuzzing and chaos campaigns. Not matched by `--test-case="*TickSynchronizer*"`; run them with
+// `--test-case="*TickSyncFuzz*"`, ideally on a build with `use_asan=yes use_ubsan=yes`. They record the real traffic of
+// an honest peer, then an impostor takes that peer's place and sends the packets again, mutated; and they shake a
+// distributed mesh (links that drop, nodes that restart, roles and owners that change) and check that every node ends
+// with the same view.
+//
+// Environment: `TICK_FUZZ_SEEDS` (how many seeds, 3 by default), `TICK_FUZZ_SEED` (the first one, 1), `TICK_FUZZ_STEPS`
+// (steps of 1/60 s per seed, 600).
+//
+// The two campaigns where a node of a distributed mesh misbehaves still fail on a few seeds (3 in 200): the mesh trusts
+// its registry, and a registry may announce an object with a schema that isn't the object's, which the other nodes then
+// can't bind (`notes/audit-2026-10-01.md`). They stay as they are, to tell when that changes.
+//
+// The helpers, some of them used by the other test files: `TapTransport` records what an engine sends; `Fuzzer` makes
+// the random choices and the mutations, the same for a given seed; `FuzzBody` is a body with one variable of every kind
+// of codec; `FuzzListener` counts what an engine reports; `Impostor` sends a peer's recorded packets again, mutated;
+// `SyncWorld` and `ChaosMesh` are the worlds of the two engines; `RogueSocket` is a bare ENet endpoint, for the
+// transports.
+
 #pragma once
 
 #include "../source/common/tick_engine_compat.h"
@@ -13,24 +32,15 @@
 #include "core/os/os.h"
 #include "tests/test_macros.h"
 
-// Fuzzing and chaos tests: not matched by `--test-case="*TickSynchronizer*"`; run them with
-// `--test-case="*TickSyncFuzz*"`, ideally on a build with `use_asan=yes use_ubsan=yes`. They record the real traffic of
-// an honest peer, then an impostor takes that peer's place and sends the packets again, mutated.
-//
-// Environment: `TICK_FUZZ_SEEDS` (how many seeds, 3 by default), `TICK_FUZZ_SEED` (the first one, 1), `TICK_FUZZ_STEPS`
-// (steps of 1/60 s per seed, 600).
-//
-// The two campaigns where a node of a distributed mesh misbehaves still fail on a few seeds (3 in 200): the mesh trusts
-// its registry, and a registry may announce an object with a schema that isn't the object's, which the other nodes
-// then can't bind (`notes/audit-2026-10-01.md`). They stay as they are, to tell when that changes.
-
 namespace TestTickFuzz {
 
+// An integer from the environment, or the default.
 static int fuzz_env(const char *p_name, int p_default) {
 	const String value = OS::get_singleton()->get_environment(p_name);
 	return value.is_valid_int() ? int(value.to_int()) : p_default;
 }
 
+// A packet an engine sent: from whom, to whom, and how.
 struct Sample {
 	int from = 0;
 	int to = 0;
@@ -47,11 +57,27 @@ public:
 	Ref<TickTransport> inner;
 	LocalVector<Sample> *corpus = nullptr;
 
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual int get_local_peer_id() const override { return inner->get_local_peer_id(); }
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual bool is_peer_connected(int p_peer) const override { return inner->is_peer_connected(p_peer); }
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual void get_connected_peers(LocalVector<int> &r_peers) const override { inner->get_connected_peers(r_peers); }
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual int get_channel_count() const override { return inner->get_channel_count(); }
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual int get_max_payload_size() const override { return inner->get_max_payload_size(); }
+
+
+	// `TickTransport`: records the packet in the corpus, then sends it through the transport it wraps.
 	virtual Error send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) override {
 		if (corpus && corpus->size() < 60000) {
 			Sample sample;
@@ -65,20 +91,46 @@ public:
 		}
 		return inner->send(p_peer, p_channel, p_mode, p_data, p_size);
 	}
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual void disconnect_peer(int p_peer) override { inner->disconnect_peer(p_peer); }
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual void poll() override { inner->poll(); }
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual bool pop_event(Event &r_event) override { return inner->pop_event(r_event); }
+
+
+	// `TickTransport`: forwarded to the transport it wraps.
 	virtual bool pop_packet(Packet &r_packet) override { return inner->pop_packet(r_packet); }
 };
 
+// The random choices of a campaign, the same for a given seed.
 struct Fuzzer {
 	RandomPCG rng;
 
+	// Seeds the generator.
 	explicit Fuzzer(uint64_t p_seed) { rng.seed(p_seed * 7919 + 17); }
+
+
+	// The next random number.
 	uint32_t next() { return rng.rand(); }
+
+
+	// A random integer from `p_low` to `p_high`, both included.
 	int range(int p_low, int p_high) { return p_low + int(next() % uint32_t(p_high - p_low + 1)); }
+
+
+	// `true` with a probability of `p_percent` in 100.
 	bool chance(int p_percent) { return int(next() % 100) < p_percent; }
 
+
+	// A 32-bit value of the kind that breaks arithmetic: the edges of the range, values around `p_frame`, small counts,
+	// or anything.
 	uint32_t interesting(uint32_t p_frame) {
 		switch (next() % 10) {
 			case 0:
@@ -104,6 +156,9 @@ struct Fuzzer {
 		}
 	}
 
+
+	// Changes a packet in one to four ways: a flipped bit, another byte, a truncation, extra bytes, an interesting
+	// value, a repeated chunk, another message type, or a run of one byte.
 	void mutate(LocalVector<uint8_t> &r_bytes, uint32_t p_frame) {
 		const int operations = range(1, 4);
 		for (int i = 0; i < operations; i++) {
@@ -164,6 +219,8 @@ struct Fuzzer {
 		}
 	}
 
+
+	// Makes a packet of random bytes, most of the time with a valid message type first.
 	void random_packet(LocalVector<uint8_t> &r_bytes) {
 		const int size = chance(20) ? range(1, 4) : (chance(10) ? range(1000, 20000) : range(1, 400));
 		r_bytes.resize(size);
@@ -175,6 +232,8 @@ struct Fuzzer {
 		}
 	}
 
+
+	// A payload of some type for an event or a spawn: simple values, containers, nested arrays.
 	Variant random_payload() {
 		switch (next() % 14) {
 			case 0:
@@ -254,6 +313,7 @@ public:
 	int events = 0;
 	int authority_changes = 0;
 
+	// A body at `p_path` controlled by `p_controller`; with `p_doll`, a doll on the peers that don't control it.
 	FuzzBody(const String &p_path, int p_controller, bool p_doll) :
 			path(p_path), controller(p_controller), doll(p_doll) {
 		schema.add("position", TickCodec::vector2(TickCodec::PRECISION_HALF));
@@ -265,11 +325,24 @@ public:
 		schema.add("blob", TickCodec::variant());
 	}
 
+
+	// `TickSyncObject`: the path given to the constructor.
 	virtual String get_sync_path() const override { return path; }
+
+
+	// `TickSyncObject`: the controller given to the constructor.
 	virtual int get_controller_peer() const override { return controller; }
+
+
+	// `TickSyncObject`: one variable of every kind of codec.
 	virtual const TickSchema &get_sync_schema() const override { return schema; }
+
+
+	// `TickSyncObject`: as the constructor was told.
 	virtual bool is_doll_enabled() const override { return doll; }
 
+
+	// `TickSyncObject`: the variable at an index of the schema.
 	virtual Variant get_sync_var(int p_index) const override {
 		switch (p_index) {
 			case 0:
@@ -289,6 +362,8 @@ public:
 		}
 	}
 
+
+	// `TickSyncObject`: sets the variable at an index of the schema.
 	virtual void set_sync_var(int p_index, const Variant &p_value) override {
 		switch (p_index) {
 			case 0:
@@ -315,6 +390,8 @@ public:
 		}
 	}
 
+
+	// `TickSyncObject`: writes an input that changes with the ticks: a direction, a button and a vector.
 	virtual void collect_input(TickDataBuffer &r_input) override {
 		const int tick = ticks_collected++;
 		r_input.add_int_bits(((tick / 20) % 3) - 1, 2);
@@ -322,6 +399,8 @@ public:
 		(void)r_input.add_vector2(Vector2(real_t(tick % 7), 1.0), TickDataBuffer::COMPRESSION_LEVEL_2);
 	}
 
+
+	// `TickSyncObject`: changes every variable from the input; an input that doesn't parse counts as none.
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override {
 		process_calls++;
 		int move = 0;
@@ -344,10 +423,16 @@ public:
 		blob = counter / 60;
 	}
 
+
+	// `TickSyncObject`: counts the events.
 	virtual void on_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override { events++; }
+
+
+	// `TickSyncObject`: counts the changes of owner.
 	virtual void on_authority_changed(int p_old_owner, int p_new_owner) override { authority_changes++; }
 };
 
+// Counts what an engine reports.
 class FuzzListener : public TickEngine::Listener {
 public:
 	int spawns = 0;
@@ -355,9 +440,19 @@ public:
 	int events = 0;
 	int rejected = 0;
 
+	// Counts the spawns.
 	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override { spawns++; }
+
+
+	// Counts the despawns.
 	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override { despawns++; }
+
+
+	// Counts the events without target object.
 	virtual void on_network_event(int p_sender, const StringName &p_event, const Variant &p_payload, uint32_t p_frame) override { events++; }
+
+
+	// Counts the rejections.
 	virtual void on_rejected(const String &p_reason) override { rejected++; }
 };
 
@@ -368,6 +463,7 @@ struct Impostor {
 	LocalVector<Sample> samples;
 	int sent = 0;
 
+	// Takes the place of a peer: keeps its transport, and a copy of what it had sent.
 	void take(const Ref<TickLocalTransport> &p_transport, const LocalVector<Sample> &p_corpus) {
 		transport = p_transport;
 		const int id = p_transport->get_local_peer_id();
@@ -378,6 +474,9 @@ struct Impostor {
 		}
 	}
 
+
+	// One step of the impostor: drops what it received, and sends up to `p_max_packets` packets: recorded ones, mutated
+	// most of the time, or random ones.
 	void act(Fuzzer &r_fuzzer, uint32_t p_frame, int p_max_packets) {
 		// What the others sent to this peer isn't read: dropped, so the test doesn't grow.
 		TickTransport::Packet packet;
@@ -441,6 +540,8 @@ struct SyncWorld {
 	int steps = 0;
 	uint64_t slowest_usec = 0;
 
+	// Starts the three peers on a simulated network with some latency, jitter and loss, each with its bodies: a star,
+	// or a mesh with `p_mesh`.
 	SyncWorld(bool p_mesh, bool p_trusted, uint64_t p_seed) {
 		mesh = p_mesh;
 		network.set_seed(p_seed);
@@ -474,6 +575,8 @@ struct SyncWorld {
 		}
 	}
 
+
+	// Stops the engines and frees the bodies.
 	~SyncWorld() {
 		for (int peer = 1; peer <= 3; peer++) {
 			cores[peer].stop();
@@ -483,6 +586,7 @@ struct SyncWorld {
 			memdelete(extras[peer]);
 		}
 	}
+
 
 	// The honest peers play: events both ways, spawns, an object that comes and goes, interest.
 	void activity(Fuzzer &r_fuzzer) {
@@ -526,6 +630,8 @@ struct SyncWorld {
 		}
 	}
 
+
+	// Advances the network and the engines that are still honest by one frame, and times the slowest step.
 	void step() {
 		network.process(1.0 / 60.0);
 		const uint64_t now = network.get_time_usec();
@@ -540,6 +646,7 @@ struct SyncWorld {
 		steps++;
 	}
 
+
 	// The engine of a peer stops, and an impostor keeps its place in the network.
 	void take_over(int p_peer, Impostor &r_impostor) {
 		cores[p_peer].stop();
@@ -548,6 +655,8 @@ struct SyncWorld {
 	}
 };
 
+// One campaign against `TickSyncCore`: the world runs honestly, then an impostor takes the place of `p_impostor` for
+// `p_steps` steps. The honest peers must go on in sync, at their pace, without holding much more memory.
 static void run_sync_campaign(bool p_mesh, bool p_trusted, int p_impostor, uint64_t p_seed, int p_steps) {
 	Fuzzer fuzzer(p_seed);
 	SyncWorld world(p_mesh, p_trusted, p_seed);
@@ -597,6 +706,8 @@ static void run_sync_campaign(bool p_mesh, bool p_trusted, int p_impostor, uint6
 	MESSAGE(vformat("seed %d: %d packets from the impostor, slowest step %d us, memory %+d KiB, malformed on 1/2/3: %d/%d/%d", p_seed, impostor.sent, world.slowest_usec, grown / 1024, world.cores[1].get_stats().malformed_packets, world.cores[2].get_stats().malformed_packets, world.cores[3].get_stats().malformed_packets));
 }
 
+
+// Runs a campaign for every seed the environment asks for.
 static void run_sync_campaigns(bool p_mesh, bool p_trusted, int p_impostor) {
 	const int seeds = fuzz_env("TICK_FUZZ_SEEDS", 3);
 	const int first = fuzz_env("TICK_FUZZ_SEED", 1);
@@ -606,30 +717,41 @@ static void run_sync_campaigns(bool p_mesh, bool p_trusted, int p_impostor) {
 	}
 }
 
+
+// An impostor in the place of a client of a star: the server and the other client go on.
 TEST_CASE("[Modules][TickSyncFuzz] Star: a hostile client against the server") {
 	ERR_PRINT_OFF;
 	run_sync_campaigns(false, false, 3);
 	ERR_PRINT_ON;
 }
 
+
+// An impostor in the place of the server of a star: the clients go on running.
 TEST_CASE("[Modules][TickSyncFuzz] Star: a hostile server against its clients") {
 	ERR_PRINT_OFF;
 	run_sync_campaigns(false, false, 1);
 	ERR_PRINT_ON;
 }
 
+
+// An impostor in the place of a player of a mesh with a host, where the players also take each other's inputs, for the
+// dolls.
 TEST_CASE("[Modules][TickSyncFuzz] Mesh with a host: a hostile player against the host and the other player") {
 	ERR_PRINT_OFF;
 	run_sync_campaigns(true, false, 3);
 	ERR_PRINT_ON;
 }
 
+
+// An impostor in the place of the host of a mesh: the players go on running.
 TEST_CASE("[Modules][TickSyncFuzz] Mesh with a host: a hostile host against the players") {
 	ERR_PRINT_OFF;
 	run_sync_campaigns(true, false, 1);
 	ERR_PRINT_ON;
 }
 
+
+// The first campaign again with a trusted network, where the limits for untrusted peers are off.
 TEST_CASE("[Modules][TickSyncFuzz] Trusted star: a hostile client against the server") {
 	ERR_PRINT_OFF;
 	run_sync_campaigns(false, true, 3);
@@ -662,6 +784,7 @@ struct ChaosMesh {
 	TickEngine::Settings settings;
 	uint64_t slowest_usec = 0;
 
+	// Starts `p_nodes` nodes, with the candidates and the quorum given, and links them all.
 	ChaosMesh(int p_nodes, const Vector<int> &p_candidates, int p_quorum, uint64_t p_seed) {
 		count = p_nodes;
 		network.set_seed(p_seed);
@@ -687,12 +810,16 @@ struct ChaosMesh {
 		}
 	}
 
+
+	// Stops every node.
 	~ChaosMesh() {
 		for (int i = 1; i <= count; i++) {
 			stop_node(i);
 		}
 	}
 
+
+	// Starts the process of a node: a new engine and new bodies, on the node's transport.
 	void start_node(int p_node) {
 		cores[p_node] = memnew(TickMeshCore);
 		cores[p_node]->set_settings(settings);
@@ -704,6 +831,8 @@ struct ChaosMesh {
 		REQUIRE(cores[p_node]->start(taps[p_node], network.get_time_usec()) == OK);
 	}
 
+
+	// Ends the process of a node: its engine and its bodies are freed.
 	void stop_node(int p_node) {
 		if (cores[p_node] == nullptr) {
 			return;
@@ -718,6 +847,8 @@ struct ChaosMesh {
 		cores[p_node] = nullptr;
 	}
 
+
+	// Links or unlinks two nodes, if that changes anything.
 	void set_link(int p_a, int p_b, bool p_linked) {
 		if (linked[p_a][p_b] == p_linked) {
 			return;
@@ -730,6 +861,7 @@ struct ChaosMesh {
 			network.disconnect_peers(p_a, p_b);
 		}
 	}
+
 
 	// The process of a node dies: its links drop, and it starts again, with nothing, some steps later.
 	void crash(int p_node, int p_steps_down) {
@@ -753,6 +885,9 @@ struct ChaosMesh {
 		restarts++;
 	}
 
+
+	// Starts a node that was down again, with nothing left of what was on its way, and links it to the nodes that are
+	// up.
 	void revive(int p_node) {
 		TickTransport::Packet packet;
 		while (transports[p_node]->pop_packet(packet)) {
@@ -767,6 +902,7 @@ struct ChaosMesh {
 			}
 		}
 	}
+
 
 	// `p_gentle`: only what the game does (roles moved by hand, ownership); no link drops, no restarts.
 	void chaos(Fuzzer &r_fuzzer, bool p_gentle = false) {
@@ -818,6 +954,9 @@ struct ChaosMesh {
 		}
 	}
 
+
+	// Advances the network and every node that is up by one frame; a node that is down comes back when its time is
+	// over.
 	void step() {
 		network.process(1.0 / 60.0);
 		const uint64_t now = network.get_time_usec();
@@ -837,6 +976,8 @@ struct ChaosMesh {
 		}
 	}
 
+
+	// Brings every node up and links them all again.
 	void heal() {
 		for (int i = 1; i <= count; i++) {
 			if (down[i] > 0) {
@@ -851,11 +992,14 @@ struct ChaosMesh {
 		}
 	}
 
+
+	// Advances `p_steps` frames without any chaos.
 	void run(int p_steps) {
 		for (int i = 0; i < p_steps; i++) {
 			step();
 		}
 	}
+
 
 	// A line about what a node knows, for the failure messages.
 	String describe(int p_node) const {
@@ -992,6 +1136,9 @@ static void check_mesh(ChaosMesh &r_mesh, const String &p_what, int p_skip = 0) 
 	CHECK_MESSAGE(followed, (String("A node doesn't follow an object's owner. ") + context + lagging));
 }
 
+
+// One chaos campaign: `p_steps` steps of chaos on a mesh of honest nodes; then the mesh is made whole, settles, and is
+// checked.
 static void run_chaos(int p_nodes, const Vector<int> &p_candidates, int p_quorum, uint64_t p_seed, int p_steps) {
 	Fuzzer fuzzer(p_seed);
 	ChaosMesh mesh(p_nodes, p_candidates, p_quorum, p_seed);
@@ -1005,6 +1152,7 @@ static void run_chaos(int p_nodes, const Vector<int> &p_candidates, int p_quorum
 	mesh.run(600);
 	check_mesh(mesh, vformat("Seed %d, %d nodes, %d candidates, quorum %d", p_seed, p_nodes, p_candidates.size(), p_quorum));
 }
+
 
 // A node of the mesh turns hostile: an impostor takes its place and sends what it had sent, mutated. Then it leaves,
 // and the other nodes must agree again.
@@ -1042,6 +1190,8 @@ static void run_mesh_impostor(int p_impostor, uint64_t p_seed, int p_steps) {
 	check_mesh(mesh, vformat("Seed %d, after the hostile node %d left", p_seed, p_impostor), p_impostor);
 }
 
+
+// Runs a chaos campaign for every seed the environment asks for.
 static void run_chaos_seeds(int p_nodes, const Vector<int> &p_candidates, int p_quorum) {
 	const int seeds = fuzz_env("TICK_FUZZ_SEEDS", 3);
 	const int first = fuzz_env("TICK_FUZZ_SEED", 1);
@@ -1051,10 +1201,14 @@ static void run_chaos_seeds(int p_nodes, const Vector<int> &p_candidates, int p_
 	}
 }
 
+
+// Four nodes, any of which may take the roles.
 TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh under chaos: any node takes the roles") {
 	run_chaos_seeds(4, Vector<int>(), 0);
 }
 
+
+// Four nodes, two of which may take the roles.
 TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh under chaos: two candidates") {
 	Vector<int> candidates;
 	candidates.push_back(1);
@@ -1062,10 +1216,14 @@ TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh under chaos: two candidates"
 	run_chaos_seeds(4, candidates, 0);
 }
 
+
+// Five nodes that need three of them connected to take or keep the roles.
 TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh under chaos: a quorum of three in five") {
 	run_chaos_seeds(5, Vector<int>(), 3);
 }
 
+
+// Five nodes with three candidates and a quorum of three.
 TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh under chaos: candidates and a quorum") {
 	Vector<int> candidates;
 	candidates.push_back(2);
@@ -1073,6 +1231,7 @@ TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh under chaos: candidates and 
 	candidates.push_back(1);
 	run_chaos_seeds(5, candidates, 3);
 }
+
 
 // The seeds of the chaos campaigns that found defects (objects left frozen for good, a timeline started over,
 // registries that counted their versions apart, a node that never told the registry what it knew), kept in the regular
@@ -1101,6 +1260,7 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] The chaos seeds that found defe
 }
 
 
+// An impostor in the place of a plain node of the mesh; once it's gone, the others agree again.
 TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh: a hostile node, then the others agree again") {
 	const int seeds = fuzz_env("TICK_FUZZ_SEEDS", 3);
 	const int first = fuzz_env("TICK_FUZZ_SEED", 1);
@@ -1110,6 +1270,8 @@ TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh: a hostile node, then the ot
 	}
 }
 
+
+// An impostor in the place of the node with the registry and the clock; once it's gone, the others agree again.
 TEST_CASE("[Modules][TickSyncFuzz] Distributed mesh: the node with the roles turns hostile, then the others agree again") {
 	const int seeds = fuzz_env("TICK_FUZZ_SEEDS", 3);
 	const int first = fuzz_env("TICK_FUZZ_SEED", 1);
@@ -1129,6 +1291,7 @@ static constexpr int ROGUE_EVENT_CONNECT = 1;
 static constexpr int ROGUE_EVENT_DISCONNECT = 2;
 static constexpr int ROGUE_EVENT_RECEIVE = 3;
 
+// Sends bytes on a bare ENet link, if it's still active.
 static void rogue_send(const Ref<RefCounted> &p_link, int p_channel, const uint8_t *p_data, int p_size, int p_flags) {
 	if (p_link.is_null() || !bool(p_link->call("is_active"))) {
 		return;
@@ -1150,6 +1313,8 @@ struct RogueSocket {
 	uint32_t disconnect_data = 0;
 	LocalVector<LocalVector<uint8_t>> control;
 
+	// Opens a socket bound to `p_bind` and connects it to an address, with `p_data` as the connection data; `false`
+	// when the socket can't be made.
 	bool open(const String &p_bind, const String &p_address, int p_port, uint32_t p_data, int p_channels) {
 		socket = Ref<RefCounted>(Object::cast_to<RefCounted>(ClassDB::instantiate("ENetConnection")));
 		if (socket.is_null()) {
@@ -1165,6 +1330,8 @@ struct RogueSocket {
 		return connect(p_address, p_port, p_data, p_channels);
 	}
 
+
+	// Connects the socket to an address; `poll()` tells when the connection is up.
 	bool connect(const String &p_address, int p_port, uint32_t p_data, int p_channels) {
 		link = socket->call("connect_to_host", p_address, p_port, p_channels, int(p_data));
 		connected = false;
@@ -1172,6 +1339,9 @@ struct RogueSocket {
 		return link.is_valid();
 	}
 
+
+	// Takes the events of the socket: the connection, the disconnection with its data, and the control messages
+	// received.
 	void poll() {
 		if (socket.is_null()) {
 			return;
@@ -1206,9 +1376,12 @@ struct RogueSocket {
 		socket->call("flush");
 	}
 
+
+	// Sends bytes on the link.
 	void send(int p_channel, const uint8_t *p_data, int p_size, int p_flags) {
 		rogue_send(link, p_channel, p_data, p_size, p_flags);
 	}
+
 
 	// Leaves at once. The socket goes with the link: a socket serviced after `peer_disconnect_now()` reads freed memory
 	// in the engine (see `enet_close_link()`).
@@ -1226,6 +1399,8 @@ struct RogueSocket {
 		connected = false;
 	}
 
+
+	// Closes the link and destroys the socket.
 	void close() {
 		if (socket.is_valid()) {
 			if (link.is_valid() && bool(link->call("is_active"))) {
@@ -1239,15 +1414,19 @@ struct RogueSocket {
 	}
 };
 
+// A port that changes from run to run, and with `p_salt`.
 static int pick_port(int p_salt) {
 	return 45000 + 2 * int((OS::get_singleton()->get_ticks_usec() / 7 + uint64_t(p_salt) * 7919) % 4000);
 }
 
+
+// Appends a 32-bit integer, little-endian.
 static void fuzz_put_u32(LocalVector<uint8_t> &r_message, uint32_t p_value) {
 	for (int i = 0; i < 4; i++) {
 		r_message.push_back(uint8_t(p_value >> (8 * i)));
 	}
 }
+
 
 // A control message of the hosted mesh: a type and a few fields that look like the real ones, or garbage.
 static void random_control(Fuzzer &r_fuzzer, LocalVector<uint8_t> &r_message, int p_port) {
@@ -1298,6 +1477,9 @@ static void random_control(Fuzzer &r_fuzzer, LocalVector<uint8_t> &r_message, in
 	}
 }
 
+
+// A bare socket joins a host next to two honest players and sends control messages, relayed packets and garbage,
+// leaving and joining again: the host and the honest players stay connected.
 TEST_CASE("[Modules][TickSyncFuzz] Hosted mesh: a hostile player against the host") {
 	typedef EnetHostedMeshTransport Mesh;
 	static constexpr uint32_t JOIN_MAGIC = 0x544B4D32;
@@ -1413,6 +1595,7 @@ TEST_CASE("[Modules][TickSyncFuzz] Hosted mesh: a hostile player against the hos
 	ERR_PRINT_ON;
 }
 
+
 // Takes what a bare server socket received, and tells which links connected and closed.
 static void rogue_server_service(const Ref<RefCounted> &p_server, Fuzzer &r_fuzzer, Ref<RefCounted> &r_host_link, bool p_close_registrations) {
 	for (int e = 0; e < 64; e++) {
@@ -1439,6 +1622,9 @@ static void rogue_server_service(const Ref<RefCounted> &p_server, Fuzzer &r_fuzz
 	}
 }
 
+
+// A bare socket plays the host of a player: it welcomes it with values that may be wrong, sends control messages,
+// relayed packets and garbage, and leaves in many ways. The player goes through every round.
 TEST_CASE("[Modules][TickSyncFuzz] Hosted mesh: a hostile host against a player") {
 	typedef EnetHostedMeshTransport Mesh;
 	static constexpr int CHANNELS = 27;
@@ -1546,6 +1732,9 @@ TEST_CASE("[Modules][TickSyncFuzz] Hosted mesh: a hostile host against a player"
 	ERR_PRINT_ON;
 }
 
+
+// A bare socket connects to a node of a servers' mesh declaring itself some node, and sends garbage: the node's engine
+// goes on running.
 TEST_CASE("[Modules][TickSyncFuzz] Servers' mesh: a hostile connection against a node") {
 	static constexpr int CHANNELS = 5;
 	const int seeds = fuzz_env("TICK_FUZZ_SEEDS", 3);

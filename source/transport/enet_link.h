@@ -1,3 +1,6 @@
+// How the ENet transports close a link of a socket that keeps being serviced (ADR-075). No class is declared here: only
+// the helper every ENet transport of the module uses for it, and the time it gives the other side to answer.
+
 #pragma once
 
 #include "modules/enet/enet_packet_peer.h"
