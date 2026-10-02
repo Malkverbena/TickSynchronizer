@@ -1,3 +1,6 @@
+// Implementation of `TickBitArray`: its sizes, and the slow path of the reads and writes (the fast one is inline, in
+// the header).
+
 #include "tick_bit_array.h"
 
 #include "core/error/error_macros.h"
@@ -5,10 +8,13 @@
 
 #include <cstring>
 
+// An array of `p_initial_size_in_bits` bits, rounded up to whole bytes.
 TickBitArray::TickBitArray(int p_initial_size_in_bits) {
 	resize_in_bits(p_initial_size_in_bits);
 }
 
+
+// An array with a copy of `p_size_in_bytes` bytes.
 TickBitArray::TickBitArray(const uint8_t *p_bytes, int p_size_in_bytes) {
 	ERR_FAIL_COND_MSG(p_size_in_bytes < 0, "The bytes count can't be negative.");
 	ERR_FAIL_COND_MSG(p_size_in_bytes > 0 && p_bytes == nullptr, "The source bytes are null.");
@@ -18,18 +24,24 @@ TickBitArray::TickBitArray(const uint8_t *p_bytes, int p_size_in_bytes) {
 	}
 }
 
+
+// Sets the size of the array, in bytes; `false` if the size is negative.
 bool TickBitArray::resize_in_bytes(int p_bytes_count) {
 	ERR_FAIL_COND_V_MSG(p_bytes_count < 0, false, "The bytes count can't be negative.");
 	bytes.resize(p_bytes_count);
 	return true;
 }
 
+
+// Sets the size of the array to hold `p_bits_count` bits, rounded up to whole bytes; `false` if the count is
+// negative.
 bool TickBitArray::resize_in_bits(int p_bits_count) {
 	ERR_FAIL_COND_V_MSG(p_bits_count < 0, false, "The bits count can't be negative.");
 	// Round up to the next byte. Written this way to avoid overflowing near INT_MAX.
 	bytes.resize(p_bits_count / 8 + (p_bits_count % 8 != 0 ? 1 : 0));
 	return true;
 }
+
 
 // The bits don't fit in one window at the end of the array: byte by byte, with the checks.
 bool TickBitArray::store_bits_slow(int p_bit_offset, uint64_t p_value, int p_bits) {
@@ -59,6 +71,8 @@ bool TickBitArray::store_bits_slow(int p_bit_offset, uint64_t p_value, int p_bit
 	return true;
 }
 
+
+// Reads bits that don't fit in one window inside the array: byte by byte, checking the offset and the count.
 bool TickBitArray::read_bits_slow(int p_bit_offset, int p_bits, uint64_t &r_out) const {
 	ERR_FAIL_COND_V_MSG(p_bit_offset < 0, false, "The bit offset can't be negative.");
 	ERR_FAIL_COND_V_MSG(p_bits <= 0 || p_bits > 64, false, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
@@ -87,6 +101,8 @@ bool TickBitArray::read_bits_slow(int p_bit_offset, int p_bits, uint64_t &r_out)
 	return true;
 }
 
+
+// Sets all the bytes to 0.
 void TickBitArray::zero() {
 	if (bytes.size() > 0) {
 		memset(bytes.ptr(), 0, bytes.size());

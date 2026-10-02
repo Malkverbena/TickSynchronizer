@@ -1,6 +1,14 @@
+// Tests of a cluster of servers: a mesh with one authority whose game servers relay the objects to their own clients
+// through a star that follows the cluster's timeline (ADR-038, ADR-039); and of `EnetMeshTransport`, the real mesh
+// between servers, with who it accepts as a node (ADR-076).
+//
+// `BridgeObject` is the edge's view of a cluster proxy; `ClusterWorld` has three servers in a mesh, one of them with a
+// star and a client.
+
 #pragma once
 
 #include "../source/transport/enet_mesh_transport.h"
+#include "test_tick_fuzz.h"
 #include "test_tick_sync_core.h"
 
 #include "core/os/os.h"
@@ -16,15 +24,36 @@ class BridgeObject : public TickSyncObject {
 public:
 	TestMover *proxy = nullptr;
 
+	// The view of `p_proxy`, the object the cluster's network moves.
 	explicit BridgeObject(TestMover *p_proxy) :
 			proxy(p_proxy) {}
 
+
+	// `TickSyncObject`: the proxy's path.
 	virtual String get_sync_path() const override { return proxy->get_sync_path(); }
+
+
+	// `TickSyncObject`: the server of the edge.
 	virtual int get_controller_peer() const override { return 1; }
+
+
+	// `TickSyncObject`: the proxy's variables.
 	virtual const TickSchema &get_sync_schema() const override { return proxy->get_sync_schema(); }
+
+
+	// `TickSyncObject`: reads the proxy's variable.
 	virtual Variant get_sync_var(int p_index) const override { return proxy->get_sync_var(p_index); }
+
+
+	// `TickSyncObject`: sets the proxy's variable.
 	virtual void set_sync_var(int p_index, const Variant &p_value) override { proxy->set_sync_var(p_index, p_value); }
+
+
+	// `TickSyncObject`: no input: the edge simulates nothing.
 	virtual void collect_input(TickDataBuffer &r_input) override {}
+
+
+	// `TickSyncObject`: nothing to simulate: the cluster's network moves the proxy.
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override {}
 };
 
@@ -47,6 +76,8 @@ struct ClusterWorld {
 	BridgeObject a_bridge = BridgeObject(&a_npc);
 	TestMover client_npc = TestMover("npc", 1, TickCodec::PRECISION_SINGLE);
 
+	// Builds the cluster (1 ms between servers) and the edge (30 ms to its client), registers the NPC on every engine,
+	// and starts them all.
 	ClusterWorld() {
 		cluster_network.set_latency_usec(1000);
 		edge_network.set_latency_usec(30000);
@@ -88,8 +119,8 @@ struct ClusterWorld {
 	// The local clocks of A, B and the client started this long after W's (other processes, started later).
 	uint64_t late_start_usec = 0;
 
-	// Each network in the process order of a game server: the cluster before the edge. With `p_only_w`, the
-	// others don't exist yet.
+	// Runs every network for `p_seconds`, in the process order of a game server: the cluster before the edge. With
+	// `p_only_w`, the other processes don't exist yet.
 	void run(double p_seconds, bool p_only_w = false) {
 		for (int i = 0; i < int(p_seconds * 60.0); i++) {
 			const double delta = (i % 2 == 0) ? 0.016 : 0.0173333;
@@ -109,6 +140,8 @@ struct ClusterWorld {
 	}
 };
 
+// The game servers' proxies follow the authority within a few frames, the edge runs on the authority's frames, and the
+// final client predicts ahead and interpolates the NPC behind by the interpolation delay plus the latency.
 TEST_CASE("[Modules][TickSynchronizer][Cluster] A mesh with one authority and a bridged star share the timeline") {
 	ClusterWorld world;
 	world.run(0.1);
@@ -139,6 +172,9 @@ TEST_CASE("[Modules][TickSynchronizer][Cluster] A mesh with one authority and a 
 	CHECK(world.a.get_stats().malformed_packets == 0);
 }
 
+
+// A game server that starts 10 seconds after the authority (so the timeline is older than its clock) still keeps its
+// client on time.
 TEST_CASE("[Modules][TickSynchronizer][Cluster] A game server started after the authority keeps the clients on time") {
 	ClusterWorld world;
 	// W runs alone for 10 s: when A starts, the cluster's frames are older than A's clock (negative epoch).
@@ -153,6 +189,8 @@ TEST_CASE("[Modules][TickSynchronizer][Cluster] A game server started after the 
 	CHECK(lag_frames < 10.0);
 }
 
+
+// Polls `p_count` transports `p_times` times, a millisecond apart.
 inline void poll_mesh(const Ref<EnetMeshTransport> *p_transports, int p_count, int p_times) {
 	for (int t = 0; t < p_times; t++) {
 		for (int i = 0; i < p_count; i++) {
@@ -162,6 +200,10 @@ inline void poll_mesh(const Ref<EnetMeshTransport> *p_transports, int p_count, i
 	}
 }
 
+
+// Three ENet nodes connect into a full mesh; a node that isn't in the list, or that claims an id already connected, is
+// refused; a packet carries the sender of its connection; and a cluster with one authority synchronizes over the real
+// sockets.
 TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] Three ENet nodes form a mesh and sync a cluster") {
 	const int base_port = 42000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
 	Ref<EnetMeshTransport> nodes[3];
@@ -257,6 +299,113 @@ TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] Three ENet nodes form 
 		cores[i].unregister_object(&npcs[i]);
 		cores[i].stop();
 	}
+}
+
+
+// A node is added with the address it listens on, and its connections must come from there: whoever reaches the port
+// can't take the place of a node that isn't connected just by declaring its id. With `check_addresses` off the
+// connection is taken, as it was before the audit of 2026-10-01.
+TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] A connection must come from the address of its node") {
+	const int port = 43000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
+	Ref<EnetMeshTransport> node = EnetMeshTransport::create(1, port);
+	REQUIRE(node.is_valid());
+	CHECK(node->is_checking_addresses());
+	// Node 2 is somewhere else, and it isn't up.
+	CHECK(node->add_node(2, "10.11.12.13", 9002) == OK);
+
+	// A bare ENet socket at another address of this machine declares itself node 2.
+	TestTickFuzz::RogueSocket rogue;
+	if (!rogue.open("127.0.0.2", "127.0.0.1", port, 2, TICK_CHANNEL_COUNT)) {
+		MESSAGE("Can't bind a socket to 127.0.0.2 on this system: not tested.");
+		return;
+	}
+	for (int t = 0; t < 2000 && !rogue.disconnected; t++) {
+		node->poll();
+		rogue.poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(rogue.disconnected);
+	CHECK_FALSE(node->is_peer_connected(2));
+	TickTransport::Event event;
+	CHECK_FALSE(node->pop_event(event));
+	rogue.close();
+
+	node->set_check_addresses(false);
+	REQUIRE(rogue.open("127.0.0.2", "127.0.0.1", port, 2, TICK_CHANNEL_COUNT));
+	for (int t = 0; t < 2000 && !node->is_peer_connected(2); t++) {
+		node->poll();
+		rogue.poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(node->is_peer_connected(2));
+	rogue.close();
+}
+
+
+// With a secret, the two sides of a link prove to each other that they know it before the link is reported. A node
+// with another secret, or with none, never becomes a node of the mesh, and nothing it sends reaches the engines.
+TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] With a secret, only the nodes that prove it join the mesh") {
+	const int base_port = 44000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
+	PackedByteArray secret;
+	PackedByteArray other_secret;
+	for (int i = 0; i < 32; i++) {
+		secret.push_back(uint8_t(i * 7 + 3));
+		other_secret.push_back(uint8_t(i * 5 + 1));
+	}
+	Ref<EnetMeshTransport> nodes[4];
+	for (int i = 0; i < 4; i++) {
+		nodes[i] = EnetMeshTransport::create(i + 1, base_port + i);
+		REQUIRE(nodes[i].is_valid());
+		nodes[i]->set_retry_interval(0.05);
+	}
+	// Nodes 1 and 2 have the secret; node 3 has another one, node 4 none.
+	nodes[0]->set_secret(secret);
+	nodes[1]->set_secret(secret);
+	nodes[2]->set_secret(other_secret);
+	CHECK(nodes[0]->has_secret());
+	CHECK_FALSE(nodes[3]->has_secret());
+	for (int i = 1; i < 4; i++) {
+		CHECK(nodes[0]->add_node(i + 1, "127.0.0.1", base_port + i) == OK);
+		CHECK(nodes[i]->add_node(1, "127.0.0.1", base_port) == OK);
+	}
+
+	ERR_PRINT_OFF;
+	for (int t = 0; t < 2000 && !(nodes[0]->is_peer_connected(2) && nodes[1]->is_peer_connected(1)); t++) {
+		poll_mesh(nodes, 4, 1);
+	}
+	REQUIRE(nodes[0]->is_peer_connected(2));
+	REQUIRE(nodes[1]->is_peer_connected(1));
+	// Long enough for the other two to try several times.
+	poll_mesh(nodes, 4, 400);
+	CHECK_FALSE(nodes[0]->is_peer_connected(3));
+	CHECK_FALSE(nodes[0]->is_peer_connected(4));
+	CHECK_FALSE(nodes[2]->is_peer_connected(1));
+
+	// Node 4 asks for no proof, so it takes its link for a node's and sends on it: node 1 delivers nothing of it.
+	const uint8_t payload[3] = { 9, 9, 9 };
+	bool sent = false;
+	for (int t = 0; t < 1000 && !sent; t++) {
+		poll_mesh(nodes, 4, 1);
+		sent = nodes[3]->is_peer_connected(1) && nodes[3]->send(1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK;
+	}
+	CHECK(sent);
+	CHECK(nodes[1]->send(1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK);
+	int from_node_2 = 0;
+	int from_others = 0;
+	for (int t = 0; t < 300; t++) {
+		poll_mesh(nodes, 4, 1);
+		TickTransport::Packet packet;
+		while (nodes[0]->pop_packet(packet)) {
+			from_node_2 += packet.from_peer == 2 ? 1 : 0;
+			from_others += packet.from_peer != 2 ? 1 : 0;
+		}
+	}
+	ERR_PRINT_ON;
+	CHECK(from_node_2 == 1);
+	CHECK(from_others == 0);
+	LocalVector<int> connected;
+	nodes[0]->get_connected_peers(connected);
+	CHECK(connected.size() == 1);
 }
 
 } // namespace TestTickCluster

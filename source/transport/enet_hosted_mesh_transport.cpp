@@ -1,7 +1,13 @@
+// Implementation of `EnetHostedMeshTransport`: the constants and the control messages of its protocol; the host's side
+// (the joins and their admission, the introductions, the relay with its limits, the succession); the player's side (the
+// link with the host, the pairs and their NAT punching, with or without DTLS, and the migration when the host leaves);
+// and the queues the engines and the multiplayer peer consume.
+
 #include "enet_hosted_mesh_transport.h"
 
 #include "../common/tick_data_buffer.h"
 #include "../sync/tick_protocol.h"
+#include "enet_link.h"
 #include "tick_multiplayer_peer.h"
 
 #include "core/io/marshalls.h"
@@ -66,6 +72,13 @@ static constexpr uint64_t RELAY_GRACE_USEC = 1500000;
 
 // Largest join data a player sends.
 static constexpr int MAX_JOIN_DATA_BYTES = 4096;
+// A connection has this long to send its join data; the game then has `join_timeout` to decide on it.
+static constexpr uint64_t JOIN_DATA_TIMEOUT_USEC = 2000000;
+// Connections of one address that didn't send their join data yet. They hold no place of a player, but more of them
+// are refused as busy.
+static constexpr int MAX_UNSENT_JOINS_PER_ADDRESS = 2;
+// The highest id a player can have: nothing a host says makes the ids overflow.
+static constexpr int MAX_PEER_ID = 0x3FFFFFFF;
 // Joins an address can start at once, and how often it gets one more.
 static constexpr int JOIN_BURST = 5;
 static constexpr uint64_t JOIN_REFILL_USEC = 2000000;
@@ -97,14 +110,19 @@ enum HostedMeshControl {
 	CONTROL_HOST_PORTS,
 };
 
+// The `ENetConnection` behind a socket kept as `RefCounted`.
 static ENetConnection *as_socket(const Ref<RefCounted> &p_socket) {
 	return Object::cast_to<ENetConnection>(p_socket.ptr());
 }
 
+
+// The `ENetPacketPeer` behind a link kept as `RefCounted`.
 static ENetPacketPeer *as_link(const Ref<RefCounted> &p_link) {
 	return Object::cast_to<ENetPacketPeer>(p_link.ptr());
 }
 
+
+// ENet's packet flags for a transfer mode.
 static int flags_for_mode(TickTransport::TransferMode p_mode) {
 	if (p_mode == TickTransport::TRANSFER_MODE_RELIABLE) {
 		return ENET_PACKET_FLAG_RELIABLE;
@@ -115,6 +133,8 @@ static int flags_for_mode(TickTransport::TransferMode p_mode) {
 	return ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT;
 }
 
+
+// The transfer mode a received packet was sent with, from its ENet flags.
 static TickTransport::TransferMode mode_for_flags(int p_flags) {
 	if (p_flags & ENET_PACKET_FLAG_RELIABLE) {
 		return TickTransport::TRANSFER_MODE_RELIABLE;
@@ -125,21 +145,64 @@ static TickTransport::TransferMode mode_for_flags(int p_flags) {
 	return TickTransport::TRANSFER_MODE_UNRELIABLE_ORDERED;
 }
 
+
 // Flags a received packet is sent again with (the relay keeps the reliability and ordering of the original).
 static int resend_flags(int p_flags) {
 	return p_flags & (ENET_PACKET_FLAG_RELIABLE | ENET_PACKET_FLAG_UNSEQUENCED | ENET_PACKET_FLAG_UNRELIABLE_FRAGMENT);
+}
+
+
+// Whether `p_id` can be the id of a player.
+static bool is_player_id(int p_id) {
+	return p_id > 0 && p_id <= MAX_PEER_ID;
+}
+
+
+// Whether a direct link can go to this address: the address of one host, not a group's, the wildcard, or a name.
+static bool is_unicast_address(const String &p_address) {
+	if (!p_address.is_valid_ip_address()) {
+		return false;
+	}
+	const IPAddress address(p_address);
+	if (!address.is_valid() || address.is_wildcard()) {
+		return false;
+	}
+	if (address.is_ipv4()) {
+		// Not "this network" (0), multicast (224 to 239) nor the reserved and broadcast ones above.
+		const uint8_t first = address.get_ipv4()[0];
+		return first != 0 && first < 224;
+	}
+	// Not multicast.
+	return address.get_ipv6()[0] != 0xFF;
+}
+
+
+// ENet calls this when it's done with a relayed packet (sent, acknowledged, or dropped with its link): the bytes the
+// relay holds for the packet's target go down. `userData` is the target's `RelayQueue`.
+static void relay_packet_done(ENetPacket *p_packet) {
+	uint64_t *held = static_cast<uint64_t *>(p_packet->userData);
+	if (held) {
+		*held -= MIN(*held, uint64_t(p_packet->dataLength));
+	}
 }
 
 // Control messages: a type byte, then little-endian fields.
 struct HostedMeshWriter {
 	LocalVector<uint8_t> bytes;
 
+	// Starts a message of the given type.
 	explicit HostedMeshWriter(HostedMeshControl p_type) { bytes.push_back(uint8_t(p_type)); }
+
+
+	// Appends a 32-bit integer.
 	void put_u32(uint32_t p_value) {
 		const uint32_t offset = bytes.size();
 		bytes.resize(offset + 4);
 		encode_uint32(p_value, bytes.ptr() + offset);
 	}
+
+
+	// Appends a string as UTF-8, after its length in bytes.
 	void put_string(const String &p_value) {
 		const CharString utf8 = p_value.utf8();
 		put_u32(uint32_t(utf8.length()));
@@ -147,6 +210,9 @@ struct HostedMeshWriter {
 			bytes.push_back(uint8_t(utf8[i]));
 		}
 	}
+
+
+	// Appends bytes, after their count.
 	void put_bytes(const PackedByteArray &p_value) {
 		put_u32(uint32_t(p_value.size()));
 		for (int i = 0; i < p_value.size(); i++) {
@@ -155,14 +221,19 @@ struct HostedMeshWriter {
 	}
 };
 
+// Reads a control message. A read past the end, or of something malformed, sets `failed` and returns a default value.
 struct HostedMeshReader {
 	const uint8_t *data = nullptr;
 	int size = 0;
 	int offset = 0;
 	bool failed = false;
 
+	// Reads from the `p_size` bytes at `p_data`.
 	HostedMeshReader(const uint8_t *p_data, int p_size) :
 			data(p_data), size(p_size) {}
+
+
+	// Reads a byte.
 	uint8_t get_u8() {
 		if (offset + 1 > size) {
 			failed = true;
@@ -170,6 +241,9 @@ struct HostedMeshReader {
 		}
 		return data[offset++];
 	}
+
+
+	// Reads a 32-bit integer.
 	uint32_t get_u32() {
 		if (offset + 4 > size) {
 			failed = true;
@@ -179,6 +253,9 @@ struct HostedMeshReader {
 		offset += 4;
 		return value;
 	}
+
+
+	// Reads a string: at most 16384 bytes of well-formed UTF-8.
 	String get_string() {
 		const uint32_t length = get_u32();
 		// Addresses, and certificates (PEM) with DTLS. Checked before decoding: the engine's decoder would print an
@@ -191,6 +268,9 @@ struct HostedMeshReader {
 		offset += int(length);
 		return value;
 	}
+
+
+	// Reads at most `p_max_length` bytes.
 	PackedByteArray get_bytes(int p_max_length) {
 		const uint32_t length = get_u32();
 		if (failed || length > uint32_t(p_max_length) || offset + int(length) > size) {
@@ -207,6 +287,7 @@ struct HostedMeshReader {
 	}
 };
 
+// What the worker thread generates for a player: the key and the certificate of the direct links it accepts.
 struct EnetHostedMeshTransport::PlayerKeyJob {
 	Ref<CryptoKey> key;
 	Ref<X509Certificate> certificate;
@@ -225,8 +306,12 @@ void EnetHostedMeshTransport::generate_player_key(void *p_job) {
 	}
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Creation
 
+// Hosts a mesh on `p_port`: this node is player 1, and the others join through it.
+// With `p_tls_options` (`TLSOptions.server()`), the links are encrypted, and the pairs register on
+// `p_rendezvous_port` (the next port by default), which must be reachable too.
 Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_host(int p_port, int p_max_players, const String &p_bind_address, Compression p_compression, const Ref<TLSOptions> &p_tls_options, int p_rendezvous_port) {
 	ERR_FAIL_COND_V_MSG(p_max_players < 2 || p_max_players > 1024, Ref<EnetHostedMeshTransport>(), "The number of players must be between 2 and 1024.");
 	Ref<ENetConnection> socket;
@@ -263,6 +348,10 @@ Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_host(int p_port, in
 	return transport;
 }
 
+
+// Joins the mesh hosted at `p_address`; the host gives this node its id. With `p_tls_options` (`TLSOptions.client()`
+// or `client_unsafe()`), the host must use DTLS too.
+// `p_join_data` goes to the host's `join_validator` (a password or a token, for example; encrypted only with DTLS).
 Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_player(const String &p_address, int p_port, Compression p_compression, const Ref<TLSOptions> &p_tls_options, const String &p_tls_hostname, const PackedByteArray &p_join_data) {
 	ERR_FAIL_COND_V_MSG(p_join_data.size() > MAX_JOIN_DATA_BYTES, Ref<EnetHostedMeshTransport>(), vformat("The join data can't be bigger than %d bytes.", MAX_JOIN_DATA_BYTES));
 	Ref<ENetConnection> socket;
@@ -298,20 +387,28 @@ Ref<EnetHostedMeshTransport> EnetHostedMeshTransport::create_player(const String
 	return transport;
 }
 
+
+// Closes every connection.
 EnetHostedMeshTransport::~EnetHostedMeshTransport() {
 	close();
 }
 
+
+// Closes every connection. On the host, the mesh ends for every player.
 void EnetHostedMeshTransport::close() {
 	close_links(DISCONNECT_ENDED);
 }
 
+
+// Host: leaves the mesh, and the next player of the succession takes its place (`close()` ends the mesh).
 Error EnetHostedMeshTransport::hand_over() {
 	ERR_FAIL_COND_V_MSG(!is_host || status != STATUS_CONNECTED, ERR_UNCONFIGURED, "Only the host of a mesh can hand it over.");
 	close_links(DISCONNECT_HANDOVER);
 	return OK;
 }
 
+
+// Closes every link: the members get `p_member_reason` as the reason.
 void EnetHostedMeshTransport::close_links(int p_member_reason) {
 	if (status != STATUS_DISCONNECTED) {
 		disconnect_reason = DISCONNECT_REASON_CLOSED;
@@ -378,28 +475,39 @@ void EnetHostedMeshTransport::close_links(int p_member_reason) {
 	}
 	rendezvous.unref();
 	member_certificates.clear();
+	host_clear_relay();
 	status = STATUS_DISCONNECTED;
 }
 
+
+// The key of a pair of players in the maps: the same whatever the order of the two ids.
 uint64_t EnetHostedMeshTransport::make_pair_key(int p_a, int p_b) {
 	return (uint64_t(uint32_t(MIN(p_a, p_b))) << 32) | uint64_t(uint32_t(MAX(p_a, p_b)));
 }
 
+
+// A random token nobody can guess, never 0 nor the connection data of a join; 0 when the system gives no random
+// bytes.
 uint32_t EnetHostedMeshTransport::make_token() {
 	// Unpredictable: whoever knows a token can take the place of a player in a pair. Never a join, of any version.
-	uint32_t token = 0;
-	while (token == 0 || (token & 0xFFFFFF00) == JOIN_MAGIC_PREFIX) {
+	// 0 when the system gives no random bytes: a token that can be guessed is worse than none.
+	for (int attempt = 0; attempt < 64; attempt++) {
 		uint8_t bytes[4] = {};
 		if (OS::get_singleton()->get_entropy(bytes, 4) != OK) {
-			bytes[0] = uint8_t(OS::get_singleton()->get_ticks_usec());
+			return 0;
 		}
-		token = decode_uint32(bytes);
+		const uint32_t token = decode_uint32(bytes);
+		if (token != 0 && (token & 0xFFFFFF00) != JOIN_MAGIC_PREFIX) {
+			return token;
+		}
 	}
-	return token;
+	return 0;
 }
+
 
 // ------------------------------------------------------------------------------------------------------ Common
 
+// Queues an event for the engines and, when there is one, for the multiplayer peer.
 void EnetHostedMeshTransport::push_event(EventType p_type, int p_peer) {
 	Event event;
 	event.type = p_type;
@@ -410,6 +518,8 @@ void EnetHostedMeshTransport::push_event(EventType p_type, int p_peer) {
 	}
 }
 
+
+// Hands a packet of logical channel `p_logical` to the engines or to the multiplayer peer.
 void EnetHostedMeshTransport::deliver(int p_from, int p_logical, int p_flags, const uint8_t *p_data, int p_size) {
 	if (p_logical < 0 || p_logical >= LOGICAL_CHANNEL_COUNT) {
 		return;
@@ -452,6 +562,8 @@ void EnetHostedMeshTransport::deliver(int p_from, int p_logical, int p_flags, co
 	multiplayer_packets.push_back(packet);
 }
 
+
+// Sends bytes on an ENet link and channel, with ENet's flags; fails when the link isn't active.
 Error EnetHostedMeshTransport::send_on_link(const Ref<RefCounted> &p_link, int p_channel, int p_flags, const uint8_t *p_data, int p_size) {
 	ENetPacketPeer *link = as_link(p_link);
 	// A link ENet already reset (its disconnection is on the way, when several players leave at once) has no channels.
@@ -467,10 +579,15 @@ Error EnetHostedMeshTransport::send_on_link(const Ref<RefCounted> &p_link, int p
 	return OK;
 }
 
+
+// Sends a control message on a link: reliable, on the control channel.
 void EnetHostedMeshTransport::send_control(const Ref<RefCounted> &p_link, const LocalVector<uint8_t> &p_message) {
 	send_on_link(p_link, CHANNEL_CONTROL, ENET_PACKET_FLAG_RELIABLE, p_message.ptr(), int(p_message.size()));
 }
 
+
+// Sends a packet of logical channel `p_logical` to a peer, or to every connected one: on the host link, on the
+// pair's direct link, or through the host's relay.
 Error EnetHostedMeshTransport::send_logical(int p_peer, int p_logical, int p_flags, const uint8_t *p_data, int p_size) {
 	if (p_peer == PEER_BROADCAST) {
 		LocalVector<int> connected;
@@ -504,12 +621,16 @@ Error EnetHostedMeshTransport::send_logical(int p_peer, int p_logical, int p_fla
 	return send_on_link(host_link, FIRST_RELAY_CHANNEL + p_logical, p_flags, relayed.ptr(), int(relayed.size()));
 }
 
+
+// `TickTransport`: sends bytes to a peer, or to every connected peer.
 Error EnetHostedMeshTransport::send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
 	ERR_FAIL_INDEX_V(p_channel, TICK_CHANNEL_COUNT, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_size <= 0 || p_data == nullptr, ERR_INVALID_PARAMETER);
 	return send_logical(p_peer, p_channel, flags_for_mode(p_mode), p_data, p_size);
 }
 
+
+// `TickTransport`: whether the engines were told the peer is connected, directly or relayed.
 bool EnetHostedMeshTransport::is_peer_connected(int p_peer) const {
 	if (is_host) {
 		return members.has(p_peer);
@@ -521,6 +642,8 @@ bool EnetHostedMeshTransport::is_peer_connected(int p_peer) const {
 	return pair && pair->reported;
 }
 
+
+// `TickTransport`: the connected peers, in order.
 void EnetHostedMeshTransport::get_connected_peers(LocalVector<int> &r_peers) const {
 	r_peers.clear();
 	if (is_host) {
@@ -538,6 +661,8 @@ void EnetHostedMeshTransport::get_connected_peers(LocalVector<int> &r_peers) con
 	r_peers.sort();
 }
 
+
+// The ids of the connected peers, in order.
 PackedInt32Array EnetHostedMeshTransport::get_peers() const {
 	LocalVector<int> connected;
 	get_connected_peers(connected);
@@ -548,6 +673,8 @@ PackedInt32Array EnetHostedMeshTransport::get_peers() const {
 	return result;
 }
 
+
+// How this node reaches `p_peer`: through the host link, directly, relayed, or not yet.
 EnetHostedMeshTransport::PeerPath EnetHostedMeshTransport::get_peer_path(int p_peer) const {
 	if (is_host) {
 		return members.has(p_peer) ? PATH_HOST : PATH_NONE;
@@ -565,14 +692,21 @@ EnetHostedMeshTransport::PeerPath EnetHostedMeshTransport::get_peer_path(int p_p
 	return pair->state == PAIR_DIRECT ? PATH_DIRECT : PATH_RELAYED;
 }
 
+
+// `TickTransport`: the engines' channels.
 int EnetHostedMeshTransport::get_channel_count() const {
 	return TICK_CHANNEL_COUNT;
 }
 
+
+// `TickTransport`: the largest payload that fits a datagram, also when relayed; smaller with DTLS.
 int EnetHostedMeshTransport::get_max_payload_size() const {
 	return HOSTED_MESH_MAX_PAYLOAD - (encrypted ? DTLS_OVERHEAD : 0);
 }
 
+
+// `TickTransport`: on the host, removes a player from the mesh; on a player, leaves the host (the only peer a
+// player disconnects from).
 void EnetHostedMeshTransport::disconnect_peer(int p_peer) {
 	if (is_host) {
 		const Ref<RefCounted> *member = members.getptr(p_peer);
@@ -586,20 +720,32 @@ void EnetHostedMeshTransport::disconnect_peer(int p_peer) {
 	ERR_FAIL_COND_MSG(p_peer != host_id, "A player can only disconnect from the host; the host disconnects players.");
 	ENetPacketPeer *link = as_link(host_link);
 	if (link && link->is_active()) {
+		if (link->get_state() != ENetPacketPeer::STATE_CONNECTED) {
+			// Still connecting: ENet drops such a link without ever reporting it, so the mesh ends here for this player.
+			player_lost_host(DISCONNECT_REASON_CLOSED);
+			return;
+		}
 		leaving = true;
 		link->peer_disconnect();
 	}
 }
 
+
+// Seconds to establish a direct link between two players before relaying them.
 void EnetHostedMeshTransport::set_punch_timeout(double p_seconds) {
 	ERR_FAIL_COND_MSG(!(p_seconds > 0.0), "The punch timeout must be positive.");
 	punch_timeout = p_seconds;
 }
 
+
+// When `false`, this player never tries direct links: every other player is relayed by the host.
 void EnetHostedMeshTransport::set_direct_connections(bool p_enabled) {
 	direct_connections = p_enabled;
 }
 
+
+// Counters for debugging: direct and relayed pairs, relayed and dropped packets, refused connections, failed
+// punches.
 Dictionary EnetHostedMeshTransport::get_stats() const {
 	Dictionary result;
 	int direct = 0;
@@ -616,12 +762,15 @@ Dictionary EnetHostedMeshTransport::get_stats() const {
 	result["direct_pairs"] = direct;
 	result["relayed_pairs"] = relayed;
 	result["relayed_packets"] = relayed_packets;
+	result["relay_dropped_packets"] = relay_dropped_packets;
 	result["rejected_connections"] = rejected_connections;
 	result["failed_punches"] = failed_punches;
 	result["dropped_packets"] = dropped_packets;
 	return result;
 }
 
+
+// `TickTransport`: services the sockets of the host, or of the player.
 void EnetHostedMeshTransport::poll() {
 	if (is_host) {
 		host_poll();
@@ -630,6 +779,8 @@ void EnetHostedMeshTransport::poll() {
 	}
 }
 
+
+// `TickTransport`: the next connection, disconnection or host migration, if any.
 bool EnetHostedMeshTransport::pop_event(Event &r_event) {
 	if (next_event >= events.size()) {
 		events.clear();
@@ -640,6 +791,8 @@ bool EnetHostedMeshTransport::pop_event(Event &r_event) {
 	return true;
 }
 
+
+// `TickTransport`: the next packet received, if any.
 bool EnetHostedMeshTransport::pop_packet(Packet &r_packet) {
 	if (next_packet >= packets.size()) {
 		packets.clear();
@@ -652,8 +805,11 @@ bool EnetHostedMeshTransport::pop_packet(Packet &r_packet) {
 	return true;
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Host
 
+// Host: services its sockets, lets the game decide on the joins, refuses the late ones, sends the heartbeat and
+// relays the pairs that didn't register in time.
 void EnetHostedMeshTransport::host_poll() {
 	if (listener.is_valid()) {
 		host_service(listener, 0);
@@ -684,7 +840,7 @@ void EnetHostedMeshTransport::host_poll() {
 	}
 	for (const ObjectID link : late) {
 		rejected_connections++;
-		host_refuse(link);
+		host_refuse(link, DISCONNECT_REMOVED);
 	}
 	if (now >= next_heartbeat_usec) {
 		next_heartbeat_usec = now + HEARTBEAT_INTERVAL_USEC;
@@ -728,6 +884,9 @@ void EnetHostedMeshTransport::host_poll() {
 	}
 }
 
+
+// Host: takes the events of one of its sockets. `p_kind`: 0 the main socket, 1 the rendezvous one, 2 a member's own
+// socket (after a migration).
 void EnetHostedMeshTransport::host_service(const Ref<RefCounted> &p_socket, int p_kind) {
 	ENetConnection *socket = as_socket(p_socket);
 	// Bounded, so a flood can't stall the frame.
@@ -758,6 +917,8 @@ void EnetHostedMeshTransport::host_service(const Ref<RefCounted> &p_socket, int 
 	}
 }
 
+
+// Host: takes one join from the budget of an address; `false` when the address started too many.
 bool EnetHostedMeshTransport::host_take_join_budget(const String &p_address) {
 	const uint64_t now = OS::get_singleton()->get_ticks_usec();
 	JoinBudget *budget = join_budgets.getptr(p_address);
@@ -776,6 +937,8 @@ bool EnetHostedMeshTransport::host_take_join_budget(const String &p_address) {
 	return true;
 }
 
+
+// Host: the join data of a connection arrived: from now on it holds a place, and the game decides on it.
 void EnetHostedMeshTransport::host_on_join(ObjectID p_link, const uint8_t *p_data, int p_size) {
 	PendingJoin *pending = pending_joins.getptr(p_link);
 	HostedMeshReader reader(p_data, p_size);
@@ -785,14 +948,38 @@ void EnetHostedMeshTransport::host_on_join(ObjectID p_link, const uint8_t *p_dat
 	const PackedByteArray data = reader.get_bytes(MAX_JOIN_DATA_BYTES);
 	if (reader.failed) {
 		rejected_connections++;
-		host_refuse(p_link);
+		host_refuse(p_link, DISCONNECT_REMOVED);
+		return;
+	}
+	if (!host_has_place(p_link)) {
+		// The places were taken while this connection was getting to its join data.
+		rejected_connections++;
+		host_refuse(p_link, DISCONNECT_FULL);
 		return;
 	}
 	pending->received = true;
 	pending->data = data;
+	// From now on it holds a place, and the game has `join_timeout` to decide.
+	pending->deadline_usec = OS::get_singleton()->get_ticks_usec() + uint64_t(join_timeout * 1000000.0);
 	joins_to_validate.push_back(p_link);
 }
 
+
+// Whether the mesh has a place for one more player: the players in it and the ones the game is still deciding on
+// (their join data arrived) count; `p_except` is the connection asking.
+bool EnetHostedMeshTransport::host_has_place(ObjectID p_except) const {
+	int waiting = 0;
+	for (const KeyValue<ObjectID, PendingJoin> &E : pending_joins) {
+		if (E.value.received && E.key != p_except) {
+			waiting++;
+		}
+	}
+	return int(members.size()) + waiting < max_players - 1;
+}
+
+
+// Host: calls the game's validator for the joins whose data arrived in this poll, and admits or refuses them by its
+// answer.
 void EnetHostedMeshTransport::host_validate_joins() {
 	LocalVector<ObjectID> joins;
 	joins = joins_to_validate;
@@ -816,11 +1003,14 @@ void EnetHostedMeshTransport::host_validate_joins() {
 			host_admit(link);
 		} else {
 			rejected_connections++;
-			host_refuse(link);
+			host_refuse(link, DISCONNECT_REMOVED);
 		}
 	}
 }
 
+
+// Host: makes a pending join a member: welcomes it, reports it to the engines, introduces it to every other member
+// and sends the new succession.
 void EnetHostedMeshTransport::host_admit(ObjectID p_link) {
 	PendingJoin *pending = pending_joins.getptr(p_link);
 	ERR_FAIL_NULL(pending);
@@ -847,17 +1037,22 @@ void EnetHostedMeshTransport::host_admit(ObjectID p_link) {
 	host_send_succession();
 }
 
-void EnetHostedMeshTransport::host_refuse(ObjectID p_link) {
+
+// Host: refuses a pending join and closes its link. `p_reason` is the disconnection data the player gets (why it
+// was refused).
+void EnetHostedMeshTransport::host_refuse(ObjectID p_link, int p_reason) {
 	PendingJoin *pending = pending_joins.getptr(p_link);
 	ERR_FAIL_NULL(pending);
 	ENetPacketPeer *link = as_link(pending->link);
 	if (link && link->is_active()) {
-		// Right away, so the connection doesn't hold a place of the host.
-		link->peer_disconnect_now(DISCONNECT_REMOVED);
+		// It doesn't count as a player anymore; its link closes once it acknowledges it (see `enet_close_link()`).
+		enet_close_link(link, p_reason);
 	}
 	pending_joins.erase(p_link);
 }
 
+
+// Host: admits a player whose join data arrived and that the validator left waiting.
 Error EnetHostedMeshTransport::admit_player(int p_peer) {
 	ERR_FAIL_COND_V_MSG(!is_host, ERR_UNCONFIGURED, "Only the host admits players.");
 	ObjectID found;
@@ -871,6 +1066,8 @@ Error EnetHostedMeshTransport::admit_player(int p_peer) {
 	return OK;
 }
 
+
+// Host: refuses a player that is waiting to join.
 Error EnetHostedMeshTransport::refuse_player(int p_peer) {
 	ERR_FAIL_COND_V_MSG(!is_host, ERR_UNCONFIGURED, "Only the host refuses players.");
 	ObjectID found;
@@ -881,10 +1078,13 @@ Error EnetHostedMeshTransport::refuse_player(int p_peer) {
 	}
 	ERR_FAIL_COND_V_MSG(found.is_null(), ERR_INVALID_PARAMETER, vformat("Player %d isn't waiting to join.", p_peer));
 	rejected_connections++;
-	host_refuse(found);
+	host_refuse(found, DISCONNECT_REMOVED);
 	return OK;
 }
 
+
+// Host: tells every member the order in which the players take over when the host leaves: the ones without relayed
+// pairs first, then by id.
 void EnetHostedMeshTransport::host_send_succession() {
 	// Players without relayed pairs first (they reach everyone directly), then by id.
 	LocalVector<int> ids;
@@ -916,14 +1116,17 @@ void EnetHostedMeshTransport::host_send_succession() {
 	}
 }
 
+
+// Host: a connection arrived: a join (checked against the version, the places left and the budget of its address),
+// or the registration of a pair's socket, by its token.
 void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data, int p_kind) {
 	ENetPacketPeer *link = as_link(p_link);
 	ERR_FAIL_NULL(link);
-	// Refused connections are closed right away, so they don't hold places of the host.
+	// Refused connections are closed at once (see `enet_close_link()`): they never count as players.
 	if (p_kind == 2) {
 		// A member's own socket (after a migration) takes no new connections.
 		rejected_connections++;
-		link->peer_disconnect_now();
+		enet_close_link(link);
 		return;
 	}
 	if ((p_data & 0xFFFFFF00) == JOIN_MAGIC_PREFIX) {
@@ -931,38 +1134,52 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 		// the budget of their address; the players still joining count toward the limit. The refused ones learn why.
 		// Nobody learns about a joining player until it's admitted: its join data comes first.
 		const String address = String(link->get_remote_address());
+		// A connection holds a place only once its join data arrived (ADR-077): until then it's one of a few its
+		// address may have, for a short time, so connections that say nothing can't fill the mesh.
+		int unsent = 0;
+		int unsent_here = 0;
+		for (const KeyValue<ObjectID, PendingJoin> &E : pending_joins) {
+			if (!E.value.received) {
+				unsent++;
+				unsent_here += E.value.address == address ? 1 : 0;
+			}
+		}
 		int refusal = 0;
 		if (p_data != JOIN_MAGIC) {
 			refusal = DISCONNECT_VERSION_PREFIX | int(JOIN_MAGIC & 0xFF);
 		} else if (p_kind == 1) {
 			refusal = DISCONNECT_REMOVED;
-		} else if (int(members.size() + pending_joins.size()) >= max_players - 1) {
+		} else if (!host_has_place(ObjectID()) || next_player_id > MAX_PEER_ID) {
 			refusal = DISCONNECT_FULL;
+		} else if (unsent_here >= MAX_UNSENT_JOINS_PER_ADDRESS || unsent >= max_players) {
+			refusal = DISCONNECT_BUSY;
 		} else if (!host_take_join_budget(address)) {
 			refusal = DISCONNECT_BUSY;
 		}
 		if (refusal != 0) {
 			rejected_connections++;
-			link->peer_disconnect_now(refusal);
+			enet_close_link(link, refusal);
 			return;
 		}
 		PendingJoin pending;
 		pending.id = next_player_id++;
 		pending.link = p_link;
 		pending.address = address;
-		pending.deadline_usec = OS::get_singleton()->get_ticks_usec() + uint64_t(join_timeout * 1000000.0);
+		pending.deadline_usec = OS::get_singleton()->get_ticks_usec() + JOIN_DATA_TIMEOUT_USEC;
 		pending_joins.insert(p_link->get_instance_id(), pending);
 		return;
 	}
 
 	// The registration of a pair's socket: its public endpoint is where the connection came from.
-	const uint64_t *key = introductions_by_token.getptr(p_data);
-	Introduction *introduction = key ? introductions.getptr(*key) : nullptr;
+	const uint64_t *found = introductions_by_token.getptr(p_data);
+	Introduction *introduction = found ? introductions.getptr(*found) : nullptr;
 	if (introduction == nullptr || introduction->relayed) {
 		rejected_connections++;
-		link->peer_disconnect_now();
+		enet_close_link(link);
 		return;
 	}
+	// A copy: the token's entry is erased below.
+	const uint64_t key = *found;
 	const int side = introduction->registration_tokens[0] == p_data ? 0 : 1;
 	introduction->registered[side] = true;
 	introduction->addresses[side] = String(link->get_remote_address());
@@ -971,9 +1188,11 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 	// Closed gracefully, so the player's socket is free to connect to the other player.
 	link->peer_disconnect();
 
-	host_try_punch(*key);
+	host_try_punch(key);
 }
 
+
+// Sends both players their partner's endpoint once both registered (and, with DTLS, the certificate is known).
 void EnetHostedMeshTransport::host_try_punch(uint64_t p_key) {
 	Introduction *introduction = introductions.getptr(p_key);
 	if (introduction == nullptr || introduction->punching || introduction->relayed || !introduction->registered[0] || !introduction->registered[1]) {
@@ -1002,6 +1221,9 @@ void EnetHostedMeshTransport::host_try_punch(uint64_t p_key) {
 	}
 }
 
+
+// Host: a link closed: a pending join is forgotten; a member is removed and reported, and the other members are
+// told.
 void EnetHostedMeshTransport::host_on_disconnect(const Ref<RefCounted> &p_link) {
 	if (pending_joins.erase(p_link->get_instance_id())) {
 		// Left before being admitted: nobody knew about it.
@@ -1016,6 +1238,13 @@ void EnetHostedMeshTransport::host_on_disconnect(const Ref<RefCounted> &p_link) 
 	members_by_link.erase(p_link->get_instance_id());
 	members.erase(id);
 	member_certificates.erase(id);
+	// ENet reset the link before reporting it closed: no relayed packet points to the member's queue anymore.
+	RelayQueue **queue = relay_queues.getptr(id);
+	if (queue) {
+		memdelete(*queue);
+		relay_queues.erase(id);
+	}
+	relay_budgets.erase(id);
 	Ref<RefCounted> *member_socket = member_sockets.getptr(id);
 	if (member_socket) {
 		// Destroyed once its events are serviced.
@@ -1042,6 +1271,9 @@ void EnetHostedMeshTransport::host_on_disconnect(const Ref<RefCounted> &p_link) 
 	host_send_succession();
 }
 
+
+// Host: a member sent a packet: a control message, a packet for the host's engines, or one to relay to another
+// member, within the relay's limits.
 void EnetHostedMeshTransport::host_on_receive(int p_from, int p_channel, const uint8_t *p_data, int p_size, int p_flags) {
 	if (p_channel == CHANNEL_CONTROL) {
 		HostedMeshReader reader(p_data, p_size);
@@ -1104,15 +1336,100 @@ void EnetHostedMeshTransport::host_on_receive(int p_from, int p_channel, const u
 	if (target == p_from || target_link == nullptr || (introduction && !introduction->relayed)) {
 		return;
 	}
-	LocalVector<uint8_t> forwarded;
-	forwarded.resize(p_size);
-	encode_uint32(uint32_t(p_from), forwarded.ptr());
-	memcpy(forwarded.ptr() + RELAY_HEADER_SIZE, p_data + RELAY_HEADER_SIZE, p_size - RELAY_HEADER_SIZE);
-	if (send_on_link(*target_link, p_channel, resend_flags(p_flags), forwarded.ptr(), int(forwarded.size())) == OK) {
-		relayed_packets++;
+	ENetPacketPeer *link = as_link(*target_link);
+	if (link == nullptr || !link->is_active() || p_channel >= link->get_channels()) {
+		return;
+	}
+	// The relay spends the host's bandwidth and memory on what other players send (ADR-077). A player has a budget
+	// of bytes, and the host holds so much for a player that takes them slower than they come. Beyond either,
+	// unreliable packets are dropped; a reliable one can't just go missing, so the player at fault is removed: the
+	// one that sent too much, or the one that can't take what is sent to it.
+	const bool reliable = (p_flags & ENET_PACKET_FLAG_RELIABLE) != 0;
+	if (!host_take_relay_budget(p_from, p_size)) {
+		relay_dropped_packets++;
+		if (reliable) {
+			host_remove_member(p_from);
+		}
+		return;
+	}
+	RelayQueue **found = relay_queues.getptr(target);
+	RelayQueue *queue = found ? *found : nullptr;
+	if (queue == nullptr) {
+		queue = memnew(RelayQueue);
+		relay_queues.insert(target, queue);
+	}
+	if (relay_queue_limit > 0 && queue->bytes + uint64_t(p_size) > uint64_t(relay_queue_limit)) {
+		relay_dropped_packets++;
+		if (reliable) {
+			host_remove_member(target);
+		}
+		return;
+	}
+	ENetPacket *packet = enet_packet_create(nullptr, p_size, resend_flags(p_flags));
+	ERR_FAIL_NULL(packet);
+	encode_uint32(uint32_t(p_from), packet->data);
+	memcpy(packet->data + RELAY_HEADER_SIZE, p_data + RELAY_HEADER_SIZE, p_size - RELAY_HEADER_SIZE);
+	// ENet tells when it's done with the packet: until then its bytes count as held for the target.
+	packet->userData = &queue->bytes;
+	packet->freeCallback = &relay_packet_done;
+	queue->bytes += uint64_t(p_size);
+	if (link->send(uint8_t(p_channel), packet) < 0) {
+		enet_packet_destroy(packet);
+		return;
+	}
+	relayed_packets++;
+}
+
+
+// Removes a member the relay can't serve. It learns it was removed, and its link is gone within a second even if it
+// doesn't answer (see `enet_close_link()`): a member that takes nothing wouldn't acknowledge a plain disconnection.
+void EnetHostedMeshTransport::host_remove_member(int p_member) {
+	const Ref<RefCounted> *member = members.getptr(p_member);
+	ENetPacketPeer *link = member ? as_link(*member) : nullptr;
+	if (link && link->is_active()) {
+		enet_close_link(link, DISCONNECT_REMOVED);
 	}
 }
 
+
+// Takes `p_bytes` of the relay budget of a player: `relay_rate_limit` bytes come back every second, up to twice
+// that. `false` when the player doesn't have them.
+bool EnetHostedMeshTransport::host_take_relay_budget(int p_player, int p_bytes) {
+	if (relay_rate_limit <= 0) {
+		return true;
+	}
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
+	const double burst = double(relay_rate_limit) * 2.0;
+	RelayBudget *budget = relay_budgets.getptr(p_player);
+	if (budget == nullptr) {
+		RelayBudget fresh;
+		fresh.bytes = burst;
+		fresh.last_usec = now;
+		budget = &relay_budgets.insert(p_player, fresh)->value;
+	}
+	budget->bytes = MIN(burst, budget->bytes + double(now - budget->last_usec) * double(relay_rate_limit) / 1000000.0);
+	budget->last_usec = now;
+	if (budget->bytes < double(p_bytes)) {
+		return false;
+	}
+	budget->bytes -= double(p_bytes);
+	return true;
+}
+
+
+// Frees what the relay kept about the players. Only once their sockets are closed: until then ENet may still hold
+// relayed packets, which point to the queues.
+void EnetHostedMeshTransport::host_clear_relay() {
+	for (KeyValue<int, RelayQueue *> &E : relay_queues) {
+		memdelete(E.value);
+	}
+	relay_queues.clear();
+	relay_budgets.clear();
+}
+
+
+// Host that took over: a player that followed it says which players it reaches directly; its other pairs are
+// relayed here.
 void EnetHostedMeshTransport::host_handle_rejoin(int p_from, const LocalVector<int> &p_direct) {
 	// A player that followed this node after a migration: the players it reaches directly. The other pairs with it
 	// are relayed here.
@@ -1152,6 +1469,8 @@ void EnetHostedMeshTransport::host_handle_rejoin(int p_from, const LocalVector<i
 	host_send_succession();
 }
 
+
+// A player that took over opens its `takeover_port`, if it has one.
 void EnetHostedMeshTransport::host_open_takeover_sockets() {
 	if (takeover_port <= 0) {
 		return;
@@ -1179,21 +1498,33 @@ void EnetHostedMeshTransport::host_open_takeover_sockets() {
 	listener = socket;
 }
 
+
+// Host: starts introducing two members: each gets a token to register the endpoint of its socket with. Without
+// random bytes for the tokens, the pair is relayed.
 void EnetHostedMeshTransport::host_introduce(int p_first, int p_second) {
 	Introduction introduction;
 	introduction.first = MIN(p_first, p_second);
 	introduction.second = MAX(p_first, p_second);
+	bool has_tokens = true;
 	for (int i = 0; i < 2; i++) {
 		uint32_t token = make_token();
-		while (introductions_by_token.has(token)) {
+		for (int attempt = 0; attempt < 16 && token != 0 && (introductions_by_token.has(token) || (i == 1 && token == introduction.registration_tokens[0])); attempt++) {
 			token = make_token();
 		}
+		has_tokens = has_tokens && token != 0 && !introductions_by_token.has(token) && !(i == 1 && token == introduction.registration_tokens[0]);
 		introduction.registration_tokens[i] = token;
 	}
 	introduction.connect_token = make_token();
+	has_tokens = has_tokens && introduction.connect_token != 0;
 	introduction.deadline_usec = OS::get_singleton()->get_ticks_usec() + uint64_t(punch_timeout * 1000000.0);
 	const uint64_t key = make_pair_key(p_first, p_second);
 	introductions.insert(key, introduction);
+	if (!has_tokens) {
+		// Without tokens nobody can guess, anybody could take a player's place in the pair: the host relays it.
+		ERR_PRINT_ONCE("The system gave no random bytes: the players of the mesh are relayed by the host instead of connecting directly.");
+		host_relay_pair(key);
+		return;
+	}
 	introductions_by_token.insert(introduction.registration_tokens[0], key);
 	introductions_by_token.insert(introduction.registration_tokens[1], key);
 
@@ -1210,6 +1541,8 @@ void EnetHostedMeshTransport::host_introduce(int p_first, int p_second) {
 	}
 }
 
+
+// Host: gives up the direct link of a pair: both players are told to reach each other through the relay.
 void EnetHostedMeshTransport::host_relay_pair(uint64_t p_key) {
 	Introduction *introduction = introductions.getptr(p_key);
 	if (introduction == nullptr || introduction->relayed) {
@@ -1232,6 +1565,8 @@ void EnetHostedMeshTransport::host_relay_pair(uint64_t p_key) {
 	}
 }
 
+
+// Host: forgets a pair and its tokens, when one of its players left.
 void EnetHostedMeshTransport::host_forget_introduction(uint64_t p_key) {
 	Introduction *introduction = introductions.getptr(p_key);
 	if (introduction == nullptr) {
@@ -1243,8 +1578,11 @@ void EnetHostedMeshTransport::host_forget_introduction(uint64_t p_key) {
 	introductions.erase(p_key);
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Player
 
+// Player: services the host's socket and every pair's, checks the confirmation of a lost host, and flushes what was
+// sent.
 void EnetHostedMeshTransport::player_poll() {
 	player_finish_key_job();
 	player_service_host();
@@ -1279,6 +1617,9 @@ void EnetHostedMeshTransport::player_poll() {
 	}
 }
 
+
+// Player: takes the events of the host's socket: the connection (then it asks to join), control messages, packets
+// from the host and packets relayed by it.
 void EnetHostedMeshTransport::player_service_host() {
 	ENetConnection *socket = as_socket(host_socket);
 	if (socket == nullptr) {
@@ -1326,6 +1667,8 @@ void EnetHostedMeshTransport::player_service_host() {
 	}
 }
 
+
+// Player: handles a control message of the host, checking everything it says (ids, ports, addresses, counts).
 void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_size) {
 	HostedMeshReader reader(p_data, p_size);
 	const uint8_t type = reader.get_u8();
@@ -1339,21 +1682,29 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 	}
 	switch (type) {
 		case CONTROL_WELCOME: {
-			if (status != STATUS_CONNECTING || peer <= PEER_SERVER) {
+			if (status != STATUS_CONNECTING || peer <= PEER_SERVER || !is_player_id(peer)) {
 				return;
 			}
 			const uint32_t rendezvous_port = reader.get_u32();
 			const uint32_t player_limit = reader.get_u32();
-			if (reader.failed) {
+			if (reader.failed || rendezvous_port > 65535) {
+				return;
+			}
+			// The host says how many players its mesh takes, and this player would open a socket for each: it doesn't
+			// stay in a mesh bigger than it accepts.
+			const int limit = int(CLAMP(player_limit, 2u, 1024u));
+			if (limit - 2 > pair_limit) {
+				ERR_PRINT(vformat("The mesh takes %d players, and this player keeps links with %d others at most (`pair_limit`): it leaves the mesh.", limit, pair_limit));
+				player_lost_host(DISCONNECT_REASON_TOO_LARGE);
 				return;
 			}
 			// The host's id: 1, unless it took over after a migration (a host that doesn't send it is 1).
 			const uint32_t welcoming_host = reader.get_u32();
-			host_id = (!reader.failed && welcoming_host > 0 && welcoming_host != uint32_t(peer)) ? int(welcoming_host) : PEER_SERVER;
+			host_id = (!reader.failed && welcoming_host > 0 && welcoming_host <= uint32_t(MAX_PEER_ID) && welcoming_host != uint32_t(peer)) ? int(welcoming_host) : PEER_SERVER;
 			local_id = peer;
 			highest_peer_id = MAX(highest_peer_id, MAX(peer, host_id));
 			host_rendezvous_port = int(rendezvous_port);
-			host_max_players = int(CLAMP(player_limit, 2u, 1024u));
+			host_max_players = limit;
 			status = STATUS_CONNECTED;
 			player_send_certificate();
 			push_event(EVENT_PEER_CONNECTED, host_id);
@@ -1365,7 +1716,7 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 		case CONTROL_PAIR_OPEN: {
 			// A pair is introduced once, and a player never has more pairs than the mesh has other players.
 			const uint32_t token = reader.get_u32();
-			if (!reader.failed && peer > 0 && peer != host_id && peer != local_id && !pairs.has(peer) && int(pairs.size()) < host_max_players - 2) {
+			if (!reader.failed && is_player_id(peer) && peer != host_id && peer != local_id && !pairs.has(peer) && int(pairs.size()) < host_max_players - 2) {
 				highest_peer_id = MAX(highest_peer_id, peer);
 				player_open_pair(peer, token);
 			}
@@ -1379,6 +1730,11 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			if (reader.failed || pair == nullptr || pair->state != PAIR_REGISTERING || port <= 0 || port > 65535) {
 				return;
 			}
+			if (!is_unicast_address(address)) {
+				// Not somewhere a direct link can go (a group's address, the wildcard, a name): the pair is relayed.
+				player_fail_pair(peer, *pair);
+				return;
+			}
 			pair->has_endpoint = true;
 			pair->address = address;
 			pair->port = port;
@@ -1389,16 +1745,21 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			}
 		} break;
 		case CONTROL_PAIR_RELAY: {
-			highest_peer_id = MAX(highest_peer_id, peer);
-			player_set_relayed(peer);
+			if (is_player_id(peer)) {
+				highest_peer_id = MAX(highest_peer_id, peer);
+				player_set_relayed(peer);
+			}
 		} break;
 		case CONTROL_SUCCESSION: {
 			// `peer` is the count here.
 			LocalVector<int> ids;
+			bool valid = true;
 			for (int i = 0; i < peer && i < 1024 && !reader.failed; i++) {
-				ids.push_back(int(reader.get_u32()));
+				const int id = int(reader.get_u32());
+				valid = valid && is_player_id(id);
+				ids.push_back(id);
 			}
-			if (!reader.failed) {
+			if (!reader.failed && valid) {
 				succession = ids;
 				for (const int id : ids) {
 					highest_peer_id = MAX(highest_peer_id, id);
@@ -1406,7 +1767,9 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 			}
 		} break;
 		case CONTROL_MEMBER_LEFT: {
-			highest_peer_id = MAX(highest_peer_id, peer);
+			if (is_player_id(peer)) {
+				highest_peer_id = MAX(highest_peer_id, peer);
+			}
 			Pair *pair = pairs.getptr(peer);
 			if (pair) {
 				player_close_pair(*pair);
@@ -1440,6 +1803,9 @@ void EnetHostedMeshTransport::player_on_control(const uint8_t *p_data, int p_siz
 	}
 }
 
+
+// Player: handles a control message from the other player of a pair: the confirmation of the link, a question or an
+// answer about the host, or a request to rejoin through this player.
 void EnetHostedMeshTransport::player_on_pair_control(int p_peer, Pair &r_pair, const uint8_t *p_data, int p_size) {
 	HostedMeshReader reader(p_data, p_size);
 	const uint8_t type = reader.get_u8();
@@ -1487,6 +1853,9 @@ void EnetHostedMeshTransport::player_on_pair_control(int p_peer, Pair &r_pair, c
 	}
 }
 
+
+// Player: sends the host the certificate of the direct links it accepts, once it's generated and the host welcomed
+// the player.
 void EnetHostedMeshTransport::player_send_certificate() {
 	if (!encrypted || certificate_sent || status != STATUS_CONNECTED || player_certificate.is_null()) {
 		return;
@@ -1497,6 +1866,8 @@ void EnetHostedMeshTransport::player_send_certificate() {
 	send_control(host_link, certificate.bytes);
 }
 
+
+// Player: takes the key and the certificate from the worker thread once they're ready.
 void EnetHostedMeshTransport::player_finish_key_job() {
 	if (key_job == nullptr || !WorkerThreadPool::get_singleton()->is_task_completed(key_task)) {
 		return;
@@ -1510,6 +1881,9 @@ void EnetHostedMeshTransport::player_finish_key_job() {
 	player_send_certificate();
 }
 
+
+// Player: the host introduces another player: opens a socket for the pair and registers its endpoint with the host,
+// using the token.
 void EnetHostedMeshTransport::player_open_pair(int p_peer, uint32_t p_registration_token) {
 	Pair *existing = pairs.getptr(p_peer);
 	if (existing) {
@@ -1544,6 +1918,8 @@ void EnetHostedMeshTransport::player_open_pair(int p_peer, uint32_t p_registrati
 	pair.state = PAIR_REGISTERING;
 }
 
+
+// The registration is closed and the endpoint known: punching starts (with DTLS, a moment later).
 void EnetHostedMeshTransport::player_endpoint_ready(int p_peer, Pair &r_pair) {
 	if (!encrypted) {
 		player_start_punching(p_peer, r_pair);
@@ -1552,6 +1928,9 @@ void EnetHostedMeshTransport::player_endpoint_ready(int p_peer, Pair &r_pair) {
 	r_pair.punch_at_usec = OS::get_singleton()->get_ticks_usec() + DTLS_SETTLE_USEC;
 }
 
+
+// Player: starts making the direct link of a pair: the lower id accepts and punches its NAT, the higher id
+// connects.
 void EnetHostedMeshTransport::player_start_punching(int p_peer, Pair &r_pair) {
 	r_pair.punch_at_usec = 0;
 	r_pair.state = PAIR_PUNCHING;
@@ -1589,6 +1968,8 @@ void EnetHostedMeshTransport::player_start_punching(int p_peer, Pair &r_pair) {
 	player_connect_pair(p_peer, r_pair);
 }
 
+
+// Player: the connecting side connects to the other player's endpoint; with DTLS, pinning its certificate.
 void EnetHostedMeshTransport::player_connect_pair(int p_peer, Pair &r_pair) {
 	r_pair.connect_at_usec = 0;
 	ENetConnection *socket = as_socket(r_pair.socket);
@@ -1614,6 +1995,9 @@ void EnetHostedMeshTransport::player_connect_pair(int p_peer, Pair &r_pair) {
 	r_pair.link = link;
 }
 
+
+// Player: takes the events of a pair's socket and moves the pair along: the registration, the punching, the direct
+// link and its packets, and the deadlines.
 void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 	ENetConnection *socket = as_socket(r_pair.socket);
 	const bool accepts = local_id < p_peer;
@@ -1634,7 +2018,7 @@ void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 			const bool expected = accepts && r_pair.state == PAIR_PUNCHING && r_pair.link.is_null() && event.data == r_pair.connect_token && event.peer->get_remote_address() == IPAddress(r_pair.address) && OS::get_singleton()->get_ticks_usec() < r_pair.deadline_usec;
 			if (!expected) {
 				rejected_connections++;
-				event.peer->peer_disconnect_now();
+				enet_close_link(event.peer.ptr());
 				continue;
 			}
 			r_pair.link = event.peer;
@@ -1715,6 +2099,8 @@ void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 	}
 }
 
+
+// The direct link couldn't be made: the host relays the pair.
 void EnetHostedMeshTransport::player_fail_pair(int p_peer, Pair &r_pair) {
 	player_close_pair(r_pair);
 	r_pair.state = PAIR_FAILED;
@@ -1722,12 +2108,17 @@ void EnetHostedMeshTransport::player_fail_pair(int p_peer, Pair &r_pair) {
 	player_request_relay(p_peer);
 }
 
+
+// Player: asks the host to relay a pair.
 void EnetHostedMeshTransport::player_request_relay(int p_peer) {
 	HostedMeshWriter failed(CONTROL_PAIR_FAILED);
 	failed.put_u32(uint32_t(p_peer));
 	send_control(host_link, failed.bytes);
 }
 
+
+// Player: the host relays this pair: closes what there was of the direct link and reports the other player as
+// connected.
 void EnetHostedMeshTransport::player_set_relayed(int p_peer) {
 	if (p_peer <= 0 || p_peer == host_id || p_peer == local_id || (!pairs.has(p_peer) && int(pairs.size()) >= host_max_players - 2)) {
 		return;
@@ -1748,6 +2139,8 @@ void EnetHostedMeshTransport::player_set_relayed(int p_peer) {
 	player_report_connected(p_peer, pair);
 }
 
+
+// Player: closes the socket and the links of a pair.
 void EnetHostedMeshTransport::player_close_pair(Pair &r_pair) {
 	ENetConnection *socket = as_socket(r_pair.socket);
 	ENetPacketPeer *link = as_link(r_pair.link);
@@ -1764,6 +2157,8 @@ void EnetHostedMeshTransport::player_close_pair(Pair &r_pair) {
 	r_pair.link.unref();
 }
 
+
+// Player: tells the engines, once, that the other player of a pair is connected.
 void EnetHostedMeshTransport::player_report_connected(int p_peer, Pair &r_pair) {
 	if (!r_pair.reported) {
 		r_pair.reported = true;
@@ -1771,6 +2166,8 @@ void EnetHostedMeshTransport::player_report_connected(int p_peer, Pair &r_pair) 
 	}
 }
 
+
+// Player: tells the engines that the other player of a pair disconnected, if they knew it as connected.
 void EnetHostedMeshTransport::player_report_disconnected(int p_peer, Pair &r_pair) {
 	if (r_pair.reported) {
 		r_pair.reported = false;
@@ -1778,6 +2175,8 @@ void EnetHostedMeshTransport::player_report_disconnected(int p_peer, Pair &r_pai
 	}
 }
 
+
+// The link with the host dropped, for `p_reason` (the ENet disconnection data).
 void EnetHostedMeshTransport::player_on_host_disconnect(int p_reason) {
 	// A player leaving, refused or removed by the host, or whose host ended the mesh, doesn't take the host's place.
 	if (leaving) {
@@ -1820,6 +2219,8 @@ void EnetHostedMeshTransport::player_on_host_disconnect(int p_reason) {
 	player_confirm_host_loss();
 }
 
+
+// Whether the host `p_host` is alive for this player (it was heard from recently).
 bool EnetHostedMeshTransport::player_sees_host(int p_host) const {
 	if (is_host || status != STATUS_CONNECTED || confirming || host_id != p_host) {
 		return false;
@@ -1828,6 +2229,8 @@ bool EnetHostedMeshTransport::player_sees_host(int p_host) const {
 	return OS::get_singleton()->get_ticks_usec() - host_heard_usec < window;
 }
 
+
+// Player: answers, on `p_link`, whether the host `p_host` is alive for it.
 void EnetHostedMeshTransport::player_answer_host_query(const Ref<RefCounted> &p_link, int p_host) {
 	HostedMeshWriter answer(CONTROL_HOST_STATUS);
 	answer.put_u32(uint32_t(p_host));
@@ -1835,6 +2238,9 @@ void EnetHostedMeshTransport::player_answer_host_query(const Ref<RefCounted> &p_
 	send_control(p_link, answer.bytes);
 }
 
+
+// Player: the host's link dropped without a word: asks the players it reaches directly whether they lost the host
+// too. With nobody to ask, the mesh ends for it.
 void EnetHostedMeshTransport::player_confirm_host_loss() {
 	// The host is really gone only if the players this one reaches directly lost it too; if one still hears from it,
 	// this player lost it alone (its own connection, or the path to the host), and it leaves instead of taking over.
@@ -1856,31 +2262,37 @@ void EnetHostedMeshTransport::player_confirm_host_loss() {
 	confirm_deadline_usec = OS::get_singleton()->get_ticks_usec() + CONFIRM_WINDOW_USEC;
 }
 
+
+// Player: counts the answers: it migrates when more players lost the host than still hear it; on a tie, or when
+// nobody answers, it leaves.
 void EnetHostedMeshTransport::player_check_confirmation() {
-	bool answered = true;
+	// The answers are counted: one player alone neither keeps the others from migrating when the host is gone, nor
+	// takes a player that lost the host by itself out of a mesh that is still there (ADR-077).
+	const int asked = int(confirm_asked.size());
+	int alive = 0;
 	int lost = 0;
 	for (const int peer : confirm_asked) {
-		const bool *alive = confirm_answers.getptr(peer);
-		if (alive == nullptr) {
-			answered = false;
-		} else if (*alive) {
-			// Another player still hears from the host.
-			player_lost_host(DISCONNECT_REASON_LOST);
-			return;
-		} else {
-			lost++;
+		const bool *answer = confirm_answers.getptr(peer);
+		if (answer) {
+			alive += *answer ? 1 : 0;
+			lost += *answer ? 0 : 1;
 		}
 	}
-	if (!answered && OS::get_singleton()->get_ticks_usec() < confirm_deadline_usec) {
+	// Decided once more than half of the players asked say the same, or everyone answered, or the time is up.
+	const bool settled = alive * 2 > asked || lost * 2 > asked || alive + lost == asked;
+	if (!settled && OS::get_singleton()->get_ticks_usec() < confirm_deadline_usec) {
 		return;
 	}
 	confirming = false;
-	// Nobody answered: this player is the one cut off.
-	if (lost == 0 || !player_migrate(confirm_old_host)) {
+	// More players lost the host than still hear it: it's gone. A tie, or nobody answering, and this player may be the
+	// one cut off: it leaves instead of splitting the mesh.
+	if (lost <= alive || !player_migrate(confirm_old_host)) {
 		player_lost_host(DISCONNECT_REASON_LOST);
 	}
 }
 
+
+// The mesh ends for this player.
 void EnetHostedMeshTransport::player_lost_host(DisconnectReason p_reason) {
 	const bool was_connected = status == STATUS_CONNECTED;
 	disconnect_reason = p_reason;
@@ -1904,6 +2316,8 @@ void EnetHostedMeshTransport::player_lost_host(DisconnectReason p_reason) {
 	}
 }
 
+
+// The host left: the first living player of the succession takes over. `false` when there's none to reach.
 bool EnetHostedMeshTransport::player_migrate(int p_old_host) {
 	// The first player of the succession still in the mesh. Everyone has the same list, so everyone picks the same
 	// one; a player that can't reach it directly leaves (following another one would split the mesh).
@@ -1932,6 +2346,9 @@ bool EnetHostedMeshTransport::player_migrate(int p_old_host) {
 	return true;
 }
 
+
+// Player: takes the host's place: its direct links become the members' links, and it takes new players if it has a
+// takeover port.
 void EnetHostedMeshTransport::player_become_host(int p_old_host) {
 	// The direct links become the members' links; the players reached only through the old host are lost.
 	is_host = true;
@@ -1974,6 +2391,9 @@ void EnetHostedMeshTransport::player_become_host(int p_old_host) {
 	pending_rejoins.clear();
 }
 
+
+// Player: follows the successor: its direct link with it becomes the host link, and it tells the new host which
+// players it reaches directly.
 void EnetHostedMeshTransport::player_follow_host(int p_old_host, int p_new_host) {
 	// The direct link with the successor becomes the host link; the engines keep it connected.
 	Pair &pair = pairs[p_new_host];
@@ -2017,6 +2437,8 @@ void EnetHostedMeshTransport::player_follow_host(int p_old_host, int p_new_host)
 	push_event(EVENT_PEER_DISCONNECTED, p_old_host);
 }
 
+
+// Links drop after `host_timeout` without an answer, on both ends.
 void EnetHostedMeshTransport::apply_link_timeout(const Ref<RefCounted> &p_link) {
 	ENetPacketPeer *link = as_link(p_link);
 	if (link) {
@@ -2025,6 +2447,8 @@ void EnetHostedMeshTransport::apply_link_timeout(const Ref<RefCounted> &p_link) 
 	}
 }
 
+
+// Seconds without an answer before a link (with the host, a player, or another player) is considered gone.
 void EnetHostedMeshTransport::set_host_timeout(double p_seconds) {
 	ERR_FAIL_COND_MSG(!(p_seconds > 0.0), "The host timeout must be positive.");
 	host_timeout = p_seconds;
@@ -2039,21 +2463,53 @@ void EnetHostedMeshTransport::set_host_timeout(double p_seconds) {
 	}
 }
 
+
+// Player: the port it takes new players on if it becomes the host after a migration (0: none). With DTLS, it needs
+// `takeover_tls_options` (`TLSOptions.server()`), and the pairs register on `takeover_rendezvous_port` (the next port
+// when 0). The game tells the new players where the new host is.
 void EnetHostedMeshTransport::set_takeover_port(int p_port) {
 	ERR_FAIL_COND_MSG(p_port < 0 || p_port > 65535, "The takeover port must be between 0 and 65535.");
 	takeover_port = p_port;
 }
 
+
+// Player: with DTLS, the port the pairs register on if it becomes the host (0: the port after `takeover_port`).
 void EnetHostedMeshTransport::set_takeover_rendezvous_port(int p_port) {
 	ERR_FAIL_COND_MSG(p_port < 0 || p_port > 65535, "The takeover rendezvous port must be between 0 and 65535.");
 	takeover_rendezvous_port = p_port;
 }
 
+
+// Seconds the game has to admit a player whose join data arrived (the data itself must come within 2 seconds).
 void EnetHostedMeshTransport::set_join_timeout(double p_seconds) {
 	ERR_FAIL_COND_MSG(!(p_seconds > 0.0), "The join timeout must be positive.");
 	join_timeout = p_seconds;
 }
 
+
+// Sets the bytes per second a player may send through the relay; 0 for no limit.
+void EnetHostedMeshTransport::set_relay_rate_limit(int p_bytes_per_second) {
+	ERR_FAIL_COND_MSG(p_bytes_per_second < 0, "The relay rate limit can't be negative.");
+	relay_rate_limit = p_bytes_per_second;
+	relay_budgets.clear();
+}
+
+
+// Sets the bytes the relay holds for a player; 0 for no limit.
+void EnetHostedMeshTransport::set_relay_queue_limit(int p_bytes) {
+	ERR_FAIL_COND_MSG(p_bytes < 0, "The relay queue limit can't be negative.");
+	relay_queue_limit = p_bytes;
+}
+
+
+// Sets the most other players this player keeps a link with.
+void EnetHostedMeshTransport::set_pair_limit(int p_pairs) {
+	ERR_FAIL_COND_MSG(p_pairs < 1 || p_pairs > 1022, "The pair limit must be between 1 and 1022.");
+	pair_limit = p_pairs;
+}
+
+
+// The order in which the players take over when the host leaves, as the host last sent it.
 PackedInt32Array EnetHostedMeshTransport::get_succession() const {
 	PackedInt32Array result;
 	for (const int id : succession) {
@@ -2062,8 +2518,10 @@ PackedInt32Array EnetHostedMeshTransport::get_succession() const {
 	return result;
 }
 
+
 // ------------------------------------------------------------------------------------------------------ Multiplayer
 
+// A `MultiplayerPeer` on this mesh, for `SceneMultiplayer` (RPCs, spawners, synchronizers).
 Ref<TickMultiplayerPeer> EnetHostedMeshTransport::get_multiplayer_peer() {
 	if (multiplayer_peer) {
 		return Ref<TickMultiplayerPeer>(multiplayer_peer);
@@ -2075,6 +2533,9 @@ Ref<TickMultiplayerPeer> EnetHostedMeshTransport::get_multiplayer_peer() {
 	return peer;
 }
 
+
+// Sets the multiplayer peer that takes this mesh's `SceneMultiplayer` packets and events (null: none), and tells it
+// about the peers already connected.
 void EnetHostedMeshTransport::attach_multiplayer_peer(TickMultiplayerPeer *p_peer) {
 	multiplayer_peer = p_peer;
 	multiplayer_events.clear();
@@ -2096,6 +2557,9 @@ void EnetHostedMeshTransport::attach_multiplayer_peer(TickMultiplayerPeer *p_pee
 	}
 }
 
+
+// Sends a `SceneMultiplayer` packet to a player, to everyone (0) or to everyone but one (a negative id), on a
+// multiplayer channel.
 Error EnetHostedMeshTransport::send_multiplayer(int p_target, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
 	ERR_FAIL_INDEX_V_MSG(p_channel, MULTIPLAYER_CHANNEL_COUNT, ERR_INVALID_PARAMETER, vformat("The transfer channel must be between 0 and %d.", MULTIPLAYER_CHANNEL_COUNT - 1));
 	const int logical = TICK_CHANNEL_COUNT + p_channel * 2 + (p_mode == TRANSFER_MODE_RELIABLE ? 0 : 1);
@@ -2114,6 +2578,8 @@ Error EnetHostedMeshTransport::send_multiplayer(int p_target, int p_channel, Tra
 	return OK;
 }
 
+
+// Exposes the class to scripts.
 void EnetHostedMeshTransport::_bind_methods() {
 	ClassDB::bind_static_method("EnetHostedMeshTransport", D_METHOD("create_host", "port", "max_players", "bind_address", "compression", "tls_options", "rendezvous_port"), &EnetHostedMeshTransport::create_host, DEFVAL(32), DEFVAL("*"), DEFVAL(COMPRESSION_RANGE_CODER), DEFVAL(Ref<TLSOptions>()), DEFVAL(0));
 	ClassDB::bind_static_method("EnetHostedMeshTransport", D_METHOD("create_player", "address", "port", "compression", "tls_options", "tls_hostname", "join_data"), &EnetHostedMeshTransport::create_player, DEFVAL(COMPRESSION_RANGE_CODER), DEFVAL(Ref<TLSOptions>()), DEFVAL(String()), DEFVAL(PackedByteArray()));
@@ -2138,6 +2604,12 @@ void EnetHostedMeshTransport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_join_validator"), &EnetHostedMeshTransport::get_join_validator);
 	ClassDB::bind_method(D_METHOD("set_join_timeout", "seconds"), &EnetHostedMeshTransport::set_join_timeout);
 	ClassDB::bind_method(D_METHOD("get_join_timeout"), &EnetHostedMeshTransport::get_join_timeout);
+	ClassDB::bind_method(D_METHOD("set_relay_rate_limit", "bytes_per_second"), &EnetHostedMeshTransport::set_relay_rate_limit);
+	ClassDB::bind_method(D_METHOD("get_relay_rate_limit"), &EnetHostedMeshTransport::get_relay_rate_limit);
+	ClassDB::bind_method(D_METHOD("set_relay_queue_limit", "bytes"), &EnetHostedMeshTransport::set_relay_queue_limit);
+	ClassDB::bind_method(D_METHOD("get_relay_queue_limit"), &EnetHostedMeshTransport::get_relay_queue_limit);
+	ClassDB::bind_method(D_METHOD("set_pair_limit", "pairs"), &EnetHostedMeshTransport::set_pair_limit);
+	ClassDB::bind_method(D_METHOD("get_pair_limit"), &EnetHostedMeshTransport::get_pair_limit);
 	ClassDB::bind_method(D_METHOD("admit_player", "peer"), &EnetHostedMeshTransport::admit_player);
 	ClassDB::bind_method(D_METHOD("refuse_player", "peer"), &EnetHostedMeshTransport::refuse_player);
 	ClassDB::bind_method(D_METHOD("hand_over"), &EnetHostedMeshTransport::hand_over);
@@ -2156,6 +2628,9 @@ void EnetHostedMeshTransport::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "host_timeout", PROPERTY_HINT_RANGE, "0.1,60,0.1,suffix:s"), "set_host_timeout", "get_host_timeout");
 	ADD_PROPERTY(PropertyInfo(Variant::CALLABLE, "join_validator"), "set_join_validator", "get_join_validator");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "join_timeout", PROPERTY_HINT_RANGE, "0.1,120,0.1,suffix:s"), "set_join_timeout", "get_join_timeout");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "relay_rate_limit", PROPERTY_HINT_RANGE, "0,1073741824,1,suffix:B/s"), "set_relay_rate_limit", "get_relay_rate_limit");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "relay_queue_limit", PROPERTY_HINT_RANGE, "0,1073741824,1,suffix:B"), "set_relay_queue_limit", "get_relay_queue_limit");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "pair_limit", PROPERTY_HINT_RANGE, "1,1022,1"), "set_pair_limit", "get_pair_limit");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "takeover_port", PROPERTY_HINT_RANGE, "0,65535,1"), "set_takeover_port", "get_takeover_port");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "takeover_rendezvous_port", PROPERTY_HINT_RANGE, "0,65535,1"), "set_takeover_rendezvous_port", "get_takeover_rendezvous_port");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "takeover_tls_options", PROPERTY_HINT_RESOURCE_TYPE, "TLSOptions"), "set_takeover_tls_options", "get_takeover_tls_options");
@@ -2176,6 +2651,7 @@ void EnetHostedMeshTransport::_bind_methods() {
 	BIND_ENUM_CONSTANT(DISCONNECT_REASON_BUSY);
 	BIND_ENUM_CONSTANT(DISCONNECT_REASON_VERSION);
 	BIND_ENUM_CONSTANT(DISCONNECT_REASON_ENDED);
+	BIND_ENUM_CONSTANT(DISCONNECT_REASON_TOO_LARGE);
 	BIND_ENUM_CONSTANT(PATH_NONE);
 	BIND_ENUM_CONSTANT(PATH_HOST);
 	BIND_ENUM_CONSTANT(PATH_CONNECTING);

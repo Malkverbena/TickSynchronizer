@@ -1,3 +1,8 @@
+// Tests of the nodes as a game uses them: `TickNetwork` and `TickObject` in a scene tree, with the objects' behavior
+// written in GDScript. Two worlds, a server's and a client's, run in the same tree over the simulated network.
+//
+// `TestNodeWorld` builds a world: a root with a network and two bodies, each with its `TickObject`.
+
 #pragma once
 
 #include "../source/nodes/tick_network.h"
@@ -19,6 +24,7 @@ namespace TestTickNodes {
 
 #ifdef MODULE_GDSCRIPT_ENABLED
 
+// Compiles GDScript source into a script; the test fails if it doesn't compile.
 inline Ref<GDScript> make_script(const String &p_source) {
 	GDScriptLanguage::get_singleton()->init();
 	Ref<GDScript> script;
@@ -40,6 +46,8 @@ struct TestNodeWorld {
 	TickObject *player_sync = nullptr;
 	TickObject *npc_sync = nullptr;
 
+	// Builds the world under a root named `p_name`, with the scripts of the player's and of the NPC's `TickObject`, and
+	// adds it to the scene tree.
 	TestNodeWorld(const String &p_name, const Ref<GDScript> &p_player_script, const Ref<GDScript> &p_npc_script) {
 		root = memnew(Node);
 		root->set_name(p_name);
@@ -67,11 +75,15 @@ struct TestNodeWorld {
 		SceneTree::get_singleton()->get_root()->add_child(root);
 	}
 
+
+	// Frees the world.
 	~TestNodeWorld() {
 		memdelete(root);
 	}
 };
 
+// Scripted objects are synchronized through the nodes: the server moves the player with the client's input, the client
+// predicts it ahead, and the NPC is interpolated on the client a little behind the server.
 TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickNetwork] Nodes predict and interpolate over a simulated network") {
 	const Ref<GDScript> player_script = make_script(R"(
 extends TickObject
@@ -138,6 +150,9 @@ func _process_tick(delta: float, _input: DataBuffer):
 	client.network->stop();
 }
 
+
+// The interest filter and the history work through the nodes' properties and methods: a hidden NPC never reaches the
+// client until the filter shows it, and the state at a past frame can be asked from the network or from the object.
 TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickNetwork] Interest and history through the nodes") {
 	const Ref<GDScript> player_script = make_script(R"(
 extends TickObject
@@ -220,6 +235,7 @@ func filter(_peer: int, object: TickObject):
 
 #endif // MODULE_GDSCRIPT_ENABLED
 
+// `declare_var()` outside `_setup_sync()` is an error and declares nothing.
 TEST_CASE("[Modules][TickSynchronizer][TickObject] Variables can only be declared during the setup") {
 	TickObject *object = memnew(TickObject);
 	ERR_PRINT_OFF;
@@ -229,6 +245,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickObject] Variables can only be declare
 	memdelete(object);
 }
 
+
+// A `TickObject` whose network was freed is registered nowhere: it answers accordingly, its settings can change again,
+// and leaving the tree doesn't touch the freed network.
 TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickObject] An object outlives a freed network") {
 	TickLocalNetwork local_network;
 	Ref<TickLocalTransport> transport = local_network.add_peer();

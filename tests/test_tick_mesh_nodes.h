@@ -1,3 +1,10 @@
+// Test of the distributed authority as a game uses it: two `TickNetwork` nodes in `AUTHORITY_DISTRIBUTED` mode, with a
+// scripted `TickObject` each, over the simulated network. Ownership is requested and refused through the object, and
+// the roles move through the network's properties.
+//
+// `MeshNodeWorld` is one node of the mesh: a network (the root of its world) with one body, and a script object that
+// records the network's signals.
+
 #pragma once
 
 #include "../source/nodes/tick_network.h"
@@ -19,6 +26,7 @@ namespace TestTickMeshNodes {
 
 #ifdef MODULE_GDSCRIPT_ENABLED
 
+// Compiles GDScript source into a script; the test fails if it doesn't compile.
 inline Ref<GDScript> make_mesh_script(const String &p_source) {
 	GDScriptLanguage::get_singleton()->init();
 	Ref<GDScript> script;
@@ -38,6 +46,8 @@ struct MeshNodeWorld {
 	TickObject *sync = nullptr;
 	Ref<RefCounted> recorder;
 
+	// Builds a distributed, trusted network named `p_name` with a body under it, connects the recorder to its signals,
+	// and adds it to the scene tree.
 	MeshNodeWorld(const String &p_name, const Ref<GDScript> &p_script, const Ref<GDScript> &p_recorder_script) {
 		network = memnew(TickNetwork);
 		network->set_name(p_name);
@@ -55,15 +65,21 @@ struct MeshNodeWorld {
 		recorder->set_script(p_recorder_script);
 		network->connect(SNAME("authority_changed"), Callable(recorder.ptr(), "on_changed"));
 		network->connect(SNAME("roles_changed"), Callable(recorder.ptr(), "on_roles"));
+		network->connect(SNAME("role_quorum_changed"), Callable(recorder.ptr(), "on_quorum"));
 		SceneTree::get_singleton()->get_root()->add_child(network);
 	}
 
+
+	// Stops the network and frees the world.
 	~MeshNodeWorld() {
 		network->stop();
 		memdelete(network);
 	}
 };
 
+// The quorum and the candidates are set before the start; the controller's node owns the body and the other follows it;
+// a request moves the ownership, with the object's callback and the network's signal; the owner's script refuses a
+// request; and the registry and the clock master move while the mesh runs, one at a time and both at once.
 TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickNetwork] Distributed authority through the nodes") {
 	const Ref<GDScript> body_script = make_mesh_script(R"(
 extends TickObject
@@ -88,12 +104,16 @@ extends RefCounted
 
 var signals := []
 var roles := []
+var quorum := []
 
 func on_changed(object, old_owner, new_owner):
 	signals.push_back([object, old_owner, new_owner])
 
 func on_roles(registry_peer, clock_master):
 	roles.push_back([registry_peer, clock_master])
+
+func on_quorum(has_quorum):
+	quorum.push_back(has_quorum)
 )");
 
 	TickLocalNetwork local_network;
@@ -103,8 +123,25 @@ func on_roles(registry_peer, clock_master):
 
 	MeshNodeWorld a("MeshA", body_script, recorder_script);
 	MeshNodeWorld b("MeshB", body_script, recorder_script);
+	// The candidates to the roles and the quorum are set before the network starts (ADR-074).
+	PackedInt32Array candidates;
+	candidates.push_back(1);
+	candidates.push_back(2);
+	a.network->set_role_candidates(candidates);
+	b.network->set_role_candidates(candidates);
+	a.network->set_role_quorum(2);
+	b.network->set_role_quorum(2);
+	CHECK(a.network->has_role_quorum());
 	REQUIRE(a.network->start(transport_a) == OK);
 	REQUIRE(b.network->start(transport_b) == OK);
+	// Alone, a node doesn't have its quorum.
+	CHECK_FALSE(a.network->has_role_quorum());
+	ERR_PRINT_OFF;
+	a.network->set_role_quorum(1);
+	a.network->set_role_candidates(PackedInt32Array());
+	ERR_PRINT_ON;
+	CHECK(a.network->get_role_quorum() == 2);
+	CHECK(a.network->get_role_candidates() == candidates);
 	local_network.connect_all();
 
 	for (int i = 0; i < 90; i++) {
@@ -112,6 +149,11 @@ func on_roles(registry_peer, clock_master):
 		a.network->advance(1.0 / 60.0, local_network.get_time_usec());
 		b.network->advance(1.0 / 60.0, local_network.get_time_usec());
 	}
+	CHECK(a.network->has_role_quorum());
+	CHECK(bool(a.network->get_stats()["has_quorum"]));
+	const Array quorum = a.recorder->get("quorum");
+	REQUIRE(quorum.size() == 1);
+	CHECK(bool(quorum[0]));
 	// The default controller (1) owns the body; node 2 follows it.
 	CHECK(a.sync->get_owner_peer() == 1);
 	CHECK(a.sync->is_owner());
@@ -171,6 +213,26 @@ func on_roles(registry_peer, clock_master):
 		b.network->advance(1.0 / 60.0, local_network.get_time_usec());
 	}
 	CHECK(a.sync->is_owner());
+
+	// Both roles at once: one change for every node (ADR-074).
+	ERR_PRINT_OFF;
+	CHECK(a.network->set_roles(3, 1) == ERR_UNAVAILABLE);
+	CHECK(a.network->set_roles(0, 1) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+	CHECK(a.network->set_roles(1, 1) == OK);
+	for (int i = 0; i < 60; i++) {
+		local_network.process(1.0 / 60.0);
+		a.network->advance(1.0 / 60.0, local_network.get_time_usec());
+		b.network->advance(1.0 / 60.0, local_network.get_time_usec());
+	}
+	CHECK(b.network->get_registry_peer() == 1);
+	CHECK(b.network->get_clock_master() == 1);
+	const Array moved = b.recorder->get("roles");
+	REQUIRE(moved.size() == 3);
+	CHECK(int(Array(moved[2])[0]) == 1);
+	CHECK(int(Array(moved[2])[1]) == 1);
+	CHECK(a.sync->is_owner());
+	CHECK(int(b.network->get_stats()["malformed_packets"]) == 0);
 }
 
 #endif // MODULE_GDSCRIPT_ENABLED

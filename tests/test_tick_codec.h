@@ -1,3 +1,7 @@
+// Tests of `TickCodec` and of the hash of a `TickSchema`: what each kind of codec delivers after a round trip, what a
+// value of the wrong type or a malformed variant does to the buffer, which values may be sent to another peer, the
+// interpolation, and how the schema hash tells apart objects that declare different variables.
+
 #pragma once
 
 #include "../source/codec/tick_codec.h"
@@ -8,6 +12,7 @@
 
 namespace TestTickCodec {
 
+// Encodes a value with a codec and decodes it back, checking that the whole buffer was read without failing.
 inline Variant round_trip(const Ref<TickCodec> &p_codec, const Variant &p_value) {
 	TickDataBuffer buffer;
 	buffer.begin_write();
@@ -19,6 +24,9 @@ inline Variant round_trip(const Ref<TickCodec> &p_codec, const Variant &p_value)
 	return value;
 }
 
+
+// Each kind of codec delivers its value within its tolerance; clamps what is out of range; and quantizing a quantized
+// value doesn't change it.
 TEST_CASE("[Modules][TickSynchronizer][TickCodec] Round trips and quantization") {
 	CHECK(round_trip(TickCodec::boolean(), true) == Variant(true));
 	CHECK(round_trip(TickCodec::integer(5), -16) == Variant(-16));
@@ -60,6 +68,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickCodec] Round trips and quantization")
 	CHECK(round_trip(any, Variant()) == Variant());
 }
 
+
+// A value of the wrong type is written as the default of the kind, so what follows it in the buffer is still read at
+// the right place.
 TEST_CASE("[Modules][TickSynchronizer][TickCodec] Wrong types keep the layout") {
 	const Ref<TickCodec> v3 = TickCodec::vector3(TickCodec::PRECISION_SINGLE);
 	TickDataBuffer buffer;
@@ -74,6 +85,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickCodec] Wrong types keep the layout") 
 	CHECK_FALSE(buffer.is_buffer_failed());
 }
 
+
+// The variant codec carries nested containers, strings and transforms; bytes that aren't a variant fail the buffer
+// without printing the engine's errors, and the error setting is restored.
 TEST_CASE("[Modules][TickSynchronizer][TickCodec] Variants: complex values round trip, malformed ones fail the buffer") {
 	const Ref<TickCodec> codec = TickCodec::variant();
 	Dictionary value;
@@ -124,6 +138,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickCodec] Variants: complex values round
 	ERR_PRINT_ON;
 }
 
+
+// Objects, callables and RIDs aren't sendable, alone or inside containers: the writer sends nil, and a reader that gets
+// an object's id fails. NaN in a ranged codec goes to the minimum.
 TEST_CASE("[Modules][TickSynchronizer][TickCodec] Only values that mean something to another peer are sent") {
 	Ref<RefCounted> object;
 	object.instantiate();
@@ -165,6 +182,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickCodec] Only values that mean somethin
 	CHECK(double(TickCodec::real_ranged(-10.0, 10.0, 8)->quantize(Math::NaN)) == -10.0);
 }
 
+
+// Reals interpolate linearly, booleans keep the past value, directions stay normalized; and the schema hash depends on
+// the codecs and on the order of the variables.
 TEST_CASE("[Modules][TickSynchronizer][TickCodec] Interpolation and schema hash") {
 	const Ref<TickCodec> real = TickCodec::real(TickCodec::PRECISION_SINGLE);
 	CHECK(double(real->interpolate(0.0, 10.0, 0.25)) == doctest::Approx(2.5));

@@ -1,3 +1,7 @@
+// Implementation of `TickCodec`: the constructors of each kind, the layout of each kind in a `TickDataBuffer` (ranged
+// values quantized, rotations as their smallest three components, variants through the engine's serializer, with what a
+// peer may send checked on both sides), the comparison with a tolerance and the interpolation.
+
 #include "tick_codec.h"
 
 #include "core/core_globals.h"
@@ -9,6 +13,7 @@
 // Largest absolute value of the three smallest components of a unit quaternion: 1 / sqrt(2).
 static constexpr double QUATERNION_COMPONENT_MAX = 0.70710678118654752440;
 
+// A codec for booleans: 1 bit.
 Ref<TickCodec> TickCodec::boolean() {
 	Ref<TickCodec> codec;
 	codec.instantiate();
@@ -17,6 +22,8 @@ Ref<TickCodec> TickCodec::boolean() {
 	return codec;
 }
 
+
+// A codec for signed integers of `p_bits` bits (1 to 64); values beyond that size are clamped.
 Ref<TickCodec> TickCodec::integer(int p_bits) {
 	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, Ref<TickCodec>(), vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
 	Ref<TickCodec> codec;
@@ -26,6 +33,8 @@ Ref<TickCodec> TickCodec::integer(int p_bits) {
 	return codec;
 }
 
+
+// A codec for reals, sent as binary64, binary32 or binary16 by the precision.
 Ref<TickCodec> TickCodec::real(Precision p_precision) {
 	Ref<TickCodec> codec;
 	codec.instantiate();
@@ -34,6 +43,9 @@ Ref<TickCodec> TickCodec::real(Precision p_precision) {
 	return codec;
 }
 
+
+// A codec for reals between `p_min` and `p_max`, quantized in `p_bits` bits (1 to 32); values outside the range are
+// clamped.
 Ref<TickCodec> TickCodec::real_ranged(double p_min, double p_max, int p_bits) {
 	ERR_FAIL_COND_V_MSG(!(p_min < p_max), Ref<TickCodec>(), "The minimum must be smaller than the maximum.");
 	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 32, Ref<TickCodec>(), vformat("The number of bits must be between 1 and 32, but it's %d.", p_bits));
@@ -46,12 +58,16 @@ Ref<TickCodec> TickCodec::real_ranged(double p_min, double p_max, int p_bits) {
 	return codec;
 }
 
+
+// A codec for 2D vectors, each component as in `real()`.
 Ref<TickCodec> TickCodec::vector2(Precision p_precision) {
 	Ref<TickCodec> codec = real(p_precision);
 	codec->kind = KIND_VECTOR2;
 	return codec;
 }
 
+
+// A codec for 2D vectors, each component as in `real_ranged()`.
 Ref<TickCodec> TickCodec::vector2_ranged(double p_min, double p_max, int p_bits) {
 	Ref<TickCodec> codec = real_ranged(p_min, p_max, p_bits);
 	ERR_FAIL_COND_V(codec.is_null(), codec);
@@ -59,18 +75,24 @@ Ref<TickCodec> TickCodec::vector2_ranged(double p_min, double p_max, int p_bits)
 	return codec;
 }
 
+
+// A codec for 2D directions (or zero), sent as an angle.
 Ref<TickCodec> TickCodec::normalized_vector2(Precision p_precision) {
 	Ref<TickCodec> codec = real(p_precision);
 	codec->kind = KIND_NORMALIZED_VECTOR2;
 	return codec;
 }
 
+
+// A codec for 3D vectors, each component as in `real()`.
 Ref<TickCodec> TickCodec::vector3(Precision p_precision) {
 	Ref<TickCodec> codec = real(p_precision);
 	codec->kind = KIND_VECTOR3;
 	return codec;
 }
 
+
+// A codec for 3D vectors, each component as in `real_ranged()`.
 Ref<TickCodec> TickCodec::vector3_ranged(double p_min, double p_max, int p_bits) {
 	Ref<TickCodec> codec = real_ranged(p_min, p_max, p_bits);
 	ERR_FAIL_COND_V(codec.is_null(), codec);
@@ -78,12 +100,17 @@ Ref<TickCodec> TickCodec::vector3_ranged(double p_min, double p_max, int p_bits)
 	return codec;
 }
 
+
+// A codec for 3D directions (or zero), each component quantized in the [-1, 1] range.
 Ref<TickCodec> TickCodec::normalized_vector3(Precision p_precision) {
 	Ref<TickCodec> codec = real(p_precision);
 	codec->kind = KIND_NORMALIZED_VECTOR3;
 	return codec;
 }
 
+
+// A codec for rotations: the index of the largest component and the other three, in `p_bits_per_component` bits
+// each (2 to 32).
 Ref<TickCodec> TickCodec::quaternion(int p_bits_per_component) {
 	ERR_FAIL_COND_V_MSG(p_bits_per_component < 2 || p_bits_per_component > 32, Ref<TickCodec>(), vformat("The bits per component must be between 2 and 32, but it's %d.", p_bits_per_component));
 	Ref<TickCodec> codec;
@@ -95,6 +122,9 @@ Ref<TickCodec> TickCodec::quaternion(int p_bits_per_component) {
 	return codec;
 }
 
+
+// A codec for any value the engine can serialize, of at most `MAX_VARIANT_BYTES` bytes. Nothing is quantized, and
+// it's the most expensive one.
 Ref<TickCodec> TickCodec::variant() {
 	Ref<TickCodec> codec;
 	codec.instantiate();
@@ -102,16 +132,24 @@ Ref<TickCodec> TickCodec::variant() {
 	return codec;
 }
 
+
+// Maximum difference for two values to be considered equal. For reals and vectors it's absolute for the
+// ranged kinds and relative to the magnitude for the others.
 void TickCodec::set_tolerance(double p_tolerance) {
 	ERR_FAIL_COND_MSG(!(p_tolerance >= 0.0), "The tolerance can't be negative.");
 	tolerance = p_tolerance;
 	tolerance_overridden = true;
 }
 
+
+// The tolerance that was set, or the default of the encoding: half of its quantization step.
 double TickCodec::get_tolerance() const {
 	return tolerance_overridden ? tolerance : compute_default_tolerance();
 }
 
+
+// The tolerance of the encoding when none was set: half of its quantization step, and 0 for the kinds that aren't
+// quantized.
 double TickCodec::compute_default_tolerance() const {
 	switch (kind) {
 		case KIND_REAL:
@@ -136,6 +174,8 @@ double TickCodec::compute_default_tolerance() const {
 	return 0.0;
 }
 
+
+// Expected `Variant` type, or `Variant::NIL` for `variant()`.
 Variant::Type TickCodec::get_value_type() const {
 	switch (kind) {
 		case KIND_BOOL:
@@ -161,6 +201,8 @@ Variant::Type TickCodec::get_value_type() const {
 	return Variant::NIL;
 }
 
+
+// The zero of the kind: written in place of a value of the wrong type, and returned when a read fails.
 Variant TickCodec::get_default_value() const {
 	switch (kind) {
 		case KIND_BOOL:
@@ -186,6 +228,8 @@ Variant TickCodec::get_default_value() const {
 	return Variant();
 }
 
+
+// Whether `p_value` has the type the codec writes; numbers and booleans convert between each other.
 bool TickCodec::check_type(const Variant &p_value) const {
 	const Variant::Type expected = get_value_type();
 	if (expected == Variant::NIL || p_value.get_type() == expected) {
@@ -196,10 +240,15 @@ bool TickCodec::check_type(const Variant &p_value) const {
 	return is_number && (expected == Variant::INT || expected == Variant::FLOAT || expected == Variant::BOOL);
 }
 
+
+// The compression level of `TickDataBuffer` that matches a precision.
 TickDataBuffer::CompressionLevel TickCodec::get_compression_level(Precision p_precision) {
 	return TickDataBuffer::CompressionLevel(CLAMP(int(p_precision), 0, 3));
 }
 
+
+// Maps a value in [`p_min`, `p_max`] to an integer of `p_bits` bits. Values outside the range are clamped, and NaN
+// goes to the minimum.
 uint64_t TickCodec::quantize_ranged(double p_value, double p_min, double p_max, int p_bits) {
 	const double max_value = double((uint64_t(1) << p_bits) - 1);
 	// NaN goes to the minimum (converting it to an integer is undefined).
@@ -208,11 +257,16 @@ uint64_t TickCodec::quantize_ranged(double p_value, double p_min, double p_max, 
 	return uint64_t(Math::round(unit * max_value));
 }
 
+
+// Maps an integer of `p_bits` bits back to [`p_min`, `p_max`].
 double TickCodec::dequantize_ranged(uint64_t p_value, double p_min, double p_max, int p_bits) {
 	const double max_value = double((uint64_t(1) << p_bits) - 1);
 	return p_min + (double(p_value) / max_value) * (p_max - p_min);
 }
 
+
+// Writes `p_value`. A value of the wrong type is an error and writes the default value, so the buffer keeps
+// its layout.
 void TickCodec::encode(const Variant &p_value, TickDataBuffer &r_buffer) const {
 	Variant value = p_value;
 	if (!check_type(p_value)) {
@@ -278,7 +332,7 @@ void TickCodec::encode(const Variant &p_value, TickDataBuffer &r_buffer) const {
 		} break;
 		case KIND_VARIANT: {
 			if (!is_sendable(value)) {
-				ERR_PRINT("TickCodec can't send objects, callables, signals or RIDs; nil is sent instead.");
+				ERR_PRINT("TickCodec can't send objects, callables, signals, RIDs or reals that aren't finite; nil is sent instead.");
 				value = Variant();
 			}
 			int length = 0;
@@ -298,6 +352,9 @@ void TickCodec::encode(const Variant &p_value, TickDataBuffer &r_buffer) const {
 	}
 }
 
+
+// Reads a value; on failure `r_buffer.is_buffer_failed()` is set and the default value is returned. Decoding
+// never prints errors: the data may come from an untrusted peer.
 Variant TickCodec::decode(TickDataBuffer &r_buffer) const {
 	const TickDataBuffer::CompressionLevel level = get_compression_level(precision);
 	switch (kind) {
@@ -378,6 +435,8 @@ Variant TickCodec::decode(TickDataBuffer &r_buffer) const {
 	return Variant();
 }
 
+
+// Returns the value as the readers receive it.
 Variant TickCodec::quantize(const Variant &p_value) const {
 	TickDataBuffer buffer;
 	buffer.begin_write();
@@ -386,6 +445,9 @@ Variant TickCodec::quantize(const Variant &p_value) const {
 	return decode(buffer);
 }
 
+
+// Whether two values are the same for this codec: they differ by no more than the tolerance. For rotations, `q` and
+// `-q` are the same.
 bool TickCodec::is_equal(const Variant &p_a, const Variant &p_b) const {
 	const double tol = get_tolerance();
 	switch (kind) {
@@ -453,6 +515,9 @@ bool TickCodec::is_equal(const Variant &p_a, const Variant &p_b) const {
 	return false;
 }
 
+
+// The value between `p_from` and `p_to` at `p_weight` (0 to 1). Directions stay normalized and rotations take the
+// shortest arc; booleans, integers and variants keep `p_from` until the weight reaches 1.
 Variant TickCodec::interpolate(const Variant &p_from, const Variant &p_to, double p_weight) const {
 	switch (kind) {
 		case KIND_REAL:
@@ -483,6 +548,38 @@ Variant TickCodec::interpolate(const Variant &p_from, const Variant &p_to, doubl
 	return p_to;
 }
 
+
+// Whether every real of a packed array is finite.
+template <typename T>
+static bool are_reals_finite(const Vector<T> &p_values) {
+	for (const T &value : p_values) {
+		if (!Math::is_finite(value)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+
+// Whether every vector of a packed array is finite.
+template <typename T>
+static bool are_vectors_finite(const Vector<T> &p_values) {
+	for (const T &value : p_values) {
+		if (!value.is_finite()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+
+// Whether the four components of a color are finite.
+static bool is_color_finite(const Color &p_color) {
+	return Math::is_finite(p_color.r) && Math::is_finite(p_color.g) && Math::is_finite(p_color.b) && Math::is_finite(p_color.a);
+}
+
+
+// `TickCodec::is_sendable()` for a value `p_depth` containers deep.
 static bool is_sendable_recursive(const Variant &p_value, int p_depth) {
 	if (p_depth > Variant::MAX_RECURSION_DEPTH) {
 		return false;
@@ -494,6 +591,59 @@ static bool is_sendable_recursive(const Variant &p_value, int p_depth) {
 		case Variant::SIGNAL:
 		case Variant::RID:
 			return false;
+		// Reals that aren't finite: no codec carries them, and neither does a variant.
+		case Variant::FLOAT:
+			return Math::is_finite(double(p_value));
+		case Variant::VECTOR2:
+			return Vector2(p_value).is_finite();
+		case Variant::RECT2:
+			return Rect2(p_value).is_finite();
+		case Variant::VECTOR3:
+			return Vector3(p_value).is_finite();
+		case Variant::TRANSFORM2D:
+			return Transform2D(p_value).is_finite();
+		case Variant::VECTOR4:
+			return Vector4(p_value).is_finite();
+		case Variant::PLANE:
+			return Plane(p_value).is_finite();
+		case Variant::QUATERNION:
+			return Quaternion(p_value).is_finite();
+		case Variant::AABB:
+			return ::AABB(p_value).is_finite();
+		case Variant::BASIS:
+			return Basis(p_value).is_finite();
+		case Variant::TRANSFORM3D:
+			return Transform3D(p_value).is_finite();
+		case Variant::PROJECTION: {
+			const Projection projection = p_value;
+			for (int i = 0; i < 4; i++) {
+				if (!projection.columns[i].is_finite()) {
+					return false;
+				}
+			}
+			return true;
+		}
+		case Variant::COLOR:
+			return is_color_finite(Color(p_value));
+		case Variant::PACKED_FLOAT32_ARRAY:
+			return are_reals_finite(PackedFloat32Array(p_value));
+		case Variant::PACKED_FLOAT64_ARRAY:
+			return are_reals_finite(PackedFloat64Array(p_value));
+		case Variant::PACKED_VECTOR2_ARRAY:
+			return are_vectors_finite(PackedVector2Array(p_value));
+		case Variant::PACKED_VECTOR3_ARRAY:
+			return are_vectors_finite(PackedVector3Array(p_value));
+		case Variant::PACKED_VECTOR4_ARRAY:
+			return are_vectors_finite(PackedVector4Array(p_value));
+		case Variant::PACKED_COLOR_ARRAY: {
+			const PackedColorArray colors = p_value;
+			for (const Color &color : colors) {
+				if (!is_color_finite(color)) {
+					return false;
+				}
+			}
+			return true;
+		}
 		case Variant::ARRAY: {
 			const Array array = p_value;
 			for (int i = 0; i < array.size(); i++) {
@@ -519,10 +669,17 @@ static bool is_sendable_recursive(const Variant &p_value, int p_depth) {
 	}
 }
 
+
+// Whether `p_value` can be sent to another peer: no objects (null ones are fine), callables, signals or RIDs,
+// which only mean something in this process, and no real that isn't finite (NaN, an infinity), which no codec
+// carries: it would spread through a simulation. Also inside arrays and dictionaries. A value received from
+// another peer is checked the same way.
 bool TickCodec::is_sendable(const Variant &p_value) {
 	return is_sendable_recursive(p_value, 0);
 }
 
+
+// Identifies the encoding, to verify that all the peers use the same schema.
 uint32_t TickCodec::hash(uint32_t p_seed) const {
 	uint32_t h = hash_murmur3_one_32(uint32_t(kind), p_seed);
 	h = hash_murmur3_one_32(uint32_t(precision), h);
@@ -532,6 +689,8 @@ uint32_t TickCodec::hash(uint32_t p_seed) const {
 	return h;
 }
 
+
+// Exposes the class to scripts.
 void TickCodec::_bind_methods() {
 	ClassDB::bind_static_method("TickCodec", D_METHOD("boolean"), &TickCodec::boolean);
 	ClassDB::bind_static_method("TickCodec", D_METHOD("integer", "bits"), &TickCodec::integer, DEFVAL(32));

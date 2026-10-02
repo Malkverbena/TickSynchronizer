@@ -1,3 +1,7 @@
+// Registers the classes the module exposes to scripts and to the editor: the codec of the synchronized variables, the
+// buffer of bits, the transports and the nodes. The engines behind the nodes (`TickSyncCore`, `TickMeshCore`) are plain
+// C++ and aren't registered.
+
 #include "register_types.h"
 
 #include "source/codec/tick_codec.h"
@@ -13,6 +17,7 @@
 
 #include "core/object/class_db.h"
 
+// Registers the module's classes with the engine, at the scene level; does nothing at the other levels.
 void initialize_tick_synchronizer_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
@@ -29,6 +34,8 @@ void initialize_tick_synchronizer_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(TickSpawner);
 }
 
+
+// The counterpart of `initialize_tick_synchronizer_module()`. The module keeps nothing that has to be freed.
 void uninitialize_tick_synchronizer_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;

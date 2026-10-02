@@ -1,3 +1,7 @@
+// Implementation of `TickDataBuffer`: how each type is laid out in bits (integers clamped to their size, reals as
+// binary64, binary32 or binary16, unit reals quantized, 2D directions as an angle, strings and nested buffers after
+// their length), and the checks that keep a read inside the written data.
+
 #include "tick_data_buffer.h"
 
 #include "core/error/error_macros.h"
@@ -10,12 +14,15 @@
 // Largest finite binary16 value.
 static constexpr double HALF_MAX = 65504.0;
 
+// A buffer with a copy of `p_buffer` as its payload, ready to be read.
 TickDataBuffer::TickDataBuffer(const TickBitArray &p_buffer) :
 		bit_size(p_buffer.size_in_bits()),
 		is_reading(true),
 		buffer(p_buffer) {
 }
 
+
+// Compares the payload bits (metadata excluded).
 bool TickDataBuffer::operator==(const TickDataBuffer &p_other) const {
 	if (bit_size != p_other.bit_size) {
 		return false;
@@ -34,10 +41,14 @@ bool TickDataBuffer::operator==(const TickDataBuffer &p_other) const {
 	return true;
 }
 
+
+// The opposite of `operator==`.
 bool TickDataBuffer::operator!=(const TickDataBuffer &p_other) const {
 	return !operator==(p_other);
 }
 
+
+// Becomes a copy of `p_other`: its bits, its sizes, where it was reading or writing, and whether it failed.
 void TickDataBuffer::copy(const TickDataBuffer &p_other) {
 	metadata_size = p_other.metadata_size;
 	bit_offset = p_other.bit_offset;
@@ -47,6 +58,8 @@ void TickDataBuffer::copy(const TickDataBuffer &p_other) {
 	buffer = p_other.buffer;
 }
 
+
+// Takes a copy of `p_buffer` as the payload, with no metadata, and is left ready for reading.
 void TickDataBuffer::copy(const TickBitArray &p_buffer) {
 	metadata_size = 0;
 	bit_offset = 0;
@@ -56,6 +69,9 @@ void TickDataBuffer::copy(const TickBitArray &p_buffer) {
 	buffer = p_buffer;
 }
 
+
+// Appends `p_count_in_bits` bits of this buffer, starting at `p_offset_in_bits`, to `r_destination`, which must be
+// writing.
 bool TickDataBuffer::slice(TickDataBuffer &r_destination, int p_offset_in_bits, int p_count_in_bits) const {
 	ERR_FAIL_COND_V_MSG(p_count_in_bits <= 0, false, "The number of bits to slice must be positive.");
 	ERR_FAIL_COND_V_MSG(p_offset_in_bits < 0 || p_offset_in_bits > total_size() - p_count_in_bits, false, vformat("Can't slice %d bits starting from bit %d of a buffer of %d bits.", p_count_in_bits, p_offset_in_bits, total_size()));
@@ -70,6 +86,9 @@ bool TickDataBuffer::slice(TickDataBuffer &r_destination, int p_offset_in_bits, 
 	return true;
 }
 
+
+// Starts writing from the beginning. The first `p_metadata_size` bits written are metadata (for example a
+// header), and the rest is the payload measured by `size()`.
 void TickDataBuffer::begin_write(int p_metadata_size) {
 	ERR_FAIL_COND_MSG(p_metadata_size < 0, "The metadata size can't be negative.");
 	metadata_size = p_metadata_size;
@@ -80,16 +99,22 @@ void TickDataBuffer::begin_write(int p_metadata_size) {
 	make_room_in_bits(0);
 }
 
+
+// Starts reading from the beginning.
 void TickDataBuffer::begin_read() {
 	bit_offset = 0;
 	is_reading = true;
 	buffer_failed = false;
 }
 
+
+// Shrinks the storage to the used size.
 void TickDataBuffer::dry() {
 	buffer.resize_in_bits(total_size());
 }
 
+
+// Moves the offset to a specific bit; seeking past the end isn't allowed.
 void TickDataBuffer::seek(int p_bits) {
 	if (p_bits < 0 || p_bits > total_size()) {
 		buffer_failed = true;
@@ -98,6 +123,8 @@ void TickDataBuffer::seek(int p_bits) {
 	bit_offset = p_bits;
 }
 
+
+// Sets the metadata and payload size, in bits.
 void TickDataBuffer::shrink_to(int p_metadata_bit_size, int p_bit_size) {
 	ERR_FAIL_COND_MSG(p_metadata_bit_size < 0, "The metadata size can't be negative.");
 	ERR_FAIL_COND_MSG(p_bit_size < 0, "The bit size can't be negative.");
@@ -109,6 +136,8 @@ void TickDataBuffer::shrink_to(int p_metadata_bit_size, int p_bit_size) {
 	bit_size = p_bit_size;
 }
 
+
+// Skips `p_bits` bits while reading.
 void TickDataBuffer::skip(int p_bits) {
 	if (p_bits < 0 || bit_offset > total_size() - p_bits) {
 		buffer_failed = true;
@@ -117,10 +146,14 @@ void TickDataBuffer::skip(int p_bits) {
 	bit_offset += p_bits;
 }
 
+
+// Writes 0 on all the bytes.
 void TickDataBuffer::zero() {
 	buffer.zero();
 }
 
+
+// Writes a boolean, in 1 bit.
 bool TickDataBuffer::add_bool(bool p_input) {
 	if (!check_writing()) {
 		return p_input;
@@ -129,6 +162,8 @@ bool TickDataBuffer::add_bool(bool p_input) {
 	return p_input;
 }
 
+
+// Reads a boolean; `false` if the buffer fails.
 bool TickDataBuffer::read_bool() {
 	if (!check_reading(1)) {
 		return false;
@@ -136,6 +171,8 @@ bool TickDataBuffer::read_bool() {
 	return fetch_bits(1) != 0;
 }
 
+
+// Writes a signed integer with the size of the compression level, clamped to its range.
 int64_t TickDataBuffer::add_int(int64_t p_input, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), p_input);
 	if (!check_writing()) {
@@ -159,6 +196,8 @@ int64_t TickDataBuffer::add_int(int64_t p_input, CompressionLevel p_compression_
 	return value;
 }
 
+
+// Reads a signed integer written with `add_int()` at the same compression level.
 int64_t TickDataBuffer::read_int(CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), 0);
 	const int bits = get_bit_taken(DATA_TYPE_INT, p_compression_level);
@@ -179,6 +218,8 @@ int64_t TickDataBuffer::read_int(CompressionLevel p_compression_level) {
 	return value;
 }
 
+
+// Writes an unsigned integer with the size of the compression level, clamped to its range.
 uint64_t TickDataBuffer::add_uint(uint64_t p_input, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), p_input);
 	if (!check_writing()) {
@@ -199,6 +240,8 @@ uint64_t TickDataBuffer::add_uint(uint64_t p_input, CompressionLevel p_compressi
 	return value;
 }
 
+
+// Reads an unsigned integer written with `add_uint()` at the same compression level.
 uint64_t TickDataBuffer::read_uint(CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), 0);
 	const int bits = get_bit_taken(DATA_TYPE_UINT, p_compression_level);
@@ -208,6 +251,8 @@ uint64_t TickDataBuffer::read_uint(CompressionLevel p_compression_level) {
 	return fetch_bits(bits);
 }
 
+
+// Writes an unsigned integer in `p_bits` bits (1 to 64), clamped to the range of that size.
 uint64_t TickDataBuffer::add_uint_bits(uint64_t p_input, int p_bits) {
 	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, p_input, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
 	if (!check_writing()) {
@@ -219,6 +264,8 @@ uint64_t TickDataBuffer::add_uint_bits(uint64_t p_input, int p_bits) {
 	return value;
 }
 
+
+// Reads an unsigned integer of `p_bits` bits.
 uint64_t TickDataBuffer::read_uint_bits(int p_bits) {
 	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, 0, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
 	if (!check_reading(p_bits)) {
@@ -227,6 +274,8 @@ uint64_t TickDataBuffer::read_uint_bits(int p_bits) {
 	return fetch_bits(p_bits);
 }
 
+
+// Writes a signed integer in `p_bits` bits (1 to 64), in two's complement, clamped to the range of that size.
 int64_t TickDataBuffer::add_int_bits(int64_t p_input, int p_bits) {
 	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, p_input, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
 	if (!check_writing()) {
@@ -244,6 +293,8 @@ int64_t TickDataBuffer::add_int_bits(int64_t p_input, int p_bits) {
 	return value;
 }
 
+
+// Reads a signed integer of `p_bits` bits, extending its sign.
 int64_t TickDataBuffer::read_int_bits(int p_bits) {
 	ERR_FAIL_COND_V_MSG(p_bits < 1 || p_bits > 64, 0, vformat("The number of bits must be between 1 and 64, but it's %d.", p_bits));
 	if (!check_reading(p_bits)) {
@@ -259,6 +310,9 @@ int64_t TickDataBuffer::read_int_bits(int p_bits) {
 	return value;
 }
 
+
+// Writes a real as binary64, binary32 or binary16, by the compression level. NaN and infinities are sent as 0 (with
+// an error), and values beyond the range of the encoding as its largest value.
 double TickDataBuffer::add_real(double p_input, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), p_input);
 	if (!check_writing()) {
@@ -296,6 +350,8 @@ double TickDataBuffer::add_real(double p_input, CompressionLevel p_compression_l
 	}
 }
 
+
+// Reads a real written with `add_real()`; one that isn't finite fails the buffer.
 double TickDataBuffer::read_real(CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), 0.0);
 	const int bits = get_bit_taken(DATA_TYPE_REAL, p_compression_level);
@@ -330,6 +386,8 @@ double TickDataBuffer::read_real(CompressionLevel p_compression_level) {
 	return output;
 }
 
+
+// Stores a value in the [0, 1] range; values outside it are clamped.
 float TickDataBuffer::add_positive_unit_real(float p_input, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), p_input);
 	if (!check_writing()) {
@@ -343,6 +401,8 @@ float TickDataBuffer::add_positive_unit_real(float p_input, CompressionLevel p_c
 	return float(decompress_unit_float(compressed, max_value));
 }
 
+
+// Reads a value in the [0, 1] range written with `add_positive_unit_real()`.
 float TickDataBuffer::read_positive_unit_real(CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), 0.0f);
 	const int bits = get_bit_taken(DATA_TYPE_POSITIVE_UNIT_REAL, p_compression_level);
@@ -353,6 +413,8 @@ float TickDataBuffer::read_positive_unit_real(CompressionLevel p_compression_lev
 	return float(decompress_unit_float(fetch_bits(bits), max_value));
 }
 
+
+// Stores a value in the [-1, 1] range; values outside it are clamped.
 float TickDataBuffer::add_unit_real(float p_input, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), p_input);
 	if (!check_writing()) {
@@ -366,6 +428,8 @@ float TickDataBuffer::add_unit_real(float p_input, CompressionLevel p_compressio
 	return is_negative ? -magnitude : magnitude;
 }
 
+
+// Reads a value in the [-1, 1] range written with `add_unit_real()`.
 float TickDataBuffer::read_unit_real(CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), 0.0f);
 	if (!check_reading(get_bit_taken(DATA_TYPE_UNIT_REAL, p_compression_level))) {
@@ -376,6 +440,8 @@ float TickDataBuffer::read_unit_real(CompressionLevel p_compression_level) {
 	return is_negative ? -magnitude : magnitude;
 }
 
+
+// Writes the two components of a vector as reals (see `add_real()`).
 Vector2 TickDataBuffer::add_vector2(const Vector2 &p_input, CompressionLevel p_compression_level) {
 	Vector2 output;
 	output.x = real_t(add_real(p_input.x, p_compression_level));
@@ -383,6 +449,8 @@ Vector2 TickDataBuffer::add_vector2(const Vector2 &p_input, CompressionLevel p_c
 	return output;
 }
 
+
+// Reads a vector written with `add_vector2()`.
 Vector2 TickDataBuffer::read_vector2(CompressionLevel p_compression_level) {
 	Vector2 output;
 	output.x = real_t(read_real(p_compression_level));
@@ -390,6 +458,8 @@ Vector2 TickDataBuffer::read_vector2(CompressionLevel p_compression_level) {
 	return output;
 }
 
+
+// Stores a direction (or zero). The input is normalized when it isn't zero.
 Vector2 TickDataBuffer::add_normalized_vector2(const Vector2 &p_input, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), p_input);
 	if (!check_writing()) {
@@ -414,6 +484,8 @@ Vector2 TickDataBuffer::add_normalized_vector2(const Vector2 &p_input, Compressi
 	return Vector2(real_t(Math::cos(decompressed_angle)), real_t(Math::sin(decompressed_angle)));
 }
 
+
+// Reads a direction (or zero) written with `add_normalized_vector2()`.
 Vector2 TickDataBuffer::read_normalized_vector2(CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), Vector2());
 	const int bits = get_bit_taken(DATA_TYPE_NORMALIZED_VECTOR2, p_compression_level);
@@ -433,6 +505,8 @@ Vector2 TickDataBuffer::read_normalized_vector2(CompressionLevel p_compression_l
 	return Vector2(real_t(Math::cos(decompressed_angle)), real_t(Math::sin(decompressed_angle)));
 }
 
+
+// Writes the three components of a vector as reals (see `add_real()`).
 Vector3 TickDataBuffer::add_vector3(const Vector3 &p_input, CompressionLevel p_compression_level) {
 	Vector3 output;
 	output.x = real_t(add_real(p_input.x, p_compression_level));
@@ -441,6 +515,8 @@ Vector3 TickDataBuffer::add_vector3(const Vector3 &p_input, CompressionLevel p_c
 	return output;
 }
 
+
+// Reads a vector written with `add_vector3()`.
 Vector3 TickDataBuffer::read_vector3(CompressionLevel p_compression_level) {
 	Vector3 output;
 	output.x = real_t(read_real(p_compression_level));
@@ -449,6 +525,8 @@ Vector3 TickDataBuffer::read_vector3(CompressionLevel p_compression_level) {
 	return output;
 }
 
+
+// Stores a direction (or zero). The input is normalized when it isn't zero.
 Vector3 TickDataBuffer::add_normalized_vector3(const Vector3 &p_input, CompressionLevel p_compression_level) {
 	const Vector3 input = p_input.is_zero_approx() ? Vector3() : p_input.normalized();
 	Vector3 output;
@@ -458,6 +536,8 @@ Vector3 TickDataBuffer::add_normalized_vector3(const Vector3 &p_input, Compressi
 	return output;
 }
 
+
+// Reads a direction (or zero) written with `add_normalized_vector3()`.
 Vector3 TickDataBuffer::read_normalized_vector3(CompressionLevel p_compression_level) {
 	Vector3 output;
 	output.x = real_t(read_unit_real(p_compression_level));
@@ -466,6 +546,9 @@ Vector3 TickDataBuffer::read_normalized_vector3(CompressionLevel p_compression_l
 	return output;
 }
 
+
+// Stores a string as UTF-8, of at most `MAX_STRING_BYTES` bytes. A longer one, or one the readers would refuse (a
+// NUL character, an unpaired surrogate), fails the buffer.
 void TickDataBuffer::add_string(const String &p_input) {
 	if (!check_writing()) {
 		return;
@@ -483,6 +566,9 @@ void TickDataBuffer::add_string(const String &p_input) {
 	add_bits(reinterpret_cast<const uint8_t *>(utf8.get_data()), utf8.length() * 8);
 }
 
+
+// Reads a string written with `add_string()`. One longer than `p_max_bytes`, or that isn't valid UTF-8, fails the
+// buffer.
 String TickDataBuffer::read_string(int p_max_bytes) {
 	const int length = int(read_uint(COMPRESSION_LEVEL_2));
 	if (length == 0 || buffer_failed) {
@@ -503,6 +589,8 @@ String TickDataBuffer::read_string(int p_max_bytes) {
 	return String::utf8(chars.ptr(), length);
 }
 
+
+// Nests the metadata and payload of another buffer, of at most `MAX_NESTED_BUFFER_BITS` bits.
 void TickDataBuffer::add_data_buffer(const TickDataBuffer &p_input) {
 	if (!check_writing()) {
 		return;
@@ -520,6 +608,9 @@ void TickDataBuffer::add_data_buffer(const TickDataBuffer &p_input) {
 	}
 }
 
+
+// Reads a buffer nested with `add_data_buffer()`: `r_output` receives the nested data and is left ready for
+// reading.
 void TickDataBuffer::read_data_buffer(TickDataBuffer &r_output) {
 	r_output.begin_write(0);
 	const int input_bits = int(read_uint(COMPRESSION_LEVEL_2));
@@ -535,6 +626,8 @@ void TickDataBuffer::read_data_buffer(TickDataBuffer &r_output) {
 	r_output.begin_read();
 }
 
+
+// Stores `p_bit_count` bits taken from `p_data`, least significant bit of the first byte first.
 void TickDataBuffer::add_bits(const uint8_t *p_data, int p_bit_count) {
 	ERR_FAIL_COND_MSG(p_bit_count < 0, "The bit count can't be negative.");
 	ERR_FAIL_COND_MSG(p_bit_count > 0 && p_data == nullptr, "The source data is null.");
@@ -549,6 +642,8 @@ void TickDataBuffer::add_bits(const uint8_t *p_data, int p_bit_count) {
 	}
 }
 
+
+// Reads `p_bit_count` bits into `r_data`, least significant bit of the first byte first.
 void TickDataBuffer::read_bits(uint8_t *r_data, int p_bit_count) {
 	ERR_FAIL_COND_MSG(p_bit_count < 0, "The bit count can't be negative.");
 	ERR_FAIL_COND_MSG(p_bit_count > 0 && r_data == nullptr, "The destination is null.");
@@ -562,51 +657,75 @@ void TickDataBuffer::read_bits(uint8_t *r_data, int p_bit_count) {
 	}
 }
 
+
+// Skips a boolean while reading.
 void TickDataBuffer::skip_bool() {
 	skip(get_bit_taken(DATA_TYPE_BOOL, COMPRESSION_LEVEL_0));
 }
 
+
+// Skips a signed integer of the given compression level.
 void TickDataBuffer::skip_int(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_INT, p_compression_level));
 }
 
+
+// Skips an unsigned integer of the given compression level.
 void TickDataBuffer::skip_uint(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_UINT, p_compression_level));
 }
 
+
+// Skips a real of the given compression level.
 void TickDataBuffer::skip_real(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_REAL, p_compression_level));
 }
 
+
+// Skips a value in the [0, 1] range of the given compression level.
 void TickDataBuffer::skip_positive_unit_real(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_POSITIVE_UNIT_REAL, p_compression_level));
 }
 
+
+// Skips a value in the [-1, 1] range of the given compression level.
 void TickDataBuffer::skip_unit_real(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_UNIT_REAL, p_compression_level));
 }
 
+
+// Skips a 2D vector of the given compression level.
 void TickDataBuffer::skip_vector2(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_VECTOR2, p_compression_level));
 }
 
+
+// Skips a 2D direction of the given compression level.
 void TickDataBuffer::skip_normalized_vector2(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_NORMALIZED_VECTOR2, p_compression_level));
 }
 
+
+// Skips a 3D vector of the given compression level.
 void TickDataBuffer::skip_vector3(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_VECTOR3, p_compression_level));
 }
 
+
+// Skips a 3D direction of the given compression level.
 void TickDataBuffer::skip_normalized_vector3(CompressionLevel p_compression_level) {
 	skip(get_bit_taken(DATA_TYPE_NORMALIZED_VECTOR3, p_compression_level));
 }
 
+
+// Skips a string: reads its length and jumps over its bytes.
 void TickDataBuffer::skip_string() {
 	const int length = int(read_uint(COMPRESSION_LEVEL_2));
 	skip(length * 8);
 }
 
+
+// Skips a nested buffer: reads its size and jumps over its bits.
 void TickDataBuffer::skip_data_buffer() {
 	const int input_bits = int(read_uint(COMPRESSION_LEVEL_2));
 	if (buffer_failed || !pad_to_next_byte()) {
@@ -616,6 +735,8 @@ void TickDataBuffer::skip_data_buffer() {
 	skip(input_bits);
 }
 
+
+// Size in bits of a fixed size data type; 0 for `DATA_TYPE_BITS` and `DATA_TYPE_DATABUFFER`.
 int TickDataBuffer::get_bit_taken(DataType p_data_type, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), 0);
 	switch (p_data_type) {
@@ -656,6 +777,9 @@ int TickDataBuffer::get_bit_taken(DataType p_data_type, CompressionLevel p_compr
 	ERR_FAIL_V_MSG(0, vformat("Unknown data type %d.", int(p_data_type)));
 }
 
+
+// Maximum absolute error introduced by the compression of a real type (for reals and vectors, relative to
+// the magnitude of the value).
 double TickDataBuffer::get_real_epsilon(DataType p_data_type, CompressionLevel p_compression_level) {
 	ERR_FAIL_COND_V(!is_valid_compression_level(p_compression_level), 0.0);
 	switch (p_data_type) {
@@ -683,16 +807,24 @@ double TickDataBuffer::get_real_epsilon(DataType p_data_type, CompressionLevel p
 	}
 }
 
+
+// Maps a value in the [0, 1] range to an integer from 0 to `p_scale_factor`. Values outside the range are clamped,
+// and NaN gives 0.
 uint64_t TickDataBuffer::compress_unit_float(double p_value, double p_scale_factor) {
 	// NaN is compressed as 0 (converting it to an integer is undefined).
 	const double value = p_value > 0.0 ? MIN(p_value, 1.0) : 0.0;
 	return uint64_t(Math::round(value * p_scale_factor));
 }
 
+
+// Maps an integer from 0 to `p_scale_factor` back to the [0, 1] range.
 double TickDataBuffer::decompress_unit_float(uint64_t p_value, double p_scale_factor) {
 	return MIN(double(p_value) / p_scale_factor, 1.0);
 }
 
+
+// Whether the bytes are well-formed UTF-8 without NUL characters. Checked without printing anything, unlike the
+// engine's decoder, which prints an error for every invalid byte: check untrusted data before decoding it.
 bool TickDataBuffer::is_valid_utf8(const uint8_t *p_bytes, int p_length) {
 	ERR_FAIL_COND_V(p_length < 0 || (p_length > 0 && p_bytes == nullptr), false);
 	// The well-formed byte sequences of the Unicode standard (table 3-7): no overlong encodings, no surrogates,
@@ -744,6 +876,8 @@ bool TickDataBuffer::is_valid_utf8(const uint8_t *p_bytes, int p_length) {
 	return true;
 }
 
+
+// Whether the buffer is being written; if it's being read, fails it and prints an error.
 bool TickDataBuffer::check_writing() {
 	if (is_reading) {
 		buffer_failed = true;
@@ -752,6 +886,9 @@ bool TickDataBuffer::check_writing() {
 	return true;
 }
 
+
+// Whether `p_bits` more bits can be read. If not, fails the buffer: silently when the data is short (it may come
+// from an untrusted peer), with an error when the buffer is being written.
 bool TickDataBuffer::check_reading(int p_bits) {
 	if (!is_reading) {
 		buffer_failed = true;
@@ -765,6 +902,8 @@ bool TickDataBuffer::check_reading(int p_bits) {
 	return true;
 }
 
+
+// Writes the `p_bits` low bits of `p_value` at the offset, growing the storage as needed, and moves past them.
 void TickDataBuffer::write_bits(uint64_t p_value, int p_bits) {
 	make_room_in_bits(p_bits);
 	if (!buffer.store_bits(bit_offset, p_value, p_bits)) {
@@ -773,6 +912,8 @@ void TickDataBuffer::write_bits(uint64_t p_value, int p_bits) {
 	bit_offset += p_bits;
 }
 
+
+// Reads `p_bits` bits at the offset and moves past them; the caller checked that they are there.
 uint64_t TickDataBuffer::fetch_bits(int p_bits) {
 	uint64_t value = 0;
 	if (!buffer.read_bits(bit_offset, p_bits, value)) {
@@ -782,6 +923,8 @@ uint64_t TickDataBuffer::fetch_bits(int p_bits) {
 	return value;
 }
 
+
+// Makes sure `p_bits` more bits fit after the offset, growing the storage and the payload size.
 void TickDataBuffer::make_room_in_bits(int p_bits) {
 	const int min_size = bit_offset + p_bits;
 	if (min_size > buffer.size_in_bits()) {
@@ -794,12 +937,16 @@ void TickDataBuffer::make_room_in_bits(int p_bits) {
 	}
 }
 
+
+// While writing: moves the offset to the next whole byte, making room for the padding.
 void TickDataBuffer::make_room_pad_to_next_byte() {
 	const int bits_to_next_byte = ((bit_offset + 7) & ~7) - bit_offset;
 	make_room_in_bits(bits_to_next_byte);
 	bit_offset += bits_to_next_byte;
 }
 
+
+// While reading: moves the offset to the next whole byte; `false` if that is past the data.
 bool TickDataBuffer::pad_to_next_byte() {
 	const int bits_to_next_byte = ((bit_offset + 7) & ~7) - bit_offset;
 	if (bit_offset + bits_to_next_byte > total_size()) {
@@ -809,6 +956,8 @@ bool TickDataBuffer::pad_to_next_byte() {
 	return true;
 }
 
+
+// Whether the value is one of the four compression levels.
 bool TickDataBuffer::is_valid_compression_level(CompressionLevel p_compression_level) {
 	return p_compression_level >= COMPRESSION_LEVEL_0 && p_compression_level <= COMPRESSION_LEVEL_3;
 }

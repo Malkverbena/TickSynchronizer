@@ -1,3 +1,11 @@
+// Tests of `TickSyncCore` in a star over the simulated network: the handshake and the clock, the prediction of a
+// deterministic simulation, the convergence under loss and jitter, the rewind of a diverged prediction, who may move an
+// object, and peers or schemas that don't match.
+//
+// The helpers here are used by the other test files too: `TestMover` (a body with an input, implemented in plain C++),
+// `TestListener` (counts what the engine reports) and `TestWorld` (a server and two clients with the same objects on
+// every peer).
+
 #pragma once
 
 #include "../source/sync/tick_sync_core.h"
@@ -20,12 +28,16 @@ public:
 	bool constant_direction = false;
 	int direction_override = 0;
 
+	// A body at `p_path` controlled by `p_controller`, with its position and velocity sent at the given precision.
 	TestMover(const String &p_path, int p_controller, TickCodec::Precision p_precision = TickCodec::PRECISION_HALF) :
 			path(p_path), controller(p_controller) {
 		schema.add("position", TickCodec::vector2(p_precision));
 		schema.add("velocity", TickCodec::vector2(p_precision));
 	}
 
+
+	// The direction the script gives for a tick: left, stop and right, 20 ticks each, until the script ends; or a
+	// constant one.
 	int get_direction(int p_tick) const {
 		if (constant_direction) {
 			return direction_override;
@@ -36,14 +48,26 @@ public:
 		return ((p_tick / 20) % 3) - 1;
 	}
 
+
+	// `TickSyncObject`: the path given to the constructor.
 	virtual String get_sync_path() const override { return path; }
+
+
+	// `TickSyncObject`: the controller given to the constructor.
 	virtual int get_controller_peer() const override { return controller; }
+
+
+	// `TickSyncObject`: the position and the velocity.
 	virtual const TickSchema &get_sync_schema() const override { return schema; }
 
+
+	// `TickSyncObject`: the position (0) or the velocity (1).
 	virtual Variant get_sync_var(int p_index) const override {
 		return p_index == 0 ? position : velocity;
 	}
 
+
+	// `TickSyncObject`: sets the position (0) or the velocity (1).
 	virtual void set_sync_var(int p_index, const Variant &p_value) override {
 		if (p_index == 0) {
 			position = p_value;
@@ -52,10 +76,14 @@ public:
 		}
 	}
 
+
+	// `TickSyncObject`: writes the direction of the next tick of the script, in 2 bits.
 	virtual void collect_input(TickDataBuffer &r_input) override {
 		r_input.add_int_bits(get_direction(ticks_collected++), 2);
 	}
 
+
+	// `TickSyncObject`: moves at 5 units per second in the direction of the input; stops without one.
 	virtual void process_tick(double p_delta, TickDataBuffer &p_input) override {
 		int direction = 0;
 		if (p_input.size() > 0) {
@@ -66,6 +94,7 @@ public:
 	}
 };
 
+// Counts what an engine reports.
 class TestListener : public TickSyncCore::Listener {
 public:
 	int ready_peers = 0;
@@ -76,11 +105,27 @@ public:
 	uint32_t last_despawn = 0;
 	String rejected;
 
+	// Counts the peers that became ready.
 	virtual void on_peer_ready(int p_peer) override { ready_peers++; }
+
+
+	// Counts the times the prediction started.
 	virtual void on_prediction_started(uint32_t p_frame) override { prediction_started++; }
+
+
+	// Counts the rewinds.
 	virtual void on_rewound(uint32_t p_frame, int p_frame_count) override { rewinds++; }
+
+
+	// Keeps the reason of a rejection.
 	virtual void on_rejected(const String &p_reason) override { rejected = p_reason; }
+
+
+	// Counts the spawns.
 	virtual void on_spawn(const String &p_spawner, uint32_t p_spawn_id, int p_scene, const String &p_name, int p_controller, const Variant &p_data) override { spawns++; }
+
+
+	// Counts the despawns, and keeps the id of the last one.
 	virtual void on_despawn(const String &p_spawner, uint32_t p_spawn_id) override {
 		despawns++;
 		last_despawn = p_spawn_id;
@@ -111,6 +156,8 @@ struct TestWorld {
 	TestMover b_mover_b = TestMover("mover_b", 3);
 	TestMover b_npc = TestMover("npc", 1);
 
+	// Builds the network with the given latency, jitter and loss, registers the objects on every peer with scripts of
+	// `p_script_length` ticks, and starts the server and the two clients.
 	TestWorld(uint64_t p_latency_usec, uint64_t p_jitter_usec, double p_packet_loss, int p_script_length) {
 		network.set_seed(12345);
 		network.set_latency_usec(p_latency_usec);
@@ -147,6 +194,7 @@ struct TestWorld {
 		network.connect_peers(1, 3);
 	}
 
+
 	// Simulates `p_seconds` of game frames at 60 FPS, with a slightly irregular frame time.
 	void run(double p_seconds) {
 		const int frames = int(p_seconds * 60.0);
@@ -161,6 +209,8 @@ struct TestWorld {
 	}
 };
 
+// With heavy jitter, the frame a client interpolates at advances with the elapsed time, never more than 5% faster or
+// slower, although the clock's estimate keeps changing (ADR-071).
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] The interpolation timeline doesn't jump with jitter") {
 	// 40 ms each way with up to 120 ms of jitter per packet: the clock's estimate moves by milliseconds whenever its best
 	// sample changes, and the frames take alternating times. The frame the client interpolates at follows smoothly
@@ -192,6 +242,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] The interpolation timeline 
 	CHECK(worst < 0.06);
 }
 
+
+// After a second, both clients are welcomed, synchronized and predicting; the measured round trip matches the simulated
+// latency; the objects are bound by path; and the clients run ahead of the server.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Handshake, clock and registration") {
 	TestWorld world(30000, 5000, 0.0, 0);
 	world.run(1.0);
@@ -221,6 +274,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Handshake, clock and regist
 	CHECK(world.server.get_stats().malformed_packets == 0);
 }
 
+
+// With a deterministic, quantized simulation, the predictions match the server exactly: no rewinds after the start, no
+// ghost or late inputs, and a time scale near 1.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Deterministic simulation never rewinds after the start") {
 	TestWorld world(40000, 5000, 0.0, 100000);
 	world.run(3.0);
@@ -241,6 +297,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Deterministic simulation ne
 	CHECK(world.a_npc.position.distance_to(world.server_npc.position) <= 5.0 * 0.5);
 }
 
+
+// With 10% of packet loss and jitter, once the inputs stop every copy of every body ends where the server's is.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Packet loss and jitter converge to the server state") {
 	// 260 ticks: four whole left-stop-right cycles plus 20 ticks to the left, so the bodies end away from the origin.
 	TestWorld world(50000, 20000, 0.1, 260);
@@ -258,6 +316,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Packet loss and jitter conv
 	CHECK(world.server_mover_a.position.length() > 1.0);
 }
 
+
+// A predicted body moved from outside the simulation is rewound to the server's state and ends where the server's is.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A diverged prediction is rewound and corrected") {
 	TestWorld world(40000, 0, 0.0, 600);
 	world.run(3.0);
@@ -274,6 +334,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A diverged prediction is re
 	CHECK(codec->is_equal(world.a_mover_a.position, world.server_mover_a.position));
 }
 
+
+// Inputs a client sends for an object another client controls are ignored by the server.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A client can't move another client's object") {
 	TestWorld world(20000, 0, 0.0, 0);
 	world.run(1.5);
@@ -310,6 +372,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A client can't move another
 	CHECK(world.server_mover_a.position == Vector2());
 }
 
+
+// A peer with another protocol version is rejected and disconnected; an object whose schema differs from the server's
+// isn't synchronized, while its client still joins.
 TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Incompatible peers and schemas") {
 	TickLocalNetwork network;
 	Ref<TickLocalTransport> server_transport = network.add_peer();

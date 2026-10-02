@@ -1,3 +1,6 @@
+// Implementation of `EnetStarTransport`: the ENet peer and the `SceneMultiplayer` of a server or of a client, the
+// queues of events and packets the engines consume, and the simulated latency, jitter and loss of what is sent.
+
 #include "enet_star_transport.h"
 
 #include "../common/tick_engine_compat.h"
@@ -15,10 +18,13 @@ static constexpr int ENET_MAX_PAYLOAD = 1400 - 6 - 12 - 1;
 // Record header and authentication tag of a DTLS 1.2 datagram with AES-GCM.
 static constexpr int DTLS_OVERHEAD = 37;
 
+// Seeds the generator of the simulated jitter and loss.
 EnetStarTransport::EnetStarTransport() {
 	rng.seed(OS::get_singleton()->get_ticks_usec());
 }
 
+
+// Stops listening to the `SceneMultiplayer`.
 EnetStarTransport::~EnetStarTransport() {
 	if (multiplayer.is_valid()) {
 		multiplayer->disconnect(SNAME("peer_connected"), callable_mp(this, &EnetStarTransport::_on_peer_connected));
@@ -27,6 +33,9 @@ EnetStarTransport::~EnetStarTransport() {
 	}
 }
 
+
+// Makes the transport of a server: an ENet host on `p_port` for `p_max_clients` clients, with the given compression
+// and, with TLS options, DTLS.
 Ref<EnetStarTransport> EnetStarTransport::create_server(int p_port, int p_max_clients, Compression p_compression, const Ref<TLSOptions> &p_tls_options) {
 	Ref<ENetMultiplayerPeer> peer;
 	peer.instantiate();
@@ -54,6 +63,10 @@ Ref<EnetStarTransport> EnetStarTransport::create_server(int p_port, int p_max_cl
 	return transport;
 }
 
+
+// Makes the transport of a client that connects to `p_address` and `p_port`, with the server's compression and,
+// with TLS options, DTLS. The certificate is checked against `p_tls_hostname`, or against the address when it's
+// empty.
 Ref<EnetStarTransport> EnetStarTransport::create_client(const String &p_address, int p_port, Compression p_compression, const Ref<TLSOptions> &p_tls_options, const String &p_tls_hostname) {
 	Ref<ENetMultiplayerPeer> peer;
 	peer.instantiate();
@@ -80,6 +93,8 @@ Ref<EnetStarTransport> EnetStarTransport::create_client(const String &p_address,
 	return transport;
 }
 
+
+// Uses a `SceneMultiplayer` configured by the game. Its peer must have at least `TICK_CHANNEL_COUNT` channels.
 Error EnetStarTransport::setup(const Ref<SceneMultiplayer> &p_multiplayer, bool p_encrypted) {
 	ERR_FAIL_COND_V_MSG(p_multiplayer.is_null(), ERR_INVALID_PARAMETER, "The multiplayer is null.");
 	ERR_FAIL_COND_V_MSG(multiplayer.is_valid(), ERR_ALREADY_IN_USE, "The transport is already set up.");
@@ -97,6 +112,8 @@ Error EnetStarTransport::setup(const Ref<SceneMultiplayer> &p_multiplayer, bool 
 	return OK;
 }
 
+
+// `SceneMultiplayer` reported a peer: queues its connection for the engines.
 void EnetStarTransport::_on_peer_connected(int p_peer) {
 	Event event;
 	event.type = EVENT_PEER_CONNECTED;
@@ -104,6 +121,8 @@ void EnetStarTransport::_on_peer_connected(int p_peer) {
 	events.push_back(event);
 }
 
+
+// `SceneMultiplayer` reported that a peer left: queues its disconnection for the engines.
 void EnetStarTransport::_on_peer_disconnected(int p_peer) {
 	Event event;
 	event.type = EVENT_PEER_DISCONNECTED;
@@ -111,6 +130,8 @@ void EnetStarTransport::_on_peer_disconnected(int p_peer) {
 	events.push_back(event);
 }
 
+
+// `SceneMultiplayer` delivered bytes from a peer: queues them as a packet, unless the queue is full.
 void EnetStarTransport::_on_peer_packet(int p_peer, const PackedByteArray &p_packet) {
 	if (!queue_has_room(packets.size() - next_packet, queued_bytes, p_packet.size())) {
 		WARN_PRINT_ONCE("EnetStarTransport drops the packets it receives: nothing consumes them (is the TickNetwork running?).");
@@ -127,41 +148,59 @@ void EnetStarTransport::_on_peer_packet(int p_peer, const PackedByteArray &p_pac
 	packets.push_back(packet);
 }
 
+
+// Delays what this side sends by `p_seconds` (one way), for debugging; 0 disables it.
 void EnetStarTransport::set_simulated_latency(double p_seconds) {
 	ERR_FAIL_COND_MSG(!(p_seconds >= 0.0), "The latency can't be negative.");
 	simulated_latency_usec = uint64_t(p_seconds * 1000000.0);
 }
 
+
+// The simulated latency, in seconds.
 double EnetStarTransport::get_simulated_latency() const {
 	return double(simulated_latency_usec) / 1000000.0;
 }
 
+
+// Adds a random delay of up to `p_seconds` to each packet this side sends.
 void EnetStarTransport::set_simulated_jitter(double p_seconds) {
 	ERR_FAIL_COND_MSG(!(p_seconds >= 0.0), "The jitter can't be negative.");
 	simulated_jitter_usec = uint64_t(p_seconds * 1000000.0);
 }
 
+
+// The simulated jitter, in seconds.
 double EnetStarTransport::get_simulated_jitter() const {
 	return double(simulated_jitter_usec) / 1000000.0;
 }
 
+
+// Drops this share (0 to 1) of the unreliable packets this side sends.
 void EnetStarTransport::set_simulated_packet_loss(double p_ratio) {
 	ERR_FAIL_COND_MSG(!(p_ratio >= 0.0 && p_ratio <= 1.0), "The packet loss must be between 0 and 1.");
 	simulated_packet_loss = p_ratio;
 }
 
+
+// The simulated packet loss, from 0 to 1.
 double EnetStarTransport::get_simulated_packet_loss() const {
 	return simulated_packet_loss;
 }
 
+
+// `TickTransport`: this peer's id in `SceneMultiplayer` (1 for the server).
 int EnetStarTransport::get_local_peer_id() const {
 	return multiplayer.is_valid() ? multiplayer->get_unique_id() : 0;
 }
 
+
+// `TickTransport`: whether `SceneMultiplayer` has the peer.
 bool EnetStarTransport::is_peer_connected(int p_peer) const {
 	return multiplayer.is_valid() && multiplayer->get_peer_ids().has(p_peer);
 }
 
+
+// `TickTransport`: the peers of `SceneMultiplayer`.
 void EnetStarTransport::get_connected_peers(LocalVector<int> &r_peers) const {
 	r_peers.clear();
 	if (multiplayer.is_null()) {
@@ -172,14 +211,20 @@ void EnetStarTransport::get_connected_peers(LocalVector<int> &r_peers) const {
 	}
 }
 
+
+// `TickTransport`: the engines' channels.
 int EnetStarTransport::get_channel_count() const {
 	return TICK_CHANNEL_COUNT;
 }
 
+
+// `TickTransport`: the largest payload that fits a datagram, which is smaller with DTLS.
 int EnetStarTransport::get_max_payload_size() const {
 	return ENET_MAX_PAYLOAD - (encrypted ? DTLS_OVERHEAD : 0);
 }
 
+
+// Sends a packet through `SceneMultiplayer` right away.
 Error EnetStarTransport::send_now(int p_peer, int p_channel, TransferMode p_mode, const Vector<uint8_t> &p_data) {
 	MultiplayerPeer::TransferMode mode = MultiplayerPeer::TRANSFER_MODE_RELIABLE;
 	if (p_mode == TRANSFER_MODE_UNRELIABLE) {
@@ -191,6 +236,8 @@ Error EnetStarTransport::send_now(int p_peer, int p_channel, TransferMode p_mode
 	return multiplayer->send_bytes(p_data, p_peer, mode, p_channel + 1);
 }
 
+
+// `TickTransport`: sends bytes to a peer or to all of them, now or after the simulated delay.
 Error EnetStarTransport::send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) {
 	ERR_FAIL_COND_V_MSG(multiplayer.is_null(), ERR_UNCONFIGURED, "The transport isn't set up.");
 	ERR_FAIL_INDEX_V(p_channel, TICK_CHANNEL_COUNT, ERR_INVALID_PARAMETER);
@@ -227,6 +274,8 @@ Error EnetStarTransport::send(int p_peer, int p_channel, TransferMode p_mode, co
 	return OK;
 }
 
+
+// Sends the delayed packets that are due, or all of them with `p_all`.
 void EnetStarTransport::flush_simulated(bool p_all) {
 	if (outgoing.is_empty()) {
 		return;
@@ -252,11 +301,15 @@ void EnetStarTransport::flush_simulated(bool p_all) {
 	}
 }
 
+
+// `TickTransport`: closes the connection with a peer.
 void EnetStarTransport::disconnect_peer(int p_peer) {
 	ERR_FAIL_COND(multiplayer.is_null());
 	multiplayer->disconnect_peer(p_peer);
 }
 
+
+// `TickTransport`: sends the delayed packets that are due and, unless the game does it, polls `SceneMultiplayer`.
 void EnetStarTransport::poll() {
 	ERR_FAIL_COND(multiplayer.is_null());
 	flush_simulated(false);
@@ -265,6 +318,8 @@ void EnetStarTransport::poll() {
 	}
 }
 
+
+// `TickTransport`: the next connection or disconnection, if any.
 bool EnetStarTransport::pop_event(Event &r_event) {
 	if (next_event >= events.size()) {
 		events.clear();
@@ -275,6 +330,8 @@ bool EnetStarTransport::pop_event(Event &r_event) {
 	return true;
 }
 
+
+// `TickTransport`: the next packet received, if any.
 bool EnetStarTransport::pop_packet(Packet &r_packet) {
 	if (next_packet >= packets.size()) {
 		packets.clear();
@@ -287,6 +344,8 @@ bool EnetStarTransport::pop_packet(Packet &r_packet) {
 	return true;
 }
 
+
+// Exposes the class to scripts.
 void EnetStarTransport::_bind_methods() {
 	ClassDB::bind_static_method("EnetStarTransport", D_METHOD("create_server", "port", "max_clients", "compression", "tls_options"), &EnetStarTransport::create_server, DEFVAL(32), DEFVAL(COMPRESSION_RANGE_CODER), DEFVAL(Ref<TLSOptions>()));
 	ClassDB::bind_static_method("EnetStarTransport", D_METHOD("create_client", "address", "port", "compression", "tls_options", "tls_hostname"), &EnetStarTransport::create_client, DEFVAL(COMPRESSION_RANGE_CODER), DEFVAL(Ref<TLSOptions>()), DEFVAL(String()));

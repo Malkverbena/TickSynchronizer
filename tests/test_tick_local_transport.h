@@ -1,3 +1,6 @@
+// Tests of `TickLocalNetwork` and `TickLocalTransport`, the simulated network the other tests run on: the topology and
+// its events, the latency, who a packet says it's from, and what each transfer mode guarantees under jitter and loss.
+
 #pragma once
 
 #include "../source/transport/tick_local_transport.h"
@@ -6,10 +9,13 @@
 
 namespace TestTickLocalTransport {
 
+// Sends one byte from a transport, and checks that it was accepted.
 inline void send_byte(const Ref<TickTransport> &p_from, int p_to, int p_channel, TickTransport::TransferMode p_mode, uint8_t p_value) {
 	CHECK(p_from->send(p_to, p_channel, p_mode, &p_value, 1) == OK);
 }
 
+
+// Takes every packet a transport received, as bytes; with `p_expected_sender`, checks who each one came from.
 inline LocalVector<uint8_t> receive_bytes(const Ref<TickTransport> &p_transport, int p_expected_sender = -1) {
 	LocalVector<uint8_t> values;
 	TickTransport::Packet packet;
@@ -23,6 +29,9 @@ inline LocalVector<uint8_t> receive_bytes(const Ref<TickTransport> &p_transport,
 	return values;
 }
 
+
+// Peers get ids in order, see only the peers they're linked to, and get an event for every connection and
+// disconnection, in a star and in a full mesh.
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Connection events and topology") {
 	TickLocalNetwork network;
 	Ref<TickTransport> server = network.add_peer();
@@ -74,6 +83,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Connection events and
 	CHECK(client_b->is_peer_connected(4));
 }
 
+
+// A packet arrives exactly after the latency, with the sender the network recorded; a broadcast reaches the linked
+// peers; an invalid channel is refused.
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Latency and sender identity") {
 	TickLocalNetwork network;
 	Ref<TickTransport> a = network.add_peer();
@@ -105,6 +117,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Latency and sender id
 	ERR_PRINT_ON;
 }
 
+
+// Reliable packets arrive all, in order, whatever the jitter and the loss setting.
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Reliable packets arrive in order despite jitter") {
 	TickLocalNetwork network;
 	Ref<TickTransport> a = network.add_peer();
@@ -129,6 +143,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Reliable packets arri
 	CHECK(network.get_lost_packets() == 0);
 }
 
+
+// Unreliable packets are lost at the set rate and arrive out of order.
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable packets are lost and reordered") {
 	TickLocalNetwork network;
 	Ref<TickTransport> a = network.add_peer();
@@ -155,6 +171,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable packets ar
 	CHECK(reordered);
 }
 
+
+// Unreliable ordered packets may be dropped, but never arrive after a newer one.
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable ordered packets never go back in time") {
 	TickLocalNetwork network;
 	Ref<TickTransport> a = network.add_peer();
@@ -179,6 +197,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Unreliable ordered pa
 	}
 }
 
+
+// Disconnecting two peers drops the packets on their way between them.
 TEST_CASE("[Modules][TickSynchronizer][TickLocalTransport] Disconnection drops in-flight packets") {
 	TickLocalNetwork network;
 	Ref<TickTransport> a = network.add_peer();

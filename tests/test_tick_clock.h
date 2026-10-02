@@ -1,5 +1,10 @@
+// Tests of `TickFixedStepper` and `TickClock`: fixed ticks from variable deltas, hitches and the time scale; the
+// estimate of the master clock from ping samples, negative offsets, the slewing of a changed offset, the timeline held
+// while the master changes, times no network has, and the wrap around of frame indices.
+
 #pragma once
 
+#include "../source/sync/tick_protocol.h"
 #include "../source/tick/tick_clock.h"
 #include "../source/tick/tick_fixed_stepper.h"
 
@@ -7,6 +12,8 @@
 
 namespace TestTickClock {
 
+// The stepper turns frame deltas into whole ticks, keeps the remainder, and follows the elapsed time at an irregular
+// frame rate.
 TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Fixed ticks from variable deltas") {
 	TickFixedStepper stepper;
 	stepper.set_ticks_per_second(60);
@@ -38,6 +45,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Fixed ticks from variab
 	CHECK(stepper.get_next_frame_index() == uint32_t(ticks));
 }
 
+
+// A long hitch yields at most the limit of ticks and counts the dropped ones; the time scale multiplies the ticks;
+// frame indices wrap around.
 TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Hitches are capped and time scale applies") {
 	TickFixedStepper stepper;
 	stepper.set_ticks_per_second(30);
@@ -57,6 +67,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickFixedStepper] Hitches are capped and 
 	CHECK(stepper.pop_tick() == 0);
 }
 
+
+// The clock takes the offset from the sample with the lowest round trip, converts times both ways, and keeps only the
+// latest samples of its window.
 TEST_CASE("[Modules][TickSynchronizer][TickClock] Estimates the master clock from ping samples") {
 	TickClock clock;
 	clock.set_sample_window(8, 3);
@@ -94,6 +107,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Estimates the master clock fro
 	CHECK(clock.get_offset_usec() == true_offset);
 }
 
+
+// A master clock behind the local one gives a negative offset; frames count from the epoch and are 0 before it; invalid
+// samples are ignored; the master is synchronized with itself.
 TEST_CASE("[Modules][TickSynchronizer][TickClock] Negative offsets and frames") {
 	TickClock clock;
 	clock.set_sample_window(4, 1);
@@ -121,6 +137,9 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Negative offsets and frames") 
 	CHECK(master.local_to_master_usec(123) == 123);
 }
 
+
+// Once synchronized, a change of the estimate is applied at 5% of the elapsed time, so the master frame only goes
+// forward; a change above 100 ms applies at once.
 TEST_CASE("[Modules][TickSynchronizer][TickClock] Offset changes are slewed, big ones applied at once") {
 	TickClock clock;
 	clock.set_sample_window(4, 2);
@@ -166,6 +185,113 @@ TEST_CASE("[Modules][TickSynchronizer][TickClock] Offset changes are slewed, big
 	clock.clear_samples();
 	clock.add_sample(4000000, 4000000 + 10000 + uint64_t(offset), 4020000);
 	CHECK(clock.get_applied_offset_usec(4020000) == offset);
+}
+
+
+// When the master changes, the frames go on from the held timeline until the new master's samples are enough, then move
+// to its timeline without going back; a timeline far from the held one applies at once.
+TEST_CASE("[Modules][TickSynchronizer][TickClock] The frames go on from the held timeline when the master changes") {
+	TickClock clock;
+	clock.set_ticks_per_second(100);
+	clock.set_sample_window(8, 3);
+	// Follows a master whose clock is 3 s ahead, with frame 0 at its time 1 s.
+	const int64_t offset = 3000000;
+	clock.set_master_epoch_usec(1000000);
+	for (uint64_t t = 1000000; t < 1300000; t += 100000) {
+		clock.add_sample(t, t + 10000 + uint64_t(offset), t + 20000);
+	}
+	REQUIRE(clock.is_synchronized());
+	const uint64_t change = 2000000;
+	const double frame_at_change = clock.get_master_frame_time(change);
+	CHECK(frame_at_change == doctest::Approx(400.0));
+
+	// Another node is the master now: its clock is 7 s behind this one, and it says the same timeline, 2 ms later.
+	clock.hold(clock.get_timeline_offset_usec(change), clock.get_timeline_epoch_usec());
+	CHECK(clock.is_holding());
+	CHECK(clock.is_synchronized());
+	CHECK(clock.needs_samples());
+	CHECK(clock.get_master_frame_time(change) == doctest::Approx(frame_at_change));
+	CHECK(clock.get_master_frame_time(change + 100000) == doctest::Approx(frame_at_change + 10.0));
+	const int64_t new_offset = -7000000;
+	const int64_t new_epoch = 1000000 - offset + new_offset + 2000;
+	uint64_t t = change + 100000;
+	for (int i = 0; i < 2; i++) {
+		clock.set_master_epoch_usec(new_epoch);
+		clock.add_sample(t, uint64_t(int64_t(t) + 10000 + new_offset), t + 20000);
+		t += 100000;
+	}
+	// Not enough samples yet: still the held timeline.
+	CHECK(clock.is_holding());
+	CHECK(clock.get_master_frame_time(t) == doctest::Approx(frame_at_change + double(t - change) / 10000.0));
+	clock.set_master_epoch_usec(new_epoch);
+	clock.add_sample(t, uint64_t(int64_t(t) + 10000 + new_offset), t + 20000);
+	CHECK_FALSE(clock.is_holding());
+	CHECK_FALSE(clock.needs_samples());
+	// The frames start where they were, and move to the new master's timeline (0.2 frame behind) without going back.
+	const uint64_t switched = t + 20000;
+	const double held = frame_at_change + double(switched - change) / 10000.0;
+	CHECK(clock.get_master_frame_time(switched) == doctest::Approx(held));
+	bool forward = true;
+	double last = clock.get_master_frame_time(switched);
+	for (uint64_t now = switched + 1000; now < switched + 200000; now += 1000) {
+		const double frame = clock.get_master_frame_time(now);
+		forward = forward && frame > last;
+		last = frame;
+	}
+	CHECK(forward);
+	CHECK(clock.get_master_frame_time(switched + 200000) == doctest::Approx(held + 20.0 - 0.2));
+
+	// A new master on a timeline far from the held one: applied at once.
+	clock.hold(clock.get_timeline_offset_usec(switched + 200000), clock.get_timeline_epoch_usec());
+	t = switched + 300000;
+	for (int i = 0; i < 3; i++) {
+		clock.set_master_epoch_usec(new_epoch - 5000000);
+		clock.add_sample(t, uint64_t(int64_t(t) + 10000 + new_offset), t + 20000);
+		t += 100000;
+	}
+	CHECK_FALSE(clock.is_holding());
+	CHECK(clock.get_master_frame_time(t) == doctest::Approx(double(int64_t(t) + new_offset - (new_epoch - 5000000)) / 10000.0));
+}
+
+
+// A faulty master could send any time or epoch. The ones no running network has are refused, so the arithmetic of the
+// frames never overflows; a master whose clock is behind the local one is an ordinary case.
+TEST_CASE("[Modules][TickSynchronizer][TickClock] Times and epochs that aren't plausible are refused") {
+	TickClock clock;
+	clock.set_ticks_per_second(60);
+	clock.set_sample_window(4, 1);
+	CHECK(clock.set_master_epoch_usec(1000000));
+	CHECK(clock.add_sample(2000000, 5000000, 2020000));
+	REQUIRE(clock.is_synchronized());
+	const double frame = clock.get_master_frame_time(3000000);
+
+	CHECK_FALSE(clock.set_master_epoch_usec(INT64_MIN + 93));
+	CHECK_FALSE(clock.set_master_epoch_usec(INT64_MAX));
+	CHECK_FALSE(clock.set_master_epoch_usec(TickClock::MAX_TIME_USEC));
+	CHECK_FALSE(clock.add_sample(3000000, uint64_t(1) << 62, 3020000));
+	CHECK_FALSE(clock.add_sample(uint64_t(TickClock::MAX_TIME_USEC), 5000000, uint64_t(TickClock::MAX_TIME_USEC) + 20000));
+	CHECK(clock.get_master_epoch_usec() == 1000000);
+	CHECK(clock.get_sample_count() == 1);
+	CHECK(clock.get_master_frame_time(3000000) == doctest::Approx(frame));
+
+	// Three seconds behind the local clock.
+	CHECK(clock.add_sample(4000000, 1010000, 4020000));
+	CHECK(clock.get_sample_count() == 2);
+	CHECK(clock.set_master_epoch_usec(-5000000));
+}
+
+
+// The frame indices wrap around: a point of a timeline past the last index, or one that isn't a number, still has a
+// frame, the same on every platform.
+TEST_CASE("[Modules][TickSynchronizer][TickClock] The frame of a point of a timeline wraps around") {
+	CHECK(tick_frame_at(0.0) == 0);
+	CHECK(tick_frame_at(12.9) == 12);
+	CHECK(tick_frame_at(4294967295.5) == 4294967295u);
+	CHECK(tick_frame_at(4294967296.0 + 5.5) == 5);
+	CHECK(tick_frame_at(4.12339e14) == uint32_t(uint64_t(4.12339e14) & 0xFFFFFFFF));
+	CHECK(tick_frame_at(-3.0) == 0);
+	CHECK(tick_frame_at(double(NAN)) == 0);
+	CHECK(tick_frame_at(double(INFINITY)) == 0);
 }
 
 } // namespace TestTickClock

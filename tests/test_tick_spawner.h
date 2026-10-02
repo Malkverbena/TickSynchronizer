@@ -1,3 +1,9 @@
+// Tests of `TickSpawner` in a scene tree: a listed scene and a custom spawn are created on the client with their
+// controller, their objects are bound and exchange events, data that can't be sent spawns nothing, and removing a
+// spawned node on the server removes it on the client.
+//
+// `SpawnWorld` is a world whose root is its network, with a spawner under it.
+
 #pragma once
 
 #include "../source/nodes/tick_network.h"
@@ -23,6 +29,7 @@ namespace TestTickSpawner {
 
 #ifdef MODULE_GDSCRIPT_ENABLED
 
+// Compiles GDScript source into a script; the test fails if it doesn't compile.
 inline Ref<GDScript> make_spawner_script(const String &p_source) {
 	GDScriptLanguage::get_singleton()->init();
 	Ref<GDScript> script;
@@ -41,6 +48,8 @@ struct SpawnWorld {
 	TickSpawner *spawner = nullptr;
 	Ref<RefCounted> factory;
 
+	// Builds a network named `p_name` with a spawner that knows the scene at `p_scene_path` and makes custom spawns
+	// with the factory script, and adds it to the scene tree.
 	SpawnWorld(const String &p_name, const String &p_scene_path, const Ref<GDScript> &p_factory_script) {
 		network = memnew(TickNetwork);
 		network->set_name(p_name);
@@ -55,12 +64,15 @@ struct SpawnWorld {
 		SceneTree::get_singleton()->get_root()->add_child(network);
 	}
 
+
+	// Stops the network and frees the world.
 	~SpawnWorld() {
 		network->stop();
 		memdelete(network);
 	}
 };
 
+// Runs the simulated network and both worlds for `p_seconds`.
 inline void run_worlds(TickLocalNetwork &r_network, SpawnWorld &r_a, SpawnWorld &r_b, double p_seconds) {
 	for (int i = 0; i < int(p_seconds * 60.0); i++) {
 		r_network.process(1.0 / 60.0);
@@ -69,6 +81,10 @@ inline void run_worlds(TickLocalNetwork &r_network, SpawnWorld &r_a, SpawnWorld 
 	}
 }
 
+
+// The server spawns a scene and a custom node: the client gets both, with the controller set and the objects bound; the
+// controller's events arrive, filtered by the object's validator; a spawn with data that can't be sent doesn't happen;
+// and freeing a spawned node on the server frees it on the client.
 TEST_CASE("[SceneTree][Modules][TickSynchronizer][TickSpawner] Scenes and custom spawns replicate with their controller and events") {
 	// Objects created by `spawn_function`: a body with a scripted TickObject that records its events.
 	const Ref<GDScript> object_script = make_spawner_script(R"(

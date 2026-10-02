@@ -1,12 +1,17 @@
+// The wire protocol of the engines (`TickSyncCore` and `TickMeshCore`): its version, the types of message, the
+// channels, the limits a message has to respect and the arithmetic of frame indices, which wrap around. Every message
+// starts with its type, in 8 bits. No class is declared here.
+
 #pragma once
 
+#include "core/math/math_funcs.h"
 #include "core/typedefs.h"
-
-// Wire protocol of `TickSyncCore`. Every message starts with its type, in 8 bits.
 
 // 2: interest (`RELEVANCE`) and snapshots split in parts (F8).
 // 3: the roles of a distributed mesh move (`ROLES`, `REGISTRY_REPORT`, the roles in the mesh hello; ADR-073).
-static constexpr uint16_t TICK_PROTOCOL_VERSION = 3;
+// 4: role candidates, confirmed losses and inherited spawns in a distributed mesh (`ROLE_STATUS`, the process and the
+//    candidates in the mesh hello, who spawned in `SPAWN`; ADR-074).
+static constexpr uint16_t TICK_PROTOCOL_VERSION = 4;
 
 // Frame index meaning "none".
 static constexpr uint32_t TICK_FRAME_NONE = UINT32_MAX;
@@ -16,6 +21,9 @@ static constexpr int TICK_MAX_EVENT_NAME_BYTES = 255;
 
 // Most frames an input message describes (`input_redundancy` is at most this); a message with more is malformed.
 static constexpr int TICK_MAX_INPUT_FRAMES = 64;
+
+// Most ticks per second a network runs at; a server that announces more isn't followed.
+static constexpr int TICK_MAX_TICKS_PER_SECOND = 1000;
 
 enum TickMessageType {
 	TICK_MESSAGE_HELLO = 1,
@@ -48,6 +56,8 @@ enum TickMessageType {
 	// Roles of a distributed mesh (ADR-073).
 	TICK_MESSAGE_ROLES,
 	TICK_MESSAGE_REGISTRY_REPORT,
+	// What a node sees of the nodes with the roles (ADR-074).
+	TICK_MESSAGE_ROLE_STATUS,
 };
 
 enum TickChannel {
@@ -64,7 +74,18 @@ enum TickChannel {
 	TICK_CHANNEL_COUNT = 5,
 };
 
-// `true` when frame `p_a` comes after frame `p_b`, handling the wrap around.
+// Whether frame `p_a` comes after frame `p_b`. Frame indices wrap around, so this holds for frames less than 2^31
+// apart.
 static inline bool tick_frame_after(uint32_t p_a, uint32_t p_b) {
 	return int32_t(p_a - p_b) > 0;
+}
+
+
+// The index of the frame a point of a timeline is in. Frame indices wrap around; a point that isn't a number, or
+// before the timeline's start, gives frame 0.
+static inline uint32_t tick_frame_at(double p_timeline_frame) {
+	if (!(p_timeline_frame > 0.0) || !Math::is_finite(p_timeline_frame)) {
+		return 0;
+	}
+	return uint32_t(uint64_t(Math::fmod(Math::floor(p_timeline_frame), 4294967296.0)));
 }
