@@ -16,6 +16,30 @@ Tests (doctest, built with `tests=yes`):
 bin/godot.linuxbsd.editor.x86_64 --headless --test --test-case="*TickSynchronizer*"
 ```
 
+Run them on a release template too: it's the build games ship, and some defects only show there (a release build has
+no padding around its allocations, for example).
+
+```sh
+scons platform=linuxbsd target=template_release tests=yes custom_modules=/path/to/tick_synchronizer
+bin/godot.linuxbsd.template_release.x86_64 --headless --test --test-case="*TickSynchronizer*"
+```
+
+### Fuzzing and chaos campaigns
+
+`tests/test_tick_fuzz.h` holds longer campaigns, left out of the pattern above: recorded traffic sent again with
+mutations by an impostor, a distributed mesh under link drops, restarts and role changes, and bare ENet endpoints
+against the transports. They are meant for a build with the sanitizers:
+
+```sh
+scons platform=linuxbsd target=editor tests=yes custom_modules=/path/to/tick_synchronizer use_asan=yes use_ubsan=yes debug_symbols=yes
+TICK_FUZZ_SEEDS=6 TICK_FUZZ_STEPS=1500 ASAN_OPTIONS=detect_leaks=0 \
+    bin/godot.linuxbsd.editor.x86_64.san --headless --test --test-case="*TickSyncFuzz*"
+```
+
+`TICK_FUZZ_SEEDS` is the number of seeds (3 by default), `TICK_FUZZ_SEED` the first one (1) and `TICK_FUZZ_STEPS` the
+steps of 1/60 s per seed (600). The two campaigns where a node of a distributed mesh misbehaves fail on some seeds:
+that mesh trusts its nodes.
+
 ## Requirements
 
 | Requirement | Value |
