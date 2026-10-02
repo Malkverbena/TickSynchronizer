@@ -64,6 +64,8 @@ public:
 		DISCONNECT_REASON_VERSION,
 		// The host ended the mesh.
 		DISCONNECT_REASON_ENDED,
+		// The mesh takes more players than this player keeps links with (`pair_limit`).
+		DISCONNECT_REASON_TOO_LARGE,
 	};
 
 	// How this node reaches another one.
@@ -154,6 +156,19 @@ private:
 		uint64_t last_usec = 0;
 	};
 
+	// Host: the bytes a player can still have relayed (refilled over time).
+	struct RelayBudget {
+		double bytes = 0.0;
+		uint64_t last_usec = 0;
+	};
+
+	// Host: the bytes relayed to a player that ENet still holds (not sent yet, or not acknowledged). ENet tells when a
+	// packet is done through the packet's callback, which gets this through a pointer: allocated apart, so it stays
+	// in place.
+	struct RelayQueue {
+		uint64_t bytes = 0;
+	};
+
 	// Player: the key and certificate of its direct links, generated on a worker thread (defined in the source).
 	struct PlayerKeyJob;
 	static void generate_player_key(void *p_job);
@@ -197,6 +212,11 @@ private:
 	HashMap<String, JoinBudget> join_budgets;
 	uint64_t next_budget_prune_usec = 0;
 	uint64_t next_heartbeat_usec = 0;
+	// The relay's limits (ADR-077): bytes per second a player may have relayed, and bytes the host holds for a player.
+	int relay_rate_limit = 1024 * 1024;
+	int relay_queue_limit = 8 * 1024 * 1024;
+	HashMap<int, RelayBudget> relay_budgets;
+	HashMap<int, RelayQueue *> relay_queues;
 
 	// Player: the host's socket and link, and the other players.
 	String host_address;
@@ -211,6 +231,8 @@ private:
 	PackedByteArray join_data;
 	// The host's player limit, from its welcome: a player never keeps more pairs than the mesh can have.
 	int host_max_players = 0;
+	// The most other players this player keeps a link with: it leaves a mesh that takes more (the host says how many).
+	int pair_limit = 64;
 	// When the host was last heard from (it sends heartbeats, so a silent host is a gone one).
 	uint64_t host_heard_usec = 0;
 	Ref<RefCounted> host_socket;
@@ -247,6 +269,7 @@ private:
 	uint64_t multiplayer_queued_bytes = 0;
 
 	uint64_t relayed_packets = 0;
+	uint64_t relay_dropped_packets = 0;
 	uint64_t rejected_connections = 0;
 	uint64_t failed_punches = 0;
 	uint64_t dropped_packets = 0;
@@ -272,7 +295,16 @@ private:
 	void host_on_join(ObjectID p_link, const uint8_t *p_data, int p_size);
 	void host_validate_joins();
 	void host_admit(ObjectID p_link);
-	void host_refuse(ObjectID p_link);
+	// `p_reason`: the disconnection data the player gets (why it was refused).
+	void host_refuse(ObjectID p_link, int p_reason);
+	// Whether the mesh has a place for one more player, counting the ones the game is still deciding on.
+	bool host_has_place(ObjectID p_except) const;
+	// Takes `p_bytes` of the relay budget of a player; `false` when it doesn't have them.
+	bool host_take_relay_budget(int p_player, int p_bytes);
+	// Removes a member the relay can't serve (it sent too much, or it can't take what is sent to it).
+	void host_remove_member(int p_member);
+	// Frees what the relay kept about the players (once their sockets are closed).
+	void host_clear_relay();
 	void host_handle_rejoin(int p_from, const LocalVector<int> &p_direct);
 	// A player that took over opens its `takeover_port`, if it has one.
 	void host_open_takeover_sockets();
@@ -368,9 +400,21 @@ public:
 	// validator, everybody is admitted.
 	void set_join_validator(const Callable &p_validator) { join_validator = p_validator; }
 	Callable get_join_validator() const { return join_validator; }
-	// Seconds a player has to send its join data and be admitted.
+	// Seconds the game has to admit a player whose join data arrived (the data itself must come within 2 seconds).
 	void set_join_timeout(double p_seconds);
 	double get_join_timeout() const { return join_timeout; }
+	// Host: bytes per second a player may send through the relay (twice that at once); 0 for no limit. Beyond it,
+	// unreliable packets are dropped, and a player that sends reliable ones is removed.
+	void set_relay_rate_limit(int p_bytes_per_second);
+	int get_relay_rate_limit() const { return relay_rate_limit; }
+	// Host: bytes the relay holds for a player that takes them slower than they come; 0 for no limit. Beyond it,
+	// unreliable packets are dropped, and a player that can't take the reliable ones is removed.
+	void set_relay_queue_limit(int p_bytes);
+	int get_relay_queue_limit() const { return relay_queue_limit; }
+	// Player: the most other players it keeps a link with (a socket each, when direct). It leaves a mesh whose host
+	// says it takes more players than that, with `DISCONNECT_REASON_TOO_LARGE`.
+	void set_pair_limit(int p_pairs);
+	int get_pair_limit() const { return pair_limit; }
 	Error admit_player(int p_peer);
 	Error refuse_player(int p_peer);
 	// Host: leaves the mesh, and the next player of the succession takes its place (`close()` ends the mesh).
