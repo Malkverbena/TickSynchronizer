@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../source/transport/enet_mesh_transport.h"
+#include "test_tick_fuzz.h"
 #include "test_tick_sync_core.h"
 
 #include "core/os/os.h"
@@ -257,6 +258,113 @@ TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] Three ENet nodes form 
 		cores[i].unregister_object(&npcs[i]);
 		cores[i].stop();
 	}
+}
+
+
+// A node is added with the address it listens on, and its connections must come from there: whoever reaches the port
+// can't take the place of a node that isn't connected just by declaring its id. With `check_addresses` off the
+// connection is taken, as it was before the audit of 2026-10-01.
+TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] A connection must come from the address of its node") {
+	const int port = 43000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
+	Ref<EnetMeshTransport> node = EnetMeshTransport::create(1, port);
+	REQUIRE(node.is_valid());
+	CHECK(node->is_checking_addresses());
+	// Node 2 is somewhere else, and it isn't up.
+	CHECK(node->add_node(2, "10.11.12.13", 9002) == OK);
+
+	// A bare ENet socket at another address of this machine declares itself node 2.
+	TestTickFuzz::RogueSocket rogue;
+	if (!rogue.open("127.0.0.2", "127.0.0.1", port, 2, TICK_CHANNEL_COUNT)) {
+		MESSAGE("Can't bind a socket to 127.0.0.2 on this system: not tested.");
+		return;
+	}
+	for (int t = 0; t < 2000 && !rogue.disconnected; t++) {
+		node->poll();
+		rogue.poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(rogue.disconnected);
+	CHECK_FALSE(node->is_peer_connected(2));
+	TickTransport::Event event;
+	CHECK_FALSE(node->pop_event(event));
+	rogue.close();
+
+	node->set_check_addresses(false);
+	REQUIRE(rogue.open("127.0.0.2", "127.0.0.1", port, 2, TICK_CHANNEL_COUNT));
+	for (int t = 0; t < 2000 && !node->is_peer_connected(2); t++) {
+		node->poll();
+		rogue.poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(node->is_peer_connected(2));
+	rogue.close();
+}
+
+
+// With a secret, the two sides of a link prove to each other that they know it before the link is reported. A node
+// with another secret, or with none, never becomes a node of the mesh, and nothing it sends reaches the engines.
+TEST_CASE("[Modules][TickSynchronizer][EnetMeshTransport] With a secret, only the nodes that prove it join the mesh") {
+	const int base_port = 44000 + int(OS::get_singleton()->get_ticks_usec() % 10000);
+	PackedByteArray secret;
+	PackedByteArray other_secret;
+	for (int i = 0; i < 32; i++) {
+		secret.push_back(uint8_t(i * 7 + 3));
+		other_secret.push_back(uint8_t(i * 5 + 1));
+	}
+	Ref<EnetMeshTransport> nodes[4];
+	for (int i = 0; i < 4; i++) {
+		nodes[i] = EnetMeshTransport::create(i + 1, base_port + i);
+		REQUIRE(nodes[i].is_valid());
+		nodes[i]->set_retry_interval(0.05);
+	}
+	// Nodes 1 and 2 have the secret; node 3 has another one, node 4 none.
+	nodes[0]->set_secret(secret);
+	nodes[1]->set_secret(secret);
+	nodes[2]->set_secret(other_secret);
+	CHECK(nodes[0]->has_secret());
+	CHECK_FALSE(nodes[3]->has_secret());
+	for (int i = 1; i < 4; i++) {
+		CHECK(nodes[0]->add_node(i + 1, "127.0.0.1", base_port + i) == OK);
+		CHECK(nodes[i]->add_node(1, "127.0.0.1", base_port) == OK);
+	}
+
+	ERR_PRINT_OFF;
+	for (int t = 0; t < 2000 && !(nodes[0]->is_peer_connected(2) && nodes[1]->is_peer_connected(1)); t++) {
+		poll_mesh(nodes, 4, 1);
+	}
+	REQUIRE(nodes[0]->is_peer_connected(2));
+	REQUIRE(nodes[1]->is_peer_connected(1));
+	// Long enough for the other two to try several times.
+	poll_mesh(nodes, 4, 400);
+	CHECK_FALSE(nodes[0]->is_peer_connected(3));
+	CHECK_FALSE(nodes[0]->is_peer_connected(4));
+	CHECK_FALSE(nodes[2]->is_peer_connected(1));
+
+	// Node 4 asks for no proof, so it takes its link for a node's and sends on it: node 1 delivers nothing of it.
+	const uint8_t payload[3] = { 9, 9, 9 };
+	bool sent = false;
+	for (int t = 0; t < 1000 && !sent; t++) {
+		poll_mesh(nodes, 4, 1);
+		sent = nodes[3]->is_peer_connected(1) && nodes[3]->send(1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK;
+	}
+	CHECK(sent);
+	CHECK(nodes[1]->send(1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, payload, 3) == OK);
+	int from_node_2 = 0;
+	int from_others = 0;
+	for (int t = 0; t < 300; t++) {
+		poll_mesh(nodes, 4, 1);
+		TickTransport::Packet packet;
+		while (nodes[0]->pop_packet(packet)) {
+			from_node_2 += packet.from_peer == 2 ? 1 : 0;
+			from_others += packet.from_peer != 2 ? 1 : 0;
+		}
+	}
+	ERR_PRINT_ON;
+	CHECK(from_node_2 == 1);
+	CHECK(from_others == 0);
+	LocalVector<int> connected;
+	nodes[0]->get_connected_peers(connected);
+	CHECK(connected.size() == 1);
 }
 
 } // namespace TestTickCluster
