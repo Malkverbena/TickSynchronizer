@@ -1037,7 +1037,8 @@ TEST_CASE("[Modules][TickSynchronizer][EnetHostedMeshTransport] Refused players 
 		const Array event = future_host->call("service", 0);
 		if (int(event[0]) == 1) {
 			Object *link = event[1];
-			link->call("peer_disconnect_now", 0x544B5633);
+			// Not `peer_disconnect_now()`: this socket goes on being serviced (see `enet_close_link()`).
+			link->call("peer_disconnect", 0x544B5633);
 		}
 		OS::get_singleton()->delay_usec(1000);
 	}

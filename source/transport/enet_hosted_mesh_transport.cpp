@@ -2,6 +2,7 @@
 
 #include "../common/tick_data_buffer.h"
 #include "../sync/tick_protocol.h"
+#include "enet_link.h"
 #include "tick_multiplayer_peer.h"
 
 #include "core/io/marshalls.h"
@@ -852,8 +853,8 @@ void EnetHostedMeshTransport::host_refuse(ObjectID p_link) {
 	ERR_FAIL_NULL(pending);
 	ENetPacketPeer *link = as_link(pending->link);
 	if (link && link->is_active()) {
-		// Right away, so the connection doesn't hold a place of the host.
-		link->peer_disconnect_now(DISCONNECT_REMOVED);
+		// It doesn't count as a player anymore; its link closes once it acknowledges it (see `enet_close_link()`).
+		enet_close_link(link, DISCONNECT_REMOVED);
 	}
 	pending_joins.erase(p_link);
 }
@@ -919,11 +920,11 @@ void EnetHostedMeshTransport::host_send_succession() {
 void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uint32_t p_data, int p_kind) {
 	ENetPacketPeer *link = as_link(p_link);
 	ERR_FAIL_NULL(link);
-	// Refused connections are closed right away, so they don't hold places of the host.
+	// Refused connections are closed at once (see `enet_close_link()`): they never count as players.
 	if (p_kind == 2) {
 		// A member's own socket (after a migration) takes no new connections.
 		rejected_connections++;
-		link->peer_disconnect_now();
+		enet_close_link(link);
 		return;
 	}
 	if ((p_data & 0xFFFFFF00) == JOIN_MAGIC_PREFIX) {
@@ -943,7 +944,7 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 		}
 		if (refusal != 0) {
 			rejected_connections++;
-			link->peer_disconnect_now(refusal);
+			enet_close_link(link, refusal);
 			return;
 		}
 		PendingJoin pending;
@@ -956,13 +957,15 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 	}
 
 	// The registration of a pair's socket: its public endpoint is where the connection came from.
-	const uint64_t *key = introductions_by_token.getptr(p_data);
-	Introduction *introduction = key ? introductions.getptr(*key) : nullptr;
+	const uint64_t *found = introductions_by_token.getptr(p_data);
+	Introduction *introduction = found ? introductions.getptr(*found) : nullptr;
 	if (introduction == nullptr || introduction->relayed) {
 		rejected_connections++;
-		link->peer_disconnect_now();
+		enet_close_link(link);
 		return;
 	}
+	// A copy: the token's entry is erased below.
+	const uint64_t key = *found;
 	const int side = introduction->registration_tokens[0] == p_data ? 0 : 1;
 	introduction->registered[side] = true;
 	introduction->addresses[side] = String(link->get_remote_address());
@@ -971,7 +974,7 @@ void EnetHostedMeshTransport::host_on_connect(const Ref<RefCounted> &p_link, uin
 	// Closed gracefully, so the player's socket is free to connect to the other player.
 	link->peer_disconnect();
 
-	host_try_punch(*key);
+	host_try_punch(key);
 }
 
 void EnetHostedMeshTransport::host_try_punch(uint64_t p_key) {
@@ -1634,7 +1637,7 @@ void EnetHostedMeshTransport::player_service_pair(int p_peer, Pair &r_pair) {
 			const bool expected = accepts && r_pair.state == PAIR_PUNCHING && r_pair.link.is_null() && event.data == r_pair.connect_token && event.peer->get_remote_address() == IPAddress(r_pair.address) && OS::get_singleton()->get_ticks_usec() < r_pair.deadline_usec;
 			if (!expected) {
 				rejected_connections++;
-				event.peer->peer_disconnect_now();
+				enet_close_link(event.peer.ptr());
 				continue;
 			}
 			r_pair.link = event.peer;

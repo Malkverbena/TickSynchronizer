@@ -1,6 +1,7 @@
 #include "enet_mesh_transport.h"
 
 #include "../sync/tick_protocol.h"
+#include "enet_link.h"
 
 #include "core/os/os.h"
 #include "core/variant/variant.h"
@@ -51,7 +52,13 @@ EnetMeshTransport::~EnetMeshTransport() {
 void EnetMeshTransport::close_node(MeshNode &r_node) {
 	ENetPacketPeer *peer = as_peer(r_node.peer);
 	if (peer && peer->is_active()) {
-		peer->peer_disconnect_now();
+		if (r_node.outgoing_host.is_valid()) {
+			// Its own socket, destroyed below.
+			peer->peer_disconnect_now();
+		} else {
+			// A link of the listening socket, which goes on being serviced.
+			enet_close_link(peer);
+		}
 	}
 	if (r_node.peer.is_valid()) {
 		ids_by_peer.erase(r_node.peer->get_instance_id());
@@ -334,7 +341,7 @@ void EnetMeshTransport::service_host(const Ref<RefCounted> &p_host, bool p_accep
 			const int id = int(event.data);
 			MeshNode *node = p_accepts_incoming ? nodes.getptr(id) : nullptr;
 			if (node == nullptr || id < local_id || node->connected) {
-				event.peer->peer_disconnect_now();
+				enet_close_link(event.peer.ptr());
 				continue;
 			}
 			on_connected(id, event.peer);
