@@ -264,6 +264,9 @@ private:
 	HashSet<uint16_t> pending_requests;
 	// The highest net id this node heard of: a registry that takes over doesn't give it again.
 	uint16_t highest_net_id = 0;
+	// The nodes that were in the mesh and left, until they come back: the registry doesn't make one of them the first
+	// owner of an object (its objects were orphaned when it left).
+	HashSet<int> departed;
 
 	// Whether this node is the registry's node.
 	bool is_registry() const { return local_id == settings.registry_peer; }
@@ -426,7 +429,8 @@ private:
 
 
 	// Registry: a node claims an object. A new path gets an id, an owner (the controller, or the claimant) and an
-	// announcement to every node; a known one is announced again to the claimant.
+	// announcement to every node; a known one is announced again to the claimant (to every node, when its schema hash
+	// had to be corrected).
 	void registry_handle_claim(int p_peer, const String &p_path, int p_owner, uint32_t p_schema_hash);
 
 
@@ -477,6 +481,12 @@ private:
 	bool registry_local_state(uint16_t p_id, TickDataBuffer &r_state) const;
 
 
+	// Registry: the schema hash to record for a path: the one of this node's own object there, when it has one (every
+	// node of a mesh declares the same variables for a path, so the registry's object is the reference); else the one
+	// a node told it.
+	uint32_t registry_schema_hash(const String &p_path, uint32_t p_told) const;
+
+
 	// Whether an assignment of the roles wins over another: the newer term; with the same term, the lower registry id,
 	// then the lower clock master id.
 	static bool roles_beat(uint32_t p_term, int p_registry, int p_clock, uint32_t p_other_term, int p_other_registry, int p_other_clock);
@@ -521,12 +531,17 @@ private:
 	bool is_clock_lost() const { return get_role_view(settings.clock_master, clock_boot) == ROLE_VIEW_LOST; }
 
 
+	// Whether a role has to be taken by a successor: its process is lost, or nobody can tell which process it is (the
+	// roles moved, this node never met that process, and the role's node isn't in the mesh).
+	bool is_role_vacant(int p_node, uint32_t p_boot) const;
+
+
 	// The node that should take a lost role, or 0 if none of the candidates is in the mesh.
 	int get_role_successor() const;
 
 
-	// Takes the lost roles when this node is their successor, has its quorum, and no node it's connected to still sees
-	// the process that had them.
+	// Takes the vacant roles when this node is their successor, has its quorum, and no node it's connected to still
+	// sees the process that had them.
 	void fill_vacant_roles();
 
 

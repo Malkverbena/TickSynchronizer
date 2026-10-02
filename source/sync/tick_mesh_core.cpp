@@ -145,6 +145,7 @@ Error TickMeshCore::start(const Ref<TickTransport> &p_transport, uint64_t p_now_
 	registry_deferred.clear();
 	pending_requests.clear();
 	highest_net_id = 0;
+	departed.clear();
 	// The spawn ids of a process don't repeat the ones of a previous process of this node, which the registry keeps
 	// (ADR-074).
 	next_spawn_counter = MAX(uint32_t(1), boot_id & 0xFFFFF);
@@ -208,6 +209,7 @@ void TickMeshCore::stop_now() {
 	registry_deferred.clear();
 	registry_orphan_check = false;
 	pending_requests.clear();
+	departed.clear();
 }
 
 
@@ -571,6 +573,7 @@ void TickMeshCore::handle_hello(int p_peer, TickDataBuffer &p_message) {
 // them, and this node's view of the roles.
 void TickMeshCore::on_peer_ready(int p_peer) {
 	peers[p_peer].ready = true;
+	departed.erase(p_peer);
 	if (is_registry() && registry_boot == boot_id) {
 		for (const KeyValue<uint16_t, RegistryRecord> &E : registry) {
 			TickDataBuffer state;
@@ -619,6 +622,7 @@ void TickMeshCore::handle_events() {
 			continue;
 		}
 		left.push_back(event.peer);
+		departed.insert(event.peer);
 		// Its spawns belong to the registry from now on (ADR-074).
 		for (KeyValue<uint32_t, SpawnRecord> &E : spawns) {
 			if (E.value.origin == event.peer) {
@@ -1182,13 +1186,23 @@ void TickMeshCore::update_interpolation(uint64_t p_now_usec) {
 // ------------------------------------------------------------------------------------------------------ Registry
 
 // Registry: a node claims an object. A new path gets an id, an owner (the controller, or the claimant) and an
-// announcement to every node; a known one is announced again to the claimant.
+// announcement to every node; a known one is announced again to the claimant (to every node, when its schema hash had
+// to be corrected).
 void TickMeshCore::registry_handle_claim(int p_peer, const String &p_path, int p_owner, uint32_t p_schema_hash) {
 	const uint16_t *existing = registry_ids_by_path.getptr(p_path);
 	if (existing) {
-		// Already registered: the claimant gets the current entry.
+		RegistryRecord &known = registry[*existing];
+		const uint32_t schema_hash = registry_schema_hash(p_path, known.schema_hash);
 		TickDataBuffer state;
 		const bool has_state = registry_local_state(*existing, state);
+		if (schema_hash != known.schema_hash) {
+			// The record has a hash that isn't the one of this registry's own object (the object was registered here
+			// after a node claimed its path): corrected, and announced again to every node.
+			known.schema_hash = schema_hash;
+			registry_change_owner(*existing, known.owner, known.frame, has_state ? &state : nullptr);
+			return;
+		}
+		// Already registered: the claimant gets the current entry.
 		registry_send_announce(p_peer, *existing, has_state ? &state : nullptr);
 		return;
 	}
@@ -1215,11 +1229,16 @@ void TickMeshCore::registry_handle_claim(int p_peer, const String &p_path, int p
 	const uint16_t id = next_net_id++;
 	RegistryRecord record;
 	record.path = p_path;
-	// The first claim decides the initial owner: the object's controller, or the claimant.
+	// The first claim decides the initial owner: the object's controller, or the claimant. A controller that isn't in
+	// the mesh yet owns the object from the start (it's expected). One that was in the mesh and left doesn't: its
+	// objects were orphaned when it left, and this one is an orphan from the start, for the project to assign.
 	record.owner = p_owner > 0 ? p_owner : p_peer;
+	if (!is_peer_ready(record.owner) && departed.has(record.owner)) {
+		record.owner = 0;
+	}
 	record.version = 1;
 	record.frame = current;
-	record.schema_hash = p_schema_hash;
+	record.schema_hash = registry_schema_hash(p_path, p_schema_hash);
 	registry.insert(id, record);
 	registry_ids_by_path.insert(p_path, id);
 
@@ -1254,6 +1273,17 @@ bool TickMeshCore::registry_local_state(uint16_t p_id, TickDataBuffer &r_state) 
 	read_values(entry->object, values);
 	write_values(r_state, entry->object, values);
 	return true;
+}
+
+
+// Registry: the schema hash to record for a path. Every node of a mesh declares the same variables for a path, so
+// when this node has the object, its own hash is the reference, whatever a node told it. A hash that isn't the
+// object's (from a node with a defect, or learned from a registry that had one) would be announced to every node, and
+// none that binds the object afterwards could: the object would be simulated by nobody. Without the object here, the
+// hash a node told is all there is.
+uint32_t TickMeshCore::registry_schema_hash(const String &p_path, uint32_t p_told) const {
+	TickSyncObject *const *local = local_objects.getptr(p_path);
+	return local ? (*local)->get_sync_schema().hash() : p_told;
 }
 
 
@@ -1346,8 +1376,9 @@ void TickMeshCore::registry_handle_request(int p_peer, uint16_t p_id) {
 	if (record->owner == p_peer) {
 		return;
 	}
-	if (record->owner == 0) {
-		// An orphan goes to the first node that asks, from its last known state.
+	if (!is_peer_ready(record->owner)) {
+		// An orphan goes to the first node that asks, from its last known state. So does an object whose owner isn't
+		// in the mesh (it was registered for a node that didn't come): nobody would answer the transfer.
 		TickDataBuffer state;
 		const bool has_state = registry_local_state(p_id, state);
 		registry_change_owner(p_id, p_peer, stepper.get_next_frame_index(), has_state ? &state : nullptr);
@@ -1378,7 +1409,8 @@ void TickMeshCore::registry_handle_assign(int p_peer, uint16_t p_id, int p_targe
 	if (record->owner == p_target) {
 		return;
 	}
-	if (record->owner == 0) {
+	if (!is_peer_ready(record->owner)) {
+		// An orphan, or an object whose owner isn't in the mesh: assigned at once, from its last known state.
 		TickDataBuffer state;
 		const bool has_state = registry_local_state(p_id, state);
 		registry_change_owner(p_id, p_target, stepper.get_next_frame_index(), has_state ? &state : nullptr);
@@ -1838,8 +1870,9 @@ void TickMeshCore::handle_roles(int p_peer, TickDataBuffer &p_message) {
 	const int new_clock = int(p_message.read_int_bits(32));
 	const uint32_t new_registry_boot = uint32_t(p_message.read_uint_bits(32));
 	const uint32_t new_clock_boot = uint32_t(p_message.read_uint_bits(32));
-	// A term no node of this mesh gets to by changing its roles makes the message malformed.
-	if (p_message.is_buffer_failed() || new_registry <= 0 || new_clock <= 0 || mesh_serial_apart(term, roles_term)) {
+	// A term no node of this mesh gets to by changing its roles makes the message malformed. So does "none" (0): the
+	// roles a mesh starts with are configured, never announced.
+	if (p_message.is_buffer_failed() || term == 0 || new_registry <= 0 || new_clock <= 0 || mesh_serial_apart(term, roles_term)) {
 		stats.malformed_packets++;
 		return;
 	}
@@ -1885,11 +1918,23 @@ int TickMeshCore::get_role_successor() const {
 }
 
 
-// Takes the lost roles when this node is their successor, has its quorum, and no node it's connected to still sees
+// Whether a role has to be taken by a successor. Its process is lost; or nobody can tell which process it is: the
+// roles moved at least once (the roles a mesh starts with wait for their configured nodes), this node never met the
+// process, and the role's node isn't in the mesh. Without the second case, roles announced for a node that doesn't
+// exist would stay with nobody for good.
+bool TickMeshCore::is_role_vacant(int p_node, uint32_t p_boot) const {
+	if (p_boot != 0) {
+		return !is_role_process_present(p_node, p_boot);
+	}
+	return roles_term != 0 && !is_peer_ready(p_node);
+}
+
+
+// Takes the vacant roles when this node is their successor, has its quorum, and no node it's connected to still sees
 // the process that had them.
 void TickMeshCore::fill_vacant_roles() {
-	const bool registry_lost = is_registry_lost();
-	const bool clock_lost = is_clock_lost();
+	const bool registry_lost = is_role_vacant(settings.registry_peer, registry_boot);
+	const bool clock_lost = is_role_vacant(settings.clock_master, clock_boot);
 	if (!registry_lost && !clock_lost) {
 		return;
 	}
@@ -1908,10 +1953,11 @@ void TickMeshCore::fill_vacant_roles() {
 		if (!E.value.status_known || status.term != roles_term || status.registry != settings.registry_peer || status.clock != settings.clock_master) {
 			return;
 		}
-		if (registry_lost && status.registry_view == ROLE_VIEW_SEEN && status.registry_boot == registry_boot) {
+		// A node that sees a process this one doesn't know of tells it, and the role is known from then on.
+		if (registry_lost && status.registry_view == ROLE_VIEW_SEEN && (registry_boot == 0 || status.registry_boot == registry_boot)) {
 			return;
 		}
-		if (clock_lost && status.clock_view == ROLE_VIEW_SEEN && status.clock_boot == clock_boot) {
+		if (clock_lost && status.clock_view == ROLE_VIEW_SEEN && (clock_boot == 0 || status.clock_boot == clock_boot)) {
 			return;
 		}
 	}
@@ -2413,7 +2459,7 @@ void TickMeshCore::handle_registry_report(int p_peer, TickDataBuffer &p_message)
 		merged.owner = owner;
 		merged.version = version;
 		merged.frame = frame;
-		merged.schema_hash = schema_hash;
+		merged.schema_hash = registry_schema_hash(path, schema_hash);
 		registry.insert(id, merged);
 		registry_ids_by_path.insert(path, id);
 		highest_net_id = MAX(highest_net_id, id);
@@ -2456,7 +2502,7 @@ void TickMeshCore::registry_take_over() {
 		record.owner = E.value.owner;
 		record.version = E.value.version;
 		record.frame = E.value.frame;
-		record.schema_hash = E.value.schema_hash;
+		record.schema_hash = registry_schema_hash(E.value.path, E.value.schema_hash);
 		registry.insert(E.key, record);
 		registry_ids_by_path.insert(record.path, E.key);
 		highest_net_id = MAX(highest_net_id, E.key);

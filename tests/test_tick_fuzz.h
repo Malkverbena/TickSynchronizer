@@ -7,9 +7,9 @@
 // Environment: `TICK_FUZZ_SEEDS` (how many seeds, 3 by default), `TICK_FUZZ_SEED` (the first one, 1), `TICK_FUZZ_STEPS`
 // (steps of 1/60 s per seed, 600).
 //
-// The two campaigns where a node of a distributed mesh misbehaves still fail on a few seeds (3 in 200): the mesh trusts
-// its registry, and a registry may announce an object with a schema that isn't the object's, which the other nodes then
-// can't bind (`notes/audit-2026-10-01.md`). They stay as they are, to tell when that changes.
+// The two campaigns where a node of a distributed mesh misbehaves check what is left once that node is gone: the others
+// must agree again, the registry must answer, and every owner must simulate and be followed. While the node is there,
+// the mesh trusts it (ADR-013): the campaigns don't check what it does to the others meanwhile.
 //
 // The helpers, some of them used by the other test files: `TapTransport` records what an engine sends; `Fuzzer` makes
 // the random choices and the mutations, the same for a given seed; `FuzzBody` is a body with one variable of every kind

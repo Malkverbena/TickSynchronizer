@@ -99,7 +99,7 @@
 			<return type="int" enum="Error" />
 			<param index="0" name="peer" type="int" />
 			<description>
-				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry to give this object to [param peer]. An orphan is assigned directly, from its last known state; an owned object is transferred without asking its owner. Used, for example, to adopt orphans (see [signal TickNetwork.authority_orphaned]).
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry to give this object to [param peer]. An orphan is assigned directly, from its last known state, and so is an object whose owner isn't in the mesh; an owned object is transferred without asking its owner. Used, for example, to adopt orphans (see [signal TickNetwork.authority_orphaned]).
 			</description>
 		</method>
 		<method name="declare_var">
@@ -175,7 +175,7 @@
 		<method name="request_authority">
 			<return type="int" enum="Error" />
 			<description>
-				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry for this object. The owner may refuse ([method _approve_authority_request]); a request that arrives while another transfer of the object is in progress is refused, and so is one the registry didn't answer before moving to another node ([signal TickNetwork.authority_request_denied]). Once transferred, [method _on_authority_changed] is called on every node.
+				With [constant TickNetwork.AUTHORITY_DISTRIBUTED]: asks the registry for this object. An orphan goes to the first node that asks, and so does an object whose owner isn't in the mesh (it was registered for a node that didn't come). Otherwise the owner may refuse ([method _approve_authority_request]); a request that arrives while another transfer of the object is in progress is refused, and so is one the registry didn't answer before moving to another node ([signal TickNetwork.authority_request_denied]). Once transferred, [method _on_authority_changed] is called on every node.
 			</description>
 		</method>
 		<method name="send_event">
@@ -191,7 +191,7 @@
 	</methods>
 	<members>
 		<member name="controller_peer" type="int" setter="set_controller_peer" getter="get_controller_peer" default="1">
-			Peer whose input drives this object: 1 for the server (NPCs, the host), or a client id. With [constant TickNetwork.AUTHORITY_DISTRIBUTED], the node that owns the object at first. It can't change while the object is registered.
+			Peer whose input drives this object: 1 for the server (NPCs, the host), or a client id. With [constant TickNetwork.AUTHORITY_DISTRIBUTED], the node that owns the object at first: the object waits for it if it isn't in the mesh yet, and starts as an orphan if that node was in the mesh and left. It can't change while the object is registered.
 		</member>
 		<member name="network_path" type="NodePath" setter="set_network_path" getter="get_network_path" default="NodePath(&quot;&quot;)">
 			Path to the [TickNetwork]. If empty, the first [TickNetwork] ancestor is used, or else the first one in the scene.

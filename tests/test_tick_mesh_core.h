@@ -1423,4 +1423,180 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] States far ahead of the timelin
 	CHECK(world.cores[3].get_stats().malformed_packets == 0);
 }
 
+
+// The registry's own object is the reference for the variables of a path. A schema hash that isn't the object's,
+// reported by a node with a defect (or learned from a registry that had one), isn't passed on. Before, the registry
+// announced it, and no node that met the object afterwards could bind it: with its owner among them, nobody simulated
+// the object anymore (found by the campaigns with a node that misbehaves).
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] A schema hash that isn't the object's isn't passed on") {
+	MeshWorld world(4, false);
+	world.network.connect_peers(1, 2);
+	world.network.connect_peers(1, 3);
+	world.network.connect_peers(2, 3);
+	world.run(2.0);
+	const uint16_t id = world.cores[2].get_net_id(world.crates[2]);
+	REQUIRE(id != 0);
+	REQUIRE(world.cores[2].get_owner(world.crates[2]) == 2);
+	const uint32_t version = world.cores[2].get_version(world.crates[2]);
+
+	// Node 3 reports the crate to the registry with a newer version and a hash that isn't the crate's.
+	TickDataBuffer report;
+	report.begin_write();
+	report.add_uint_bits(TICK_MESSAGE_REGISTRY_REPORT, 8);
+	report.add_uint_bits(world.cores[1].get_roles_term(), 32);
+	report.add_bool(true);
+	report.add_uint_bits(id, 16);
+	report.add_uint_bits(1, 16);
+	report.add_uint_bits(id, 16);
+	report.add_string("crate");
+	report.add_int_bits(2, 32);
+	report.add_uint_bits(version + 1, 32);
+	report.add_uint_bits(world.cores[1].get_frame(), 32);
+	report.add_uint_bits(0x50505050, 32);
+	world.send_raw(3, 1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, report);
+	world.run(1.0);
+	// The registry took the report: the crate has a newer version, and the same owner.
+	CHECK(world.cores[1].get_version(world.crates[1]) > version);
+	CHECK(world.cores[1].get_owner(world.crates[1]) == 2);
+
+	// A node that joins afterwards binds the crate, and follows its owner.
+	world.network.connect_peers(4, 1);
+	world.network.connect_peers(4, 2);
+	world.network.connect_peers(4, 3);
+	world.run(1.5);
+	CHECK(world.cores[4].get_net_id(world.crates[4]) == id);
+	CHECK(world.cores[4].get_owner(world.crates[4]) == 2);
+	CHECK(world.crates[2]->position.x > 5.0);
+	CHECK(Math::abs(world.crates[4]->position.x - world.crates[2]->position.x) < 0.5);
+
+	// A registry that takes over from a view with such a hash doesn't pass it on either: node 2, the next registry,
+	// has the crate, and announces it with the crate's own hash.
+	CHECK(world.cores[1].change_roles(2, 1) == OK);
+	world.run(1.5);
+	for (int i = 1; i <= 4; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 2);
+		CHECK(world.cores[i].get_net_id(world.crates[i]) == id);
+		CHECK(world.cores[i].get_stats().malformed_packets == 0);
+	}
+}
+
+
+// Roles announced for a node that doesn't exist, by a node with a defect. Nobody ever meets the process that holds
+// them, so they could never be told lost, and no node took them: the mesh stayed without a registry and without a
+// clock. A successor takes them once no node around knows who holds them. And the roles a mesh starts with are
+// configured, never announced: a message with "none" as its term is malformed.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] Roles given to a node that isn't in the mesh are taken by a successor") {
+	MeshWorld world(3);
+	world.run(2.0);
+	const uint64_t malformed = world.cores[1].get_stats().malformed_packets;
+	TickDataBuffer no_term;
+	no_term.begin_write();
+	no_term.add_uint_bits(TICK_MESSAGE_ROLES, 8);
+	no_term.add_uint_bits(0, 32);
+	no_term.add_int_bits(3, 32);
+	no_term.add_int_bits(3, 32);
+	no_term.add_uint_bits(0, 32);
+	no_term.add_uint_bits(0, 32);
+	world.send_raw(3, 1, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, no_term);
+	world.run(0.2);
+	CHECK(world.cores[1].get_stats().malformed_packets == malformed + 1);
+	CHECK(world.cores[1].get_settings().registry_peer == 1);
+
+	// The registry and the clock go to node 77, which nobody knows.
+	for (int to = 1; to <= 2; to++) {
+		TickDataBuffer roles;
+		roles.begin_write();
+		roles.add_uint_bits(TICK_MESSAGE_ROLES, 8);
+		roles.add_uint_bits(1, 32);
+		roles.add_int_bits(77, 32);
+		roles.add_int_bits(77, 32);
+		roles.add_uint_bits(0, 32);
+		roles.add_uint_bits(0, 32);
+		world.send_raw(3, to, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, roles);
+	}
+	ERR_PRINT_OFF;
+	world.run(2.0);
+	ERR_PRINT_ON;
+	// The lowest node took them, with the next term.
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_settings().registry_peer == 1);
+		CHECK(world.cores[i].get_settings().clock_master == 1);
+		CHECK(world.cores[i].get_roles_term() == 2);
+	}
+	// Ownership changes through it, and the nodes follow its clock.
+	CHECK(world.cores[3].request_authority(world.crates[3]) == OK);
+	world.run(1.0);
+	for (int i = 1; i <= 3; i++) {
+		CHECK(world.cores[i].get_owner(world.crates[i]) == 3);
+		const int64_t apart = int64_t(world.cores[i].get_frame()) - int64_t(world.cores[1].get_frame());
+		CHECK((apart >= -3 && apart <= 3));
+	}
+	const float before = world.crates[3]->position.x;
+	world.run(1.0);
+	CHECK(world.crates[3]->position.x > before + 3.0);
+	CHECK(Math::abs(world.crates[1]->position.x - world.crates[3]->position.x) < 0.5);
+}
+
+
+// An object's first owner is its controller. One that was in the mesh and left doesn't get the object: it would stay
+// with a node that isn't there, simulated by nobody, and no request for it would ever be answered. The object is an
+// orphan from the start. A controller that never was in the mesh is expected: the object waits for it, but a node
+// that asks for it meanwhile gets it at once.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] An object registered for a node that isn't there doesn't stay with nobody") {
+	MeshWorld world(3);
+	world.run(2.0);
+	// Node 3 leaves; later, the other nodes register an object it would control.
+	world.network.remove_peer(3);
+	world.run(1.0);
+	AuthMover *barrels[3] = {};
+	AuthMover *boxes[3] = {};
+	for (int i = 1; i <= 2; i++) {
+		barrels[i] = memnew(AuthMover("barrel", 3));
+		world.cores[i].register_object(barrels[i]);
+		// And one for node 9, which never was in the mesh.
+		boxes[i] = memnew(AuthMover("box", 9));
+		world.cores[i].register_object(boxes[i]);
+	}
+	world.run(1.0);
+	for (int i = 1; i <= 2; i++) {
+		CHECK(world.cores[i].get_net_id(barrels[i]) != 0);
+		CHECK(world.cores[i].get_owner(barrels[i]) == 0);
+		CHECK(world.cores[i].get_owner(boxes[i]) == 9);
+	}
+	// The first node that asks gets them, without waiting for an owner that can't answer.
+	CHECK(world.cores[2].request_authority(barrels[2]) == OK);
+	CHECK(world.cores[1].request_authority(boxes[1]) == OK);
+	world.run(0.5);
+	for (int i = 1; i <= 2; i++) {
+		CHECK(world.cores[i].get_owner(barrels[i]) == 2);
+		CHECK(world.cores[i].get_owner(boxes[i]) == 1);
+		CHECK(world.listeners[i].denied == 0);
+	}
+	const float before = barrels[2]->position.x;
+	world.run(1.0);
+	CHECK(barrels[2]->position.x > before + 3.0);
+	CHECK(Math::abs(barrels[1]->position.x - barrels[2]->position.x) < 0.5);
+	CHECK(boxes[1]->position.x > 3.0);
+
+	// An object the project assigns away from an owner that isn't there goes at once too.
+	AuthMover *jars[3] = {};
+	for (int i = 1; i <= 2; i++) {
+		jars[i] = memnew(AuthMover("jar", 9));
+		world.cores[i].register_object(jars[i]);
+	}
+	world.run(0.5);
+	CHECK(world.cores[1].assign_authority(jars[1], 2) == OK);
+	world.run(0.5);
+	CHECK(world.cores[2].get_owner(jars[2]) == 2);
+
+	for (int i = 1; i <= 2; i++) {
+		world.cores[i].unregister_object(barrels[i]);
+		world.cores[i].unregister_object(boxes[i]);
+		world.cores[i].unregister_object(jars[i]);
+		memdelete(barrels[i]);
+		memdelete(boxes[i]);
+		memdelete(jars[i]);
+	}
+}
+
 } // namespace TestTickMeshCore
