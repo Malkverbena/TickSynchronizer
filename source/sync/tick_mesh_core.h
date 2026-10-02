@@ -19,7 +19,10 @@
 //
 // Meant for trusted networks of servers: there's no prediction, and forwarded events carry their origin (ADR-044). What
 // a node believes of the others is still bounded where a wrong value would stop the mesh (ADR-079): every release gets
-// an answer, terms and versions are serial numbers, and clocks and frames no running mesh has are refused.
+// an answer, terms and versions are serial numbers, and clocks and frames no running mesh has are refused. And what a
+// node told the others doesn't hold the mesh once it's gone (ADR-081): the registry's own object is the reference for
+// the schema of a path, a role of a process nobody knows is vacant when its node isn't in the mesh, and an object whose
+// owner isn't in the mesh goes to whoever asks for it.
 
 #pragma once
 

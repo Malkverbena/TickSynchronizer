@@ -9,7 +9,8 @@
 //
 // The two campaigns where a node of a distributed mesh misbehaves check what is left once that node is gone: the others
 // must agree again, the registry must answer, and every owner must simulate and be followed. While the node is there,
-// the mesh trusts it (ADR-013): the campaigns don't check what it does to the others meanwhile.
+// the mesh trusts it (a distributed mesh is for servers on a network that is trusted): the campaigns don't check what
+// it does to the others meanwhile.
 //
 // The helpers, some of them used by the other test files: `TapTransport` records what an engine sends; `Fuzzer` makes
 // the random choices and the mutations, the same for a given seed; `FuzzBody` is a body with one variable of every kind
