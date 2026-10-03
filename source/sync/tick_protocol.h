@@ -11,7 +11,9 @@
 // 3: the roles of a distributed mesh move (`ROLES`, `REGISTRY_REPORT`, the roles in the mesh hello; ADR-073).
 // 4: role candidates, confirmed losses and inherited spawns in a distributed mesh (`ROLE_STATUS`, the process and the
 //    candidates in the mesh hello, who spawned in `SPAWN`; ADR-074).
-static constexpr uint16_t TICK_PROTOCOL_VERSION = 4;
+// 5: a node's registry report carries the adopted spawns it knows, so a registry that takes over as a fresh process
+//    learns them too (`REGISTRY_REPORT` now has a spawn section; ADR-082).
+static constexpr uint16_t TICK_PROTOCOL_VERSION = 5;
 
 // Frame index meaning "none".
 static constexpr uint32_t TICK_FRAME_NONE = UINT32_MAX;

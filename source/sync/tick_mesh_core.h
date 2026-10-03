@@ -427,6 +427,11 @@ private:
 	void send_spawn(int p_peer, uint32_t p_spawn_id);
 
 
+	// Whether this node knows a spawn whose origin left, now the registry's (ADR-082): it reports these to a registry,
+	// so one that takes over as a fresh process learns them.
+	bool has_adopted_spawns() const;
+
+
 	// Clock master: the local time of frame 0 of its timeline, from the frame it's at now.
 	int64_t compute_epoch() const;
 

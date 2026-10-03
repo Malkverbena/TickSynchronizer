@@ -1082,6 +1082,72 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] The spawns of a node that left 
 }
 
 
+// The spawn of a node that left reaches a registry that takes over as a fresh process: the nodes that stayed report
+// their adopted spawns, so the new registry learns the spawn even without having had the record, and owns it, hands it
+// to late nodes and can remove it (ADR-082). Without the fix the restarted registry never hears of the spawn.
+TEST_CASE("[Modules][TickSynchronizer][MeshCore] An adopted spawn reaches a registry that takes over empty") {
+	// Only node 1 may have the roles, so node 1 is the registry that later restarts.
+	Vector<int> candidates;
+	candidates.push_back(1);
+	MeshWorld world(4, false, candidates);
+	world.network.connect_peers(1, 2);
+	world.network.connect_peers(1, 3);
+	world.network.connect_peers(2, 3);
+	world.run(1.5);
+
+	// Node 3 spawns a body; node 1 (the registry) and node 2 make theirs.
+	AuthMover *rock = memnew(AuthMover("Spawner/Rock", 3));
+	const uint32_t spawn_id = world.cores[3].spawn("Spawner", 0, "Rock", 3, Variant());
+	world.cores[3].register_object(rock);
+	world.run(1.0);
+	REQUIRE(world.listeners[1].spawned.size() == 1);
+	REQUIRE(world.listeners[2].spawned.size() == 1);
+
+	// Node 3 leaves: the registry (node 1) and node 2 mark the spawn as the registry's.
+	world.cores[3].unregister_object(rock);
+	memdelete(rock);
+	world.network.remove_peer(3);
+	world.run(1.0);
+	REQUIRE(world.cores[1].owns_spawn(spawn_id));
+	REQUIRE_FALSE(world.cores[2].owns_spawn(spawn_id));
+
+	// Node 1's machine is gone; node 2 can't take the roles (not a candidate), so they wait for node 1.
+	world.isolate(1);
+	world.cores[1].stop();
+	world.run(1.0);
+	CHECK(world.cores[2].get_settings().registry_peer == 1);
+
+	// Node 1 restarts as an empty process and takes the registry again: it learns the adopted spawn from node 2.
+	RestartedNode fresh(world, 1);
+	world.reconnect(1);
+	world.run(2.0);
+	CHECK(fresh.core.get_settings().registry_peer == 1);
+	CHECK(fresh.core.get_roles_term() == 1);
+	CHECK(fresh.core.owns_spawn(spawn_id));
+	REQUIRE(fresh.listener.spawned.size() == 1);
+
+	// A node that joins later gets the spawn from the restarted registry.
+	world.network.connect_peers(4, 1);
+	world.network.connect_peers(4, 2);
+	world.run(1.5);
+	REQUIRE(world.listeners[4].spawned.size() == 1);
+	CHECK_FALSE(world.cores[4].owns_spawn(spawn_id));
+
+	// And the restarted registry removes it for every node.
+	fresh.core.despawn(spawn_id);
+	world.run(0.5);
+	CHECK(world.listeners[2].despawned == 1);
+	CHECK(world.listeners[4].despawned == 1);
+	CHECK_FALSE(fresh.core.owns_spawn(spawn_id));
+	CHECK(fresh.core.get_stats().malformed_packets == 0);
+	for (int i = 2; i <= 4; i++) {
+		if (i != 3) {
+			CHECK(world.cores[i].get_stats().malformed_packets == 0);
+		}
+	}
+}
+
+
 // A release sent to a registry that is still taking over carries the version the object had before the takeover, and
 // the registry announces every object again, with another version, once it finishes: the release is still taken,
 // instead of leaving the object frozen with nobody simulating it.
@@ -1336,7 +1402,8 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] Versions and owners that can't 
 	report.add_uint_bits(world.cores[1].get_roles_term(), 32);
 	report.add_bool(true);
 	report.add_uint_bits(id, 16);
-	report.add_uint_bits(1, 16);
+	report.add_uint_bits(1, 16); // One object,
+	report.add_uint_bits(0, 16); // no adopted spawns (ADR-082).
 	report.add_uint_bits(id, 16);
 	report.add_string("crate");
 	report.add_int_bits(3, 32);
@@ -1446,7 +1513,8 @@ TEST_CASE("[Modules][TickSynchronizer][MeshCore] A schema hash that isn't the ob
 	report.add_uint_bits(world.cores[1].get_roles_term(), 32);
 	report.add_bool(true);
 	report.add_uint_bits(id, 16);
-	report.add_uint_bits(1, 16);
+	report.add_uint_bits(1, 16); // One object,
+	report.add_uint_bits(0, 16); // no adopted spawns (ADR-082).
 	report.add_uint_bits(id, 16);
 	report.add_string("crate");
 	report.add_int_bits(2, 32);
