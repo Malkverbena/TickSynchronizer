@@ -2323,7 +2323,9 @@ void TickMeshCore::registry_resume() {
 }
 
 
-// Sends this node's view of the objects to the registry, in as many messages as it takes.
+// Sends this node's view of the objects to the registry, and the adopted spawns it knows (ADR-082), in as many
+// messages as it takes. Each message carries its objects before its spawns; a registry that takes over as a fresh
+// process merges the spawns, so the ones of the nodes that left aren't lost with the previous registry.
 void TickMeshCore::send_registry_report() {
 	const int registry_node = settings.registry_peer;
 	if (registry_node == local_id || !is_registry_reachable()) {
@@ -2337,23 +2339,45 @@ void TickMeshCore::send_registry_report() {
 		ids.push_back(E.key);
 	}
 	ids.sort();
+	// The adopted spawns, in the order they were known: the registry merges them like it does the objects.
+	LocalVector<uint32_t> adopted;
+	for (const uint32_t spawn_id : spawn_order) {
+		if (spawns[spawn_id].adopted) {
+			adopted.push_back(spawn_id);
+		}
+	}
+	const uint32_t total = ids.size() + adopted.size();
 	TickDataBuffer body;
 	body.begin_write();
-	int count = 0;
-	for (uint32_t i = 0; i <= ids.size(); i++) {
-		const bool last = i == ids.size();
+	int object_count = 0;
+	int spawn_count = 0;
+	for (uint32_t i = 0; i <= total; i++) {
+		const bool last = i == total;
+		// Objects first, then the adopted spawns: within a message the objects always come before the spawns.
+		const bool is_spawn = !last && i >= ids.size();
 		TickDataBuffer part;
 		if (!last) {
-			const Entry &entry = entries[ids[i]];
 			part.begin_write();
-			part.add_uint_bits(ids[i], 16);
-			part.add_string(entry.path);
-			part.add_int_bits(entry.owner, 32);
-			part.add_uint_bits(entry.version, 32);
-			part.add_uint_bits(entry.frame, 32);
-			part.add_uint_bits(entry.schema_hash, 32);
+			if (is_spawn) {
+				const uint32_t spawn_id = adopted[i - ids.size()];
+				const SpawnRecord &record = spawns[spawn_id];
+				part.add_uint_bits(spawn_id, 32);
+				part.add_string(record.spawner);
+				part.add_int_bits(record.scene, 16);
+				part.add_string(record.name);
+				part.add_int_bits(record.controller, 32);
+				TickCodec::variant()->encode(record.data, part);
+			} else {
+				const Entry &entry = entries[ids[i]];
+				part.add_uint_bits(ids[i], 16);
+				part.add_string(entry.path);
+				part.add_int_bits(entry.owner, 32);
+				part.add_uint_bits(entry.version, 32);
+				part.add_uint_bits(entry.frame, 32);
+				part.add_uint_bits(entry.schema_hash, 32);
+			}
 		}
-		const bool too_big = !last && count > 0 && (body.total_size() + part.total_size() + 128) / 8 > max_bytes;
+		const bool too_big = !last && (object_count + spawn_count) > 0 && (body.total_size() + part.total_size() + 128) / 8 > max_bytes;
 		if (last || too_big) {
 			TickDataBuffer message;
 			message.begin_write();
@@ -2361,33 +2385,40 @@ void TickMeshCore::send_registry_report() {
 			message.add_uint_bits(roles_term, 32);
 			message.add_bool(last);
 			message.add_uint_bits(highest_net_id, 16);
-			message.add_uint_bits(uint64_t(count), 16);
-			if (count > 0) {
+			message.add_uint_bits(uint64_t(object_count), 16);
+			message.add_uint_bits(uint64_t(spawn_count), 16);
+			if (object_count + spawn_count > 0) {
 				body.begin_read();
 				body.slice(message, 0, body.total_size());
 			}
 			send(registry_node, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
 			body.begin_write();
-			count = 0;
+			object_count = 0;
+			spawn_count = 0;
 		}
 		if (!last) {
 			part.begin_read();
 			part.slice(body, 0, part.total_size());
-			count++;
+			if (is_spawn) {
+				spawn_count++;
+			} else {
+				object_count++;
+			}
 		}
 	}
 }
 
 
-// Sends this node's view of the objects to a registry it reaches and didn't report to yet, so the registry learns
-// what only this node knows (the registry answers a late report with its own view), then claims the objects of this
-// node that have no id. A node that knows no object has nothing to report.
+// Sends this node's view of the objects, and the adopted spawns it knows, to a registry it reaches and didn't report
+// to yet, so the registry learns what only this node knows (the registry answers a late report with its own view),
+// then claims the objects of this node that have no id. A node that knows no object and no adopted spawn has nothing
+// to report.
 void TickMeshCore::sync_with_registry() {
 	if (is_registry() || !is_registry_reachable()) {
 		return;
 	}
 	if (reported_epoch != registry_epoch) {
-		if (entries.is_empty()) {
+		if (entries.is_empty() && !has_adopted_spawns()) {
 			reported_epoch = registry_epoch;
 		} else {
 			send_registry_report();
@@ -2404,6 +2435,7 @@ void TickMeshCore::handle_registry_report(int p_peer, TickDataBuffer &p_message)
 	const bool last = p_message.read_bool();
 	const uint16_t highest = uint16_t(p_message.read_uint_bits(16));
 	const int count = int(p_message.read_uint_bits(16));
+	const int spawn_count = int(p_message.read_uint_bits(16));
 	if (p_message.is_buffer_failed()) {
 		stats.malformed_packets++;
 		return;
@@ -2469,6 +2501,44 @@ void TickMeshCore::handle_registry_report(int p_peer, TickDataBuffer &p_message)
 			}
 			const bool gone = owner > 0 && !is_peer_ready(owner);
 			registry_change_owner(id, gone ? 0 : owner, frame, nullptr);
+		}
+	}
+	// The adopted spawns the node reported (ADR-082). While taking over, a fresh registry learns the ones it doesn't
+	// know, so the spawns of the nodes that left aren't lost with the previous registry; `registry_finish_take_over()`
+	// then re-sends them to every node. After taking over it doesn't learn new ones here (a straggler that missed a
+	// despawn would report it back), but still reads them to leave the message well-formed.
+	for (int i = 0; i < spawn_count; i++) {
+		const uint32_t spawn_id = uint32_t(p_message.read_uint_bits(32));
+		const String spawner = p_message.read_string();
+		const int scene = int(p_message.read_int_bits(16));
+		const String name = p_message.read_string();
+		const int controller = int(p_message.read_int_bits(32));
+		const Variant data = TickCodec::variant()->decode(p_message);
+		if (p_message.is_buffer_failed() || spawn_id == 0 || name.is_empty()) {
+			stats.malformed_packets++;
+			return;
+		}
+		if (late) {
+			continue;
+		}
+		SpawnRecord *known = spawns.getptr(spawn_id);
+		if (known) {
+			known->adopted = true;
+			continue;
+		}
+		SpawnRecord record;
+		record.spawner = spawner;
+		record.scene = scene;
+		record.name = name;
+		record.controller = controller;
+		record.data = data;
+		record.origin = int(spawn_id >> 20);
+		record.adopted = true;
+		spawns.insert(spawn_id, record);
+		spawn_order.push_back(spawn_id);
+		stats.spawns++;
+		if (listener) {
+			listener->on_spawn(spawner, spawn_id, scene, name, controller, data);
 		}
 	}
 	if (!last) {
@@ -2622,6 +2692,17 @@ void TickMeshCore::send_spawn(int p_peer, uint32_t p_spawn_id) {
 	TickCodec::variant()->encode(record.data, message);
 	message.add_bool(record.adopted);
 	send(p_peer, TICK_CHANNEL_CONTROL, TickTransport::TRANSFER_MODE_RELIABLE, message);
+}
+
+
+// Whether this node knows a spawn whose origin left, now the registry's (ADR-082).
+bool TickMeshCore::has_adopted_spawns() const {
+	for (const KeyValue<uint32_t, SpawnRecord> &E : spawns) {
+		if (E.value.adopted) {
+			return true;
+		}
+	}
+	return false;
 }
 
 
