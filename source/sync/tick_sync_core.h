@@ -179,6 +179,9 @@ private:
 	// Server: what it knows about a client.
 	struct PeerState {
 		bool accepted = false;
+		// The game got `on_peer_ready()` for this client, so it gets `on_peer_left()` once when the client leaves
+		// `peers`, whatever the reason. Unlike `accepted`, it stays set when the client is rejected after the handshake.
+		bool announced = false;
 		uint64_t reject_usec = 0;
 		bool rejected = false;
 		uint32_t acked_snapshot = TICK_FRAME_NONE;

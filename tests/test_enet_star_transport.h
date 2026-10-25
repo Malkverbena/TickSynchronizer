@@ -1,5 +1,5 @@
 // Tests of `EnetStarTransport` over real sockets on the loopback interface: a server and a client connect and exchange
-// packets on every channel, with compression and with DTLS.
+// packets on every channel, with compression and with DTLS; a client the server disconnects is reported once.
 
 #pragma once
 
@@ -104,6 +104,44 @@ TEST_CASE("[Modules][TickSynchronizer][EnetStarTransport] Loopback with DTLS") {
 	// The DTLS overhead is subtracted from the payload size.
 	CHECK(client->get_max_payload_size() < 1350);
 	exchange_packets(server, client);
+}
+
+
+// Connects a client to a server, then the server disconnects it, through the transport or, with `p_direct`, through
+// its `SceneMultiplayer` as a game may do; returns how many disconnections of the client the server's transport
+// reported.
+inline int count_disconnections(int p_port, bool p_direct) {
+	Ref<EnetStarTransport> server = EnetStarTransport::create_server(p_port, 4, EnetStarTransport::COMPRESSION_NONE);
+	REQUIRE(server.is_valid());
+	Ref<EnetStarTransport> client = EnetStarTransport::create_client("127.0.0.1", p_port, EnetStarTransport::COMPRESSION_NONE);
+	REQUIRE(client.is_valid());
+	exchange_packets(server, client);
+
+	const int client_id = client->get_local_peer_id();
+	if (p_direct) {
+		server->get_multiplayer()->disconnect_peer(client_id);
+	} else {
+		server->disconnect_peer(client_id);
+	}
+	CHECK_FALSE(server->is_peer_connected(client_id));
+	poll_both(server, client, 300);
+
+	int disconnections = 0;
+	TickTransport::Event event;
+	while (server->pop_event(event)) {
+		disconnections += (event.type == TickTransport::EVENT_PEER_DISCONNECTED && event.peer == client_id) ? 1 : 0;
+	}
+	return disconnections;
+}
+
+
+// `SceneMultiplayer::disconnect_peer()` doesn't signal `peer_disconnected`, so the engines never heard of a client the
+// server disconnected, and kept it until it was dropped for acknowledging nothing. Now the transport reports it, once,
+// whether the transport or the game disconnected it.
+TEST_CASE("[Modules][TickSynchronizer][EnetStarTransport] A peer the server disconnects is reported once") {
+	const int port = pick_port() + 2;
+	CHECK(count_disconnections(port, false) == 1);
+	CHECK(count_disconnections(port + 1, true) == 1);
 }
 
 } // namespace TestEnetStarTransport

@@ -487,8 +487,21 @@ void TickSyncCore::process(double p_delta, uint64_t p_now_usec) {
 			}
 		}
 		for (const int peer : to_disconnect) {
+			const PeerState *state = peers.getptr(peer);
+			if (state == nullptr) {
+				continue;
+			}
+			// A client rejected after the handshake (it acknowledged nothing for too long) was announced to the game,
+			// which is told it left.
+			const bool was_announced = state->announced;
 			transport->disconnect_peer(peer);
 			peers.erase(peer);
+			if (was_announced && listener) {
+				listener->on_peer_left(peer);
+				if (!is_active()) {
+					return;
+				}
+			}
 		}
 	} else {
 		if (!predicting && welcomed && clock.is_synchronized() && latest_snapshot != TICK_FRAME_NONE) {
@@ -543,9 +556,10 @@ void TickSyncCore::handle_events() {
 					peers.insert(event.peer, state);
 				}
 			} else {
-				const bool was_accepted = peers.has(event.peer) && peers[event.peer].accepted;
+				// Also a client rejected after the handshake that drops before it's disconnected.
+				const bool was_announced = peers.has(event.peer) && peers[event.peer].announced;
 				peers.erase(event.peer);
-				if (was_accepted && listener) {
+				if (was_announced && listener) {
 					listener->on_peer_left(event.peer);
 				}
 			}
@@ -717,6 +731,7 @@ void TickSyncCore::server_accept_peer(int p_peer) {
 			server_register_for_peer(p_peer, peer, net_id);
 		}
 	}
+	peer.announced = true;
 	if (listener) {
 		listener->on_peer_ready(p_peer);
 	}

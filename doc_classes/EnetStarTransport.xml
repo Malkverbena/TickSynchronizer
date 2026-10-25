@@ -7,6 +7,7 @@
 		Sends the messages of a [TickNetwork] with [method SceneMultiplayer.send_bytes], so the game keeps using RPCs and [member SceneMultiplayer.auth_callback] on the same connection. The sender of each packet is the peer identified by the connection, never a value in the packet.
 		[method create_server] and [method create_client] create the ENet peer with the compression mode and, optionally, DTLS encryption. For a custom setup, configure a [SceneMultiplayer] and call [method setup].
 		For debugging, [member simulated_latency], [member simulated_jitter] and [member simulated_packet_loss] degrade the packets sent by this end.
+		[method SceneMultiplayer.disconnect_peer] doesn't emit [signal MultiplayerAPI.peer_disconnected]. A peer disconnected that way, or with [method TickTransport.disconnect_peer], is still reported to the [TickNetwork] as gone, on the next poll, so it emits [signal TickNetwork.peer_left].
 		[codeblock]
 		var transport := EnetStarTransport.create_server(7000, 32)
 		$TickNetwork.start(transport)

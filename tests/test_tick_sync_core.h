@@ -1,6 +1,6 @@
 // Tests of `TickSyncCore` in a star over the simulated network: the handshake and the clock, the prediction of a
 // deterministic simulation, the convergence under loss and jitter, the rewind of a diverged prediction, who may move an
-// object, and peers or schemas that don't match.
+// object, peers or schemas that don't match, and a client that leaves the game exactly once, whatever the reason.
 //
 // The helpers here are used by the other test files too: `TestMover` (a body with an input, implemented in plain C++),
 // `TestListener` (counts what the engine reports) and `TestWorld` (a server and two clients with the same objects on
@@ -98,6 +98,7 @@ public:
 class TestListener : public TickSyncCore::Listener {
 public:
 	int ready_peers = 0;
+	int left_peers = 0;
 	int prediction_started = 0;
 	int rewinds = 0;
 	int spawns = 0;
@@ -107,6 +108,10 @@ public:
 
 	// Counts the peers that became ready.
 	virtual void on_peer_ready(int p_peer) override { ready_peers++; }
+
+
+	// Counts the peers that left.
+	virtual void on_peer_left(int p_peer) override { left_peers++; }
 
 
 	// Counts the times the prediction started.
@@ -195,16 +200,19 @@ struct TestWorld {
 	}
 
 
-	// Simulates `p_seconds` of game frames at 60 FPS, with a slightly irregular frame time.
+	// Simulates `p_seconds` of game frames at 60 FPS, with a slightly irregular frame time. A stopped engine is skipped.
 	void run(double p_seconds) {
 		const int frames = int(p_seconds * 60.0);
+		TickSyncCore *cores[] = { &server, &client_a, &client_b };
 		for (int i = 0; i < frames; i++) {
 			const double delta = (i % 2 == 0) ? 0.016 : 0.0173333;
 			network.process(delta);
 			const uint64_t now = network.get_time_usec();
-			server.process(delta, now);
-			client_a.process(delta, now);
-			client_b.process(delta, now);
+			for (TickSyncCore *core : cores) {
+				if (core->is_running()) {
+					core->process(delta, now);
+				}
+			}
 		}
 	}
 };
@@ -382,6 +390,8 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Incompatible peers and sche
 	Ref<TickLocalTransport> client_transport = network.add_peer();
 
 	TickSyncCore server;
+	TestListener server_listener;
+	server.set_listener(&server_listener);
 	TestMover server_mover("mover", 3, TickCodec::PRECISION_HALF);
 	server.register_object(&server_mover);
 	REQUIRE(server.start(server_transport, 0) == OK);
@@ -422,10 +432,104 @@ TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] Incompatible peers and sche
 	}
 	CHECK(got_reject);
 	CHECK_FALSE(server_transport->is_peer_connected(2));
+	// The game heard only of the compatible client: the rejected peer neither joined nor left.
+	CHECK(server_listener.ready_peers == 1);
+	CHECK(server_listener.left_peers == 0);
 
 	// The compatible client joined, but the object with a different schema isn't synchronized.
 	CHECK(client.is_welcomed());
 	CHECK(client.get_net_id(&client_mover) == 0);
+}
+
+
+// Whether a transport has a rejection among the packets it received; takes them all.
+static bool received_reject(const Ref<TickLocalTransport> &p_transport) {
+	bool got_reject = false;
+	TickTransport::Packet packet;
+	while (p_transport->pop_packet(packet)) {
+		got_reject = got_reject || (!packet.data.is_empty() && packet.data[0] == TICK_MESSAGE_REJECT);
+	}
+	return got_reject;
+}
+
+
+// A client that passed the handshake and then acknowledges no snapshot is rejected and disconnected by the server
+// (ADR-078). The game was told it joined, so it's told it left, once; it used to hear nothing, and kept the client's
+// player forever.
+TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A client dropped for acknowledging nothing leaves the game once") {
+	TestWorld world(20000, 0, 0.0, 0);
+	world.run(3.0);
+	REQUIRE(world.server_listener.ready_peers == 2);
+	CHECK(world.server_listener.left_peers == 0);
+
+	// The client's engine stops: its connection stays, and what it receives is never acknowledged.
+	world.client_b.stop();
+	ERR_PRINT_OFF;
+	bool rejected = false;
+	for (int i = 0; i < 34 * 4 && !rejected; i++) {
+		world.run(0.25);
+		rejected = received_reject(world.client_b_transport);
+	}
+	ERR_PRINT_ON;
+	REQUIRE(rejected);
+	// Rejected, but not yet disconnected: nothing reported until it's gone.
+	CHECK(world.server_transport->is_peer_connected(3));
+	CHECK(world.server_listener.left_peers == 0);
+
+	world.run(2.0);
+	CHECK_FALSE(world.server_transport->is_peer_connected(3));
+	CHECK(world.server_listener.left_peers == 1);
+	// Nothing more comes for it, and the client that plays stays.
+	world.run(2.0);
+	CHECK(world.server_listener.left_peers == 1);
+	CHECK(world.server_transport->is_peer_connected(2));
+	CHECK(world.client_a.is_predicting());
+}
+
+
+// A client rejected for acknowledging nothing whose connection drops before the server disconnects it leaves the game
+// once, through the transport's disconnection instead.
+TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A rejected client that drops before it's disconnected leaves the game once") {
+	TestWorld world(20000, 0, 0.0, 0);
+	world.run(3.0);
+	REQUIRE(world.server_listener.ready_peers == 2);
+
+	world.client_b.stop();
+	ERR_PRINT_OFF;
+	bool rejected = false;
+	for (int i = 0; i < 34 * 4 && !rejected; i++) {
+		world.run(0.25);
+		rejected = received_reject(world.client_b_transport);
+	}
+	ERR_PRINT_ON;
+	REQUIRE(rejected);
+	REQUIRE(world.server_transport->is_peer_connected(3));
+	CHECK(world.server_listener.left_peers == 0);
+
+	world.network.disconnect_peers(1, 3);
+	world.run(3.0);
+	CHECK(world.server_listener.left_peers == 1);
+}
+
+
+// A client whose connection drops leaves the game once, and so does one the game disconnects through the transport.
+TEST_CASE("[Modules][TickSynchronizer][TickSyncCore] A client that drops or is disconnected leaves the game once") {
+	TestWorld world(20000, 0, 0.0, 0);
+	world.run(3.0);
+	REQUIRE(world.server_listener.ready_peers == 2);
+
+	world.network.disconnect_peers(1, 2);
+	world.run(1.0);
+	CHECK(world.server_listener.left_peers == 1);
+	CHECK(world.client_a_listener.left_peers == 1);
+
+	world.server_transport->disconnect_peer(3);
+	world.run(1.0);
+	CHECK(world.server_listener.left_peers == 2);
+
+	// Nothing more, also after the time a silent client would be dropped in.
+	world.run(32.0);
+	CHECK(world.server_listener.left_peers == 2);
 }
 
 } // namespace TestTickSyncCore
