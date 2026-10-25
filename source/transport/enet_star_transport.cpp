@@ -115,6 +115,7 @@ Error EnetStarTransport::setup(const Ref<SceneMultiplayer> &p_multiplayer, bool 
 
 // `SceneMultiplayer` reported a peer: queues its connection for the engines.
 void EnetStarTransport::_on_peer_connected(int p_peer) {
+	known_peers.insert(p_peer);
 	Event event;
 	event.type = EVENT_PEER_CONNECTED;
 	event.peer = p_peer;
@@ -122,12 +123,38 @@ void EnetStarTransport::_on_peer_connected(int p_peer) {
 }
 
 
-// `SceneMultiplayer` reported that a peer left: queues its disconnection for the engines.
+// `SceneMultiplayer` reported that a peer left: queues its disconnection for the engines, once per connection.
 void EnetStarTransport::_on_peer_disconnected(int p_peer) {
+	if (!known_peers.erase(p_peer)) {
+		return;
+	}
 	Event event;
 	event.type = EVENT_PEER_DISCONNECTED;
 	event.peer = p_peer;
 	events.push_back(event);
+}
+
+
+// Queues the disconnection of the known peers `SceneMultiplayer` no longer has (it removed them silently).
+void EnetStarTransport::queue_vanished_peers() {
+	if (multiplayer.is_null() || known_peers.is_empty()) {
+		return;
+	}
+	const Vector<int> current = multiplayer->get_peer_ids();
+	// Every peer `SceneMultiplayer` adds is signaled, so the known peers include the current ones: a peer is missing
+	// only when there are fewer.
+	if (current.size() >= int(known_peers.size())) {
+		return;
+	}
+	LocalVector<int> vanished;
+	for (const int peer : known_peers) {
+		if (!current.has(peer)) {
+			vanished.push_back(peer);
+		}
+	}
+	for (const int peer : vanished) {
+		_on_peer_disconnected(peer);
+	}
 }
 
 
@@ -302,20 +329,24 @@ void EnetStarTransport::flush_simulated(bool p_all) {
 }
 
 
-// `TickTransport`: closes the connection with a peer.
+// `TickTransport`: closes the connection with a peer and queues its disconnection, which `SceneMultiplayer` doesn't
+// signal.
 void EnetStarTransport::disconnect_peer(int p_peer) {
 	ERR_FAIL_COND(multiplayer.is_null());
 	multiplayer->disconnect_peer(p_peer);
+	queue_vanished_peers();
 }
 
 
-// `TickTransport`: sends the delayed packets that are due and, unless the game does it, polls `SceneMultiplayer`.
+// `TickTransport`: sends the delayed packets that are due and, unless the game does it, polls `SceneMultiplayer`;
+// then queues the disconnection of the peers the game removed from `SceneMultiplayer` directly.
 void EnetStarTransport::poll() {
 	ERR_FAIL_COND(multiplayer.is_null());
 	flush_simulated(false);
 	if (poll_multiplayer) {
 		multiplayer->poll();
 	}
+	queue_vanished_peers();
 }
 
 

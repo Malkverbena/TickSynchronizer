@@ -266,6 +266,7 @@
 			<param index="0" name="peer" type="int" />
 			<description>
 				Emitted when a client leaves (on the server) or when the connection with the server is lost (on a client). With [constant AUTHORITY_DISTRIBUTED]: emitted when a node of the mesh leaves.
+				On the server, every client that got [signal peer_ready] gets exactly one [signal peer_left], whatever the reason it leaves: its connection drops, the game disconnects it, or the server drops it after the handshake (an untrusted client that acknowledges no snapshot for 30 seconds). A peer rejected during the handshake never got [signal peer_ready], and gets no [signal peer_left].
 			</description>
 		</signal>
 		<signal name="peer_ready">

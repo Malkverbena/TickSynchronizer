@@ -12,6 +12,7 @@
 
 #include "core/crypto/crypto.h"
 #include "core/math/random_pcg.h"
+#include "core/templates/hash_set.h"
 
 #include "modules/multiplayer/scene_multiplayer.h"
 
@@ -48,6 +49,9 @@ private:
 	bool poll_multiplayer = true;
 	bool encrypted = false;
 
+	// The peers whose connection was queued and whose disconnection wasn't yet. `SceneMultiplayer::disconnect_peer()`
+	// removes a peer without `peer_disconnected`; such a peer is found missing here and its disconnection queued.
+	HashSet<int> known_peers;
 	LocalVector<Event> events;
 	LocalVector<Packet> packets;
 	uint32_t next_event = 0;
@@ -72,6 +76,10 @@ private:
 
 	// `SceneMultiplayer` delivered bytes from a peer: queues them as a packet, unless the queue is full.
 	void _on_peer_packet(int p_peer, const PackedByteArray &p_packet);
+
+
+	// Queues the disconnection of the known peers `SceneMultiplayer` no longer has (it removed them silently).
+	void queue_vanished_peers();
 
 
 	// Sends a packet through `SceneMultiplayer` right away.
@@ -164,11 +172,13 @@ public:
 	virtual Error send(int p_peer, int p_channel, TransferMode p_mode, const uint8_t *p_data, int p_size) override;
 
 
-	// `TickTransport`: closes the connection with a peer.
+	// `TickTransport`: closes the connection with a peer and queues its disconnection, which `SceneMultiplayer` doesn't
+	// signal.
 	virtual void disconnect_peer(int p_peer) override;
 
 
-	// `TickTransport`: sends the delayed packets that are due and, unless the game does it, polls `SceneMultiplayer`.
+	// `TickTransport`: sends the delayed packets that are due and, unless the game does it, polls `SceneMultiplayer`;
+	// then queues the disconnection of the peers the game removed from `SceneMultiplayer` directly.
 	virtual void poll() override;
 
 
